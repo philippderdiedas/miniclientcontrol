@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Playlist</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 1.5rem auto; padding: 0 1rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+    th, td { border-bottom: 1px solid #ddd; padding: .5rem; text-align: left; vertical-align: top; }
+    input, button, select { padding: .35rem; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+    .block { border: 1px solid #ddd; border-radius: 8px; padding: .8rem; margin-bottom: 1rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Playlist Management</h1>
+  <p><a href="/">Home</a> · <a href="/assets.html">Assets</a></p>
+
+  <div class="block">
+    <h3>Add item</h3>
+    <div class="row">
+      <label>Asset
+        <select id="assetSelect"><option value="">(none)</option></select>
+      </label>
+      <label>or URL <input id="urlInput" placeholder="https://..." style="width:260px" /></label>
+      <label>Duration(s) <input id="durationInput" type="number" min="1" value="10" style="width:90px" /></label>
+      <label><input id="enabledInput" type="checkbox" checked /> Enabled</label>
+      <label><input id="keepLoadedInput" type="checkbox" /> Keep loaded (tab)</label>
+      <label>Start <input id="startDateInput" type="datetime-local" style="width:190px" /></label>
+      <label>End <input id="endDateInput" type="datetime-local" style="width:190px" /></label>
+      <label>Scroll mode
+        <select id="modeSelect">
+          <option value="none">None</option>
+          <option value="step">Step</option>
+          <option value="continuous">Continuous</option>
+        </select>
+      </label>
+      <label>Step px <input id="stepPx" type="number" min="1" placeholder="viewport" style="width:100px" /></label>
+      <label>Step time ms <input id="stepTime" type="number" min="1" placeholder="jump if empty" style="width:140px" /></label>
+      <label>Step delay ms <input id="stepDelay" type="number" min="0" value="2000" style="width:120px" /></label>
+      <label>Speed <input id="speed" type="number" min="0" step="0.1" value="2.0" style="width:90px" /></label>
+      <label>Top delay ms <input id="topDelay" type="number" min="0" value="2000" style="width:120px" /></label>
+      <label>Return delay ms <input id="returnDelay" type="number" min="0" value="2000" style="width:130px" /></label>
+      <button id="addBtn">Add</button>
+    </div>
+    <p class="muted">For Step mode: leave Step time empty for instant jumps.</p>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Order</th>
+        <th>Source</th>
+        <th>Duration</th>
+        <th>Enabled</th>
+        <th>Start</th>
+        <th>End</th>
+        <th>Keep loaded</th>
+        <th>Scroll config</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="playlistBody"></tbody>
+  </table>
+
+  <script>
+    function buildScrollConfigFromForm() {
+      const mode = document.getElementById('modeSelect').value;
+      if (mode === 'none') return { type: 'None' };
+
+      if (mode === 'step') {
+        const stepPxRaw = document.getElementById('stepPx').value;
+        const stepTimeRaw = document.getElementById('stepTime').value;
+        const stepDelay = Number(document.getElementById('stepDelay').value || 2000);
+        return {
+          type: 'Step',
+          options: {
+            step_px: stepPxRaw ? Number(stepPxRaw) : null,
+            step_time: stepTimeRaw ? Number(stepTimeRaw) : null,
+            step_delay: stepDelay
+          }
+        };
+      }
+
+      return {
+        type: 'Continuous',
+        options: {
+          speed: Number(document.getElementById('speed').value || 2.0),
+          top_delay: Number(document.getElementById('topDelay').value || 2000),
+          return_delay: Number(document.getElementById('returnDelay').value || 2000)
+        }
+      };
+    }
+
+    function configSummary(cfg) {
+      if (!cfg || cfg.type === 'None') return 'None';
+      if (cfg.type === 'Step') {
+        const o = cfg.options || {};
+        return `Step(px:${o.step_px ?? 'viewport'}, time:${o.step_time ?? 'jump'}, delay:${o.step_delay ?? 2000})`;
+      }
+      const o = cfg.options || {};
+      return `Continuous(speed:${o.speed ?? 2}, top:${o.top_delay ?? 2000}, return:${o.return_delay ?? 2000})`;
+    }
+
+    function formatDateForInput(value) {
+      if (!value) return '';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '';
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function dateInputToIso(value) {
+      if (!value) return null;
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return null;
+      return d.toISOString();
+    }
+
+    async function loadAssetsSelect() {
+      const res = await fetch('/api/assets');
+      const assets = await res.json();
+      const sel = document.getElementById('assetSelect');
+      sel.innerHTML = '<option value="">(none)</option>';
+      for (const a of assets) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.id} - ${a.filename}`;
+        sel.appendChild(opt);
+      }
+    }
+
+    async function loadPlaylist() {
+      const res = await fetch('/api/playlist');
+      const items = await res.json();
+      const body = document.getElementById('playlistBody');
+      body.innerHTML = '';
+
+      for (const item of items) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${item.id}</td>
+          <td><input id="order-${item.id}" type="number" value="${item.play_order}" style="width:80px" /></td>
+          <td>${item.url ? item.url : (item.local_path ? '/uploads/' + item.local_path : '(none)')}</td>
+          <td><input id="dur-${item.id}" type="number" min="1" value="${item.duration ?? item.asset_duration ?? 10}" style="width:90px" /></td>
+          <td><input id="en-${item.id}" type="checkbox" ${(item.enabled ?? item.is_enabled) ? 'checked' : ''} /></td>
+          <td><input id="start-${item.id}" type="datetime-local" value="${formatDateForInput(item.start_date)}" style="width:190px" /></td>
+          <td><input id="end-${item.id}" type="datetime-local" value="${formatDateForInput(item.end_date)}" style="width:190px" /></td>
+          <td><input id="keep-${item.id}" type="checkbox" ${item.keep_loaded ? 'checked' : ''} /></td>
+          <td>${configSummary(item.scroll_config)}</td>
+          <td>
+            <button onclick="saveItem(${item.id})">Save</button>
+            <button onclick="playNow(${item.id})">Play now</button>
+            <button onclick="deleteItem(${item.id})">Delete</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    async function saveItem(id) {
+      const play_order = Number(document.getElementById(`order-${id}`).value);
+      const duration = Number(document.getElementById(`dur-${id}`).value);
+      const enabled = document.getElementById(`en-${id}`).checked;
+      const keep_loaded = document.getElementById(`keep-${id}`).checked;
+      const start_date = dateInputToIso(document.getElementById(`start-${id}`).value);
+      const end_date = dateInputToIso(document.getElementById(`end-${id}`).value);
+      await fetch(`/api/playlist/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ play_order, duration, enabled, keep_loaded, start_date, end_date })
+      });
+      await loadPlaylist();
+    }
+
+    async function playNow(id) {
+      await fetch('/api/control/current', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_id: id })
+      });
+    }
+
+    async function deleteItem(id) {
+      if (!confirm('Delete playlist item?')) return;
+      await fetch(`/api/playlist/${id}`, { method: 'DELETE' });
+      await loadPlaylist();
+    }
+
+    document.getElementById('addBtn').addEventListener('click', async () => {
+      const assetVal = document.getElementById('assetSelect').value;
+      const urlVal = document.getElementById('urlInput').value.trim();
+      const duration = Number(document.getElementById('durationInput').value || 10);
+      const enabled = document.getElementById('enabledInput').checked;
+      const keep_loaded = document.getElementById('keepLoadedInput').checked;
+      const start_date = dateInputToIso(document.getElementById('startDateInput').value);
+      const end_date = dateInputToIso(document.getElementById('endDateInput').value);
+
+      const payload = {
+        asset_id: assetVal ? Number(assetVal) : null,
+        url: urlVal || null,
+        duration,
+        enabled,
+        keep_loaded,
+        start_date,
+        end_date,
+        scroll_config: buildScrollConfigFromForm()
+      };
+
+      await fetch('/api/playlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      document.getElementById('urlInput').value = '';
+      document.getElementById('startDateInput').value = '';
+      document.getElementById('endDateInput').value = '';
+      await loadPlaylist();
+    });
+
+    (async function init() {
+      await loadAssetsSelect();
+      await loadPlaylist();
+    })();
+  </script>
+</body>
+</html>

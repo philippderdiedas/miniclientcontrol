@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF Viewer</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #111; color: #ddd; }
+    #app { min-height: 100vh; }
+    #pages { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0 24px; }
+    canvas { background: #fff; max-width: 100%; height: auto; }
+    #status { position: fixed; top: 8px; left: 8px; z-index: 10; background: rgba(0,0,0,0.65); color: #eee; font: 12px/1.3 sans-serif; padding: 6px 8px; border-radius: 6px; }
+  </style>
+  <script src="/pdf.min.js"></script>
+  <script src="/autoscroll.js"></script>
+</head>
+<body>
+  <div id="app">
+    <div id="status">Loading PDF…</div>
+    <div id="pages"></div>
+  </div>
+  <script>
+    (async () => {
+      const params = new URLSearchParams(window.location.search);
+      const asset = params.get('asset');
+      const mode = (params.get('mode') || 'none').toLowerCase();
+      const speed = Number(params.get('speed') || '120');
+      const topDelay = Number(params.get('top_delay') || 0);
+      const returnDelay = Number(params.get('return_delay') || 0);
+      const stepPx = Number(params.get('step_px') || window.innerHeight);
+      const stepDelay = Number(params.get('step_delay') || 2000);
+      const stepTime = Number(params.get('step_time') || 0);
+
+      const statusEl = document.getElementById('status');
+      const pagesEl = document.getElementById('pages');
+
+      if (!asset) {
+        statusEl.textContent = 'Missing asset parameter';
+        return;
+      }
+
+      const pdfUrl = `/uploads/${asset}`;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+      let pdf;
+      try {
+        pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+      } catch (e) {
+        statusEl.textContent = `Failed to load PDF: ${String(e)}`;
+        return;
+      }
+
+      const renderPage = async (num) => {
+        const page = await pdf.getPage(num);
+        const unscaled = page.getViewport({ scale: 1 });
+        const scale = Math.max(0.5, (window.innerWidth - 24) / unscaled.width);
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({ canvasContext: ctx, viewport }).promise;
+        pagesEl.appendChild(canvas);
+      };
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        await renderPage(i);
+      }
+
+      statusEl.textContent = `Loaded ${pdf.numPages} pages`;
+      setTimeout(() => { statusEl.style.display = 'none'; }, 1500);
+
+      const docEl = document.scrollingElement || document.documentElement || document.body;
+      const maxScroll = () => Math.max(0, docEl.scrollHeight - window.innerHeight);
+      const atBottom = () => window.scrollY >= maxScroll() - 1;
+
+      if (mode === 'none') {
+        if (globalThis.__as) globalThis.__as.disable();
+        return;
+      }
+
+      if (mode === 'step') {
+        const doStep = () => {
+          if (atBottom()) {
+            window.scrollTo({ top: 0, behavior: 'auto' });
+            setTimeout(doStep, stepDelay);
+            return;
+          }
+
+          const target = window.scrollY + (Number.isFinite(stepPx) && stepPx > 0 ? stepPx : window.innerHeight);
+          if (Number.isFinite(stepTime) && stepTime > 0) {
+            window.scrollTo({ top: target, behavior: 'smooth' });
+            setTimeout(() => setTimeout(doStep, stepDelay), stepTime);
+          } else {
+            window.scrollTo({ top: target, behavior: 'auto' });
+            setTimeout(doStep, stepDelay);
+          }
+        };
+
+        setTimeout(doStep, Math.max(250, stepDelay));
+        return;
+      }
+
+      if (!Number.isFinite(speed) || speed <= 0) {
+        return;
+      }
+
+      if (globalThis.__as) {
+        globalThis.__as.setMode('window');
+        globalThis.__as.setSpeed(speed);
+        if (globalThis.__as.setTopDelay) globalThis.__as.setTopDelay(topDelay);
+        if (globalThis.__as.setReturnDelay) globalThis.__as.setReturnDelay(returnDelay);
+        globalThis.__as.enable();
+      }
+
+      window.addEventListener('beforeunload', () => {
+        if (globalThis.__as) globalThis.__as.disable();
+      }, { once: true });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Assets</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #ddd; padding: .5rem; text-align: left; }
+    input, button, select { padding: .4rem; }
+    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+    .muted { color: #666; }
+    a { color: #0a58ca; }
+  </style>
+</head>
+<body>
+  <h1>Asset Management</h1>
+  <p><a href="/">Home</a> · <a href="/playlist.html">Playlist</a></p>
+
+  <div class="row">
+    <input id="fileInput" type="file" multiple />
+    <button id="uploadBtn">Upload</button>
+    <span id="uploadMsg" class="muted"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Filename</th>
+        <th>MIME</th>
+        <th>Preview</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="assetsBody"></tbody>
+  </table>
+
+  <script>
+    async function loadAssets() {
+      const res = await fetch('/api/assets');
+      const items = await res.json();
+      const body = document.getElementById('assetsBody');
+      body.innerHTML = '';
+
+      for (const asset of items) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${asset.id}</td>
+          <td>${asset.filename}</td>
+          <td>${asset.mimetype}</td>
+          <td><a href="/uploads/${asset.local_path}" target="_blank">open</a></td>
+          <td>
+            <button onclick="updateDuration(${asset.id})">Save</button>
+            <button onclick="deleteAsset(${asset.id})">Delete</button>
+          </td>
+        `;
+        body.appendChild(tr);
+      }
+    }
+
+    async function updateDuration(id) {
+      const duration = Number(document.getElementById(`dur-${id}`).value);
+      await fetch(`/api/assets/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ duration })
+      });
+      await loadAssets();
+    }
+
+    async function deleteAsset(id) {
+      if (!confirm('Delete this asset?')) return;
+      await fetch(`/api/assets/${id}`, { method: 'DELETE' });
+      await loadAssets();
+    }
+
+    document.getElementById('uploadBtn').addEventListener('click', async () => {
+      const input = document.getElementById('fileInput');
+      if (!input.files.length) return;
+
+      const fd = new FormData();
+      for (const f of input.files) fd.append('file', f);
+
+      const msg = document.getElementById('uploadMsg');
+      msg.textContent = 'Uploading...';
+      const res = await fetch('/api/assets', { method: 'POST', body: fd });
+      msg.textContent = res.ok ? 'Upload complete' : 'Upload failed';
+      input.value = '';
+      await loadAssets();
+    });
+
+    loadAssets();
+  </script>
+</body>
+</html>
