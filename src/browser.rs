@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
-use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams};
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventAttachedToTarget, SetAutoAttachParams, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::EnableParams as RuntimeEnableParams;
 use chromiumoxide::error::CdpError;
@@ -15,6 +15,11 @@ use urlencoding::encode;
 
 pub async fn browser_loop(state: AppState) {
     info!("Starting browser loop...");
+
+    // play_order of the last item we finished. The playlist is re-fetched whenever it
+    // changes, and without this every edit (or reconnect) restarted playback at item
+    // one — on a device whose playlist is touched regularly, later items never played.
+    let mut resume_after_order: Option<i64> = None;
 
     loop {
         // 1. Launch or Connect to Chrome
@@ -57,7 +62,9 @@ pub async fn browser_loop(state: AppState) {
         let page = match ensure_single_control_page(&mut browser).await {
             Ok(p) => p,
             Err(e) => {
+                // Without the backoff this spins, hammering CDP as fast as it can fail.
                 error!("Failed to initialize control page: {}", e);
+                sleep(Duration::from_secs(2)).await;
                 continue;
             }
         };
@@ -113,11 +120,11 @@ pub async fn browser_loop(state: AppState) {
             // 2. Fetch Playlist
             let playlist = match sqlx::query_as::<_, PlaylistItemWithAsset>(
                 r#"
-                SELECT 
-                                        p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
-                                        p.start_date, p.end_date,
-                    p.keep_loaded,
-                    p.scroll_config,
+                SELECT
+                    p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
+                    p.start_date, p.end_date,
+                    COALESCE(p.keep_loaded, 0) as keep_loaded,
+                    COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
                     a.local_path, a.mimetype, a.duration as asset_duration
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
@@ -154,11 +161,22 @@ pub async fn browser_loop(state: AppState) {
             }
 
             if playlist.is_empty() {
-                if let Err(e) = navigate_page(&page, &empty_playlist_url(state.args.port)).await {
-                    error!("Failed to navigate blank page: {}", e);
-                    if is_connection_lost(&e) {
-                        reconnect_needed = true;
-                        break;
+                // This branch re-runs every 5s while the playlist stays empty. Only
+                // navigate if we are not already on the placeholder, otherwise the
+                // idle screen reloads itself every 5 seconds.
+                let empty_url = empty_playlist_url(state.args.port);
+                let already_showing = match page.url().await {
+                    Ok(Some(current)) => current == empty_url,
+                    _ => false,
+                };
+
+                if !already_showing {
+                    if let Err(e) = navigate_page(&page, &empty_url).await {
+                        error!("Failed to navigate blank page: {}", e);
+                        if is_connection_lost(&e) {
+                            reconnect_needed = true;
+                            break;
+                        }
                     }
                 }
                 // Update state
@@ -173,12 +191,26 @@ pub async fn browser_loop(state: AppState) {
                     _ = state.skip_signal.notified() => {
                         info!("Skip signal received (while empty), reloading playlist...");
                     }
+                    _ = state.playlist_signal.notified() => {
+                        info!("Playlist changed while empty, reloading playlist...");
+                    }
+                    _ = state.override_signal.notified() => {
+                        info!("Override signal received while empty.");
+                    }
                 }
                 continue;
             }
 
             // 3. Iterate Items (index-based; explicit jumps are handled on skip signal)
-            let mut index: usize = 0;
+            // Resume after the last item we finished. Matching on play_order rather
+            // than id means this still works if that item was the thing deleted.
+            let mut index: usize = match resume_after_order.take() {
+                Some(order) => playlist
+                    .iter()
+                    .position(|x| x.play_order > order)
+                    .unwrap_or(0),
+                None => 0,
+            };
 
             while index < playlist.len() {
                 let item = &playlist[index];
@@ -190,9 +222,12 @@ pub async fn browser_loop(state: AppState) {
 
                 let target_url = playlist_target_url(&state, item);
 
-                let duration_secs = item.duration.or(item.asset_duration).unwrap_or(10) as u64;
+                // Clamp before the cast: a negative i64 wraps to a ~584-billion-year
+                // u64 and parks the playlist on this item forever; 0 spins the loop.
+                let duration_secs = crate::handlers::clamp_duration(
+                    item.duration.or(item.asset_duration).unwrap_or(10),
+                ) as u64;
                 let intended_duration = Duration::from_secs(duration_secs);
-                let item_started_at = Instant::now();
 
                 let (active_page, do_navigate) = if item.keep_loaded {
                     if let Some((tab, _)) = keep_loaded_tabs.get(&item.id) {
@@ -259,8 +294,11 @@ pub async fn browser_loop(state: AppState) {
                     debug!("Failed to fetch scroll runtime snapshot: {}", e);
                 }
 
-                let elapsed = item_started_at.elapsed();
-                let mut remaining = intended_duration.checked_sub(elapsed).unwrap_or(Duration::from_secs(0));
+                // The clock starts once the content is actually on screen. Counting
+                // from before navigation meant a slow page (readiness waits up to 12s)
+                // consumed its whole duration loading and flashed past instantly.
+                let item_started_at = Instant::now();
+                let mut remaining = intended_duration;
 
                 let mut skip_requested = false;
                 let mut reload_before_next = false;
@@ -273,6 +311,10 @@ pub async fn browser_loop(state: AppState) {
                         _ = state.skip_signal.notified() => {
                             info!("Skip signal received.");
                             skip_requested = true;
+                            break;
+                        },
+                        _ = state.override_signal.notified() => {
+                            info!("Override signal received, interrupting item.");
                             break;
                         },
                         _ = state.playlist_signal.notified() => {
@@ -306,22 +348,36 @@ pub async fn browser_loop(state: AppState) {
                 }
 
                 if override_active {
+                    // Pick playback back up here once the override is cleared.
+                    resume_after_order = Some(item.play_order);
                     break;
                 }
 
                 if skip_requested {
-                    let target_id = *state.current_item_id.lock().await;
+                    // take() so a jump request is consumed exactly once.
+                    let target_id = state.pending_jump.lock().await.take();
                     if let Some(target_id) = target_id {
-                        if let Some(pos) = playlist.iter().position(|x| x.id == target_id) {
-                            if pos != index {
+                        match playlist.iter().position(|x| x.id == target_id) {
+                            Some(pos) => {
                                 index = pos;
                                 continue;
                             }
+                            None => {
+                                warn!(
+                                    "Play-now target {} is not in the active playlist, reloading",
+                                    target_id
+                                );
+                                break;
+                            }
                         }
                     }
+                    // No explicit target: plain skip to the next item.
                 }
 
                 if reload_before_next {
+                    // The playlist changed under us: re-read it, but carry on from
+                    // where we were instead of jumping back to the first item.
+                    resume_after_order = Some(item.play_order);
                     break;
                 }
 
@@ -400,6 +456,13 @@ async fn run_override_loop(
 
             match current_override {
                 Some(next_override) => {
+                    // The notification that got us here may be the same one that set
+                    // this override in the first place (notify_one leaves a permit).
+                    // Re-navigating on an unchanged override restarts the page for no
+                    // reason, so wait for a real change instead.
+                    if next_override == override_item {
+                        continue;
+                    }
                     if !uses_internal_viewer {
                         stop_scrolling(page).await?;
                     }
@@ -563,24 +626,90 @@ async fn is_playlist_item_active_now(state: &AppState, id: i64) -> bool {
     row.map(|(count,)| count > 0).unwrap_or(false)
 }
 
-fn is_connection_lost(err: &dyn std::error::Error) -> bool {
-    let msg = err.to_string().to_lowercase();
+/// True for `CdpError`s that mean the CDP session itself is gone, as opposed to a
+/// single command failing (a JS exception, a timeout, a missing frame).
+fn cdp_indicates_disconnect(err: &CdpError) -> bool {
+    matches!(
+        err,
+        CdpError::Ws(_)
+            | CdpError::Io(_)
+            | CdpError::ChannelSendError(_)
+            | CdpError::NoResponse
+            | CdpError::LaunchExit(..)
+    )
+}
+
+fn message_indicates_disconnect(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
     msg.contains("receiver is gone")
-        || msg.contains("ws")
+        || msg.contains("websocket")
         || msg.contains("connection reset")
+        || msg.contains("connection closed")
+        || msg.contains("connection aborted")
+        || msg.contains("connection refused")
         || msg.contains("channel closed")
         || msg.contains("broken pipe")
-        || msg.contains("transport")
+}
+
+/// Previously this matched the bare substring "ws", which fires on any message
+/// containing "rows", "answers", "windows", ... and caused constant reconnects.
+fn is_connection_lost(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(cdp) = e.downcast_ref::<CdpError>() {
+            if cdp_indicates_disconnect(cdp) {
+                return true;
+            }
+        }
+        current = e.source();
+    }
+
+    message_indicates_disconnect(&err.to_string())
+}
+
+/// Two URLs that address the same document, i.e. they differ at most in the fragment.
+fn is_same_document(current: &str, target: &str) -> bool {
+    fn without_fragment(u: &str) -> &str {
+        u.split('#').next().unwrap_or(u)
+    }
+    without_fragment(current) == without_fragment(target)
 }
 
 async fn navigate_page(page: &Page, target_url: &str) -> Result<(), CdpError> {
-    let response = match page.execute(NavigateParams::new(target_url)).await {
-        Ok(response) => response,
-        Err(CdpError::Timeout) => {
+    // A `Page.navigate` to the document we are already on is a same-document
+    // navigation. Two things go wrong with it: Chrome's reply is a message
+    // chromiumoxide cannot decode, so the command is never resolved and blocks for
+    // the full 30s CDP request timeout; and even when it lands it does not reload,
+    // so a recurring item would show stale content. Apply the fragment (if any) and
+    // reload instead. This is the normal case for a single-item playlist.
+    if let Ok(Some(current_url)) = page.url().await {
+        if is_same_document(&current_url, target_url) {
+            if current_url != target_url {
+                let literal = serde_json::to_string(target_url)
+                    .unwrap_or_else(|_| "\"about:blank\"".to_string());
+                page.evaluate(format!("location.href = {}", literal)).await?;
+            }
+            page.execute(ReloadParams::builder().ignore_cache(true).build())
+                .await?;
+            return Ok(());
+        }
+    }
+
+    // Cap the wait ourselves: chromiumoxide's own request timeout is 30s, long
+    // enough for one dropped reply to eat several playlist items.
+    let navigate = tokio::time::timeout(
+        Duration::from_secs(20),
+        page.execute(NavigateParams::new(target_url)),
+    )
+    .await;
+
+    let response = match navigate {
+        Ok(Ok(response)) => response,
+        Ok(Err(CdpError::Timeout)) | Err(_) => {
             warn!("Navigate command timed out for '{}', continuing (navigation may still succeed)", target_url);
             return Ok(());
         }
-        Err(e) => return Err(e),
+        Ok(Err(e)) => return Err(e),
     };
     if let Some(err_text) = response.result.error_text {
         if err_text.to_lowercase().contains("timed out") {

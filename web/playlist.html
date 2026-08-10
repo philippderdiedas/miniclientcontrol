@@ -133,30 +133,71 @@
       }
     }
 
+    // Cells are built with DOM calls, not innerHTML: item URLs and uploaded
+    // filenames are attacker-influenced and would otherwise be parsed as markup.
+    function cell(tr, text) {
+      const td = document.createElement('td');
+      if (text !== undefined) td.textContent = text;
+      tr.appendChild(td);
+      return td;
+    }
+
+    function inputCell(tr, id, type, value, width) {
+      const input = document.createElement('input');
+      input.id = id;
+      input.type = type;
+      if (type === 'checkbox') {
+        input.checked = !!value;
+      } else {
+        input.value = value ?? '';
+      }
+      if (type === 'number') input.min = '1';
+      if (width) input.style.width = width;
+      cell(tr).appendChild(input);
+      return input;
+    }
+
     async function loadPlaylist() {
       const res = await fetch('/api/playlist');
       const items = await res.json();
       const body = document.getElementById('playlistBody');
-      body.innerHTML = '';
+      body.textContent = '';
 
       for (const item of items) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${item.id}</td>
-          <td><input id="order-${item.id}" type="number" value="${item.play_order}" style="width:80px" /></td>
-          <td>${item.url ? item.url : (item.local_path ? '/uploads/' + item.local_path : '(none)')}</td>
-          <td><input id="dur-${item.id}" type="number" min="1" value="${item.duration ?? item.asset_duration ?? 10}" style="width:90px" /></td>
-          <td><input id="en-${item.id}" type="checkbox" ${(item.enabled ?? item.is_enabled) ? 'checked' : ''} /></td>
-          <td><input id="start-${item.id}" type="datetime-local" value="${formatDateForInput(item.start_date)}" style="width:190px" /></td>
-          <td><input id="end-${item.id}" type="datetime-local" value="${formatDateForInput(item.end_date)}" style="width:190px" /></td>
-          <td><input id="keep-${item.id}" type="checkbox" ${item.keep_loaded ? 'checked' : ''} /></td>
-          <td>${configSummary(item.scroll_config)}</td>
-          <td>
-            <button onclick="saveItem(${item.id})">Save</button>
-            <button onclick="playNow(${item.id})">Play now</button>
-            <button onclick="deleteItem(${item.id})">Delete</button>
-          </td>
-        `;
+        cell(tr, item.id);
+        inputCell(tr, `order-${item.id}`, 'number', item.play_order, '80px');
+        cell(tr, item.url ? item.url : (item.local_path ? '/uploads/' + item.local_path : '(none)'));
+        inputCell(tr, `dur-${item.id}`, 'number', item.duration ?? item.asset_duration ?? 10, '90px');
+        inputCell(tr, `en-${item.id}`, 'checkbox', item.enabled ?? item.is_enabled);
+        inputCell(tr, `start-${item.id}`, 'datetime-local', formatDateForInput(item.start_date), '190px');
+        inputCell(tr, `end-${item.id}`, 'datetime-local', formatDateForInput(item.end_date), '190px');
+        inputCell(tr, `keep-${item.id}`, 'checkbox', item.keep_loaded);
+
+        // Scroll config was display-only, so it could never be changed after the
+        // item was added. Keep the summary, and let Save re-apply the form values.
+        const cfgCell = cell(tr, configSummary(item.scroll_config));
+        const applyLabel = document.createElement('label');
+        applyLabel.style.display = 'block';
+        applyLabel.className = 'muted';
+        const applyBox = document.createElement('input');
+        applyBox.type = 'checkbox';
+        applyBox.id = `applycfg-${item.id}`;
+        applyLabel.append(applyBox, ' apply form config on save');
+        cfgCell.appendChild(applyLabel);
+
+        const actions = cell(tr);
+        for (const [label, fn] of [
+          ['Save', () => saveItem(item.id)],
+          ['Play now', () => playNow(item.id)],
+          ['Delete', () => deleteItem(item.id)],
+        ]) {
+          const btn = document.createElement('button');
+          btn.textContent = label;
+          btn.addEventListener('click', fn);
+          actions.append(btn, ' ');
+        }
+
         body.appendChild(tr);
       }
     }
@@ -164,14 +205,24 @@
     async function saveItem(id) {
       const play_order = Number(document.getElementById(`order-${id}`).value);
       const duration = Number(document.getElementById(`dur-${id}`).value);
+      if (!Number.isFinite(duration) || duration < 1) {
+        alert('Duration must be at least 1 second.');
+        return;
+      }
       const enabled = document.getElementById(`en-${id}`).checked;
       const keep_loaded = document.getElementById(`keep-${id}`).checked;
       const start_date = dateInputToIso(document.getElementById(`start-${id}`).value);
       const end_date = dateInputToIso(document.getElementById(`end-${id}`).value);
+
+      const payload = { play_order, duration, enabled, keep_loaded, start_date, end_date };
+      if (document.getElementById(`applycfg-${id}`).checked) {
+        payload.scroll_config = buildScrollConfigFromForm();
+      }
+
       await fetch(`/api/playlist/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ play_order, duration, enabled, keep_loaded, start_date, end_date })
+        body: JSON.stringify(payload)
       });
       await loadPlaylist();
     }

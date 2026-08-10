@@ -7,6 +7,7 @@ mod web;
 use anyhow::Result;
 use axum::{
     extract::State,
+    extract::ConnectInfo,
     extract::DefaultBodyLimit,
     http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
@@ -15,7 +16,9 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Notify};
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -34,12 +37,36 @@ struct BasicAuthConfig {
     expected_header: String,
 }
 
+/// Paths the *display* browser fetches. Chromium runs on this device over CDP and
+/// has no way to present credentials, so requiring auth here blanks the signage.
+/// These stay reachable without auth, but only from loopback.
+fn is_display_path(path: &str) -> bool {
+    if path.starts_with("/uploads/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/pdf_viewer.html"
+            | "/pdf.min.js"
+            | "/pdf.worker.min.js"
+            | "/autoscroll.js"
+            | "/no_content.svg"
+            | "/empty_playlist.html"
+            | "/logo.svg"
+    )
+}
+
 async fn basic_auth_middleware(
     State(auth): State<BasicAuthConfig>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    if peer.ip().is_loopback() && is_display_path(request.uri().path()) {
+        return next.run(request).await;
+    }
+
     let authorized = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -69,41 +96,18 @@ async fn main() -> Result<()> {
     }
 
     // 2. Setup Database
+    // `foreign_keys` is OFF by default in SQLite, so ON DELETE CASCADE only works
+    // if we turn it on for every pooled connection.
+    let connect_options = SqliteConnectOptions::from_str(&format!("sqlite:{}", args.database_path))?
+        .create_if_missing(true)
+        .foreign_keys(true);
+
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(format!("sqlite:{}?mode=rwc", args.database_path).as_str())
+        .connect_with(connect_options)
         .await?;
-    
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS assets (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename    TEXT NOT NULL,
-            local_path  TEXT NOT NULL UNIQUE,
-            mimetype    TEXT NOT NULL,
-            duration    INTEGER DEFAULT 10,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-        );"
-    )
-    .execute(&pool)
-    .await?;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS playlist_items (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            asset_id    INTEGER,
-            url         TEXT,
-            play_order  INTEGER NOT NULL,
-            duration    INTEGER,
-            is_enabled  BOOLEAN DEFAULT 1,
-            start_date  TEXT,
-            end_date    TEXT,
-            FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
-        );"
-    )
-    .execute(&pool)
-    .await?;
-    
-    // Run migrations (add new columns)
+    // Schema lives entirely in db::run_migrations so there is a single source of truth.
     db::run_migrations(&pool).await?;
 
     let basic_auth_config = match (&args.basic_auth_user, &args.basic_auth_password) {
@@ -125,6 +129,7 @@ async fn main() -> Result<()> {
         playlist_signal: Arc::new(Notify::new()),
         override_signal: Arc::new(Notify::new()),
         current_item_id: Arc::new(Mutex::new(None)),
+        pending_jump: Arc::new(Mutex::new(None)),
         override_item: Arc::new(Mutex::new(None)),
     };
 
@@ -159,11 +164,16 @@ async fn main() -> Result<()> {
         app
     };
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], args.port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     tracing::info!("Listening on {}", addr);
-    
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // ConnectInfo is required by basic_auth_middleware to recognise loopback peers.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

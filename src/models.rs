@@ -44,12 +44,14 @@ pub struct Asset {
     pub filename: String,
     pub local_path: String,
     pub mimetype: String,
+    #[sqlx(default)]
+    pub duration: Option<i64>,
     pub created_at: Option<String>,
 }
 
 // --- Scroll Models ---
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", content = "options")]
 pub enum ScrollMode {
     None,
@@ -63,7 +65,7 @@ impl Default for ScrollMode {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OverrideItem {
     pub asset_id: Option<i64>,
     pub url: Option<String>,
@@ -72,14 +74,14 @@ pub struct OverrideItem {
     pub scroll_config: ScrollMode,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct StepOptions {
     pub step_time: Option<u64>, // If None jump, else smooth duration in ms
     pub step_px: Option<u64>,   // If None viewport height
     pub step_delay: u64,        // ms wait between steps
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ScrollOptions {
     pub speed: f64,      // pixels per frame (approx 60fps)
     pub top_delay: u64,  // ms to wait at top before scrolling
@@ -141,6 +143,11 @@ pub struct AppState {
     pub skip_signal: Arc<Notify>,
     pub playlist_signal: Arc<Notify>,
     pub override_signal: Arc<Notify>,
+    /// What the browser loop is currently showing. Owned by the loop; the API only reads it.
     pub current_item_id: Arc<Mutex<Option<i64>>>,
+    /// "Play now" request. Written by the API, `take()`n by the loop when it wakes on
+    /// `skip_signal`. Kept separate from `current_item_id`, which the loop overwrites at
+    /// the start of every item and would therefore clobber the request.
+    pub pending_jump: Arc<Mutex<Option<i64>>>,
     pub override_item: Arc<Mutex<Option<OverrideItem>>>,
 }

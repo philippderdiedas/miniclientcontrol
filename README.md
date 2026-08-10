@@ -66,7 +66,14 @@ export BASIC_AUTH_PASSWORD='change-me'
 cargo run --release
 ```
 
-If credentials are enabled, all routes (UI, API, uploads) require authentication.
+If credentials are enabled, the control UI and the API require authentication.
+
+The pages the *display* browser renders are exempt, but **only when requested from
+loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
+`/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html` and `/logo.svg`.
+Chromium is driven over CDP and cannot present credentials, so without this
+exemption enabling Basic Auth leaves the screen showing 401 errors. Anything
+reaching those paths from another host still has to authenticate.
 
 ## Command Line Options
 

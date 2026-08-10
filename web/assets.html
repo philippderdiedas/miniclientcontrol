@@ -30,6 +30,7 @@
         <th>ID</th>
         <th>Filename</th>
         <th>MIME</th>
+        <th>Duration(s)</th>
         <th>Preview</th>
         <th>Actions</th>
       </tr>
@@ -38,30 +39,61 @@
   </table>
 
   <script>
+    // Rows are built with DOM calls rather than innerHTML: filenames come from
+    // uploads and would otherwise be interpreted as markup.
+    function cell(tr, text) {
+      const td = document.createElement('td');
+      if (text !== undefined) td.textContent = text;
+      tr.appendChild(td);
+      return td;
+    }
+
     async function loadAssets() {
       const res = await fetch('/api/assets');
       const items = await res.json();
       const body = document.getElementById('assetsBody');
-      body.innerHTML = '';
+      body.textContent = '';
 
       for (const asset of items) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${asset.id}</td>
-          <td>${asset.filename}</td>
-          <td>${asset.mimetype}</td>
-          <td><a href="/uploads/${asset.local_path}" target="_blank">open</a></td>
-          <td>
-            <button onclick="updateDuration(${asset.id})">Save</button>
-            <button onclick="deleteAsset(${asset.id})">Delete</button>
-          </td>
-        `;
+        cell(tr, asset.id);
+        cell(tr, asset.filename);
+        cell(tr, asset.mimetype);
+
+        const durInput = document.createElement('input');
+        durInput.id = `dur-${asset.id}`;
+        durInput.type = 'number';
+        durInput.min = '1';
+        durInput.value = asset.duration ?? 10;
+        durInput.style.width = '90px';
+        cell(tr).appendChild(durInput);
+
+        const link = document.createElement('a');
+        link.href = `/uploads/${encodeURIComponent(asset.local_path)}`;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'open';
+        cell(tr).appendChild(link);
+
+        const actions = cell(tr);
+        const saveBtn = document.createElement('button');
+        saveBtn.textContent = 'Save';
+        saveBtn.addEventListener('click', () => updateDuration(asset.id));
+        const delBtn = document.createElement('button');
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', () => deleteAsset(asset.id));
+        actions.append(saveBtn, ' ', delBtn);
+
         body.appendChild(tr);
       }
     }
 
     async function updateDuration(id) {
       const duration = Number(document.getElementById(`dur-${id}`).value);
+      if (!Number.isFinite(duration) || duration < 1) {
+        alert('Duration must be at least 1 second.');
+        return;
+      }
       await fetch(`/api/assets/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -81,12 +113,25 @@
       if (!input.files.length) return;
 
       const fd = new FormData();
+      const expected = input.files.length;
       for (const f of input.files) fd.append('file', f);
 
       const msg = document.getElementById('uploadMsg');
       msg.textContent = 'Uploading...';
       const res = await fetch('/api/assets', { method: 'POST', body: fd });
-      msg.textContent = res.ok ? 'Upload complete' : 'Upload failed';
+
+      // The server answers 200 with the list of files it actually stored, so a
+      // partial failure must be reported from the body, not from res.ok.
+      if (!res.ok) {
+        msg.textContent = 'Upload failed';
+      } else {
+        const data = await res.json().catch(() => null);
+        const stored = data && Array.isArray(data.uploaded) ? data.uploaded.length : 0;
+        msg.textContent = stored === expected
+          ? 'Upload complete'
+          : `Upload incomplete: ${stored} of ${expected} stored`;
+      }
+
       input.value = '';
       await loadAssets();
     });

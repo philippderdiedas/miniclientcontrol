@@ -39,8 +39,11 @@
         return;
       }
 
-      const pdfUrl = `/uploads/${asset}`;
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      const pdfUrl = `/uploads/${encodeURIComponent(asset)}`;
+      // Served from our own origin: a signage device is frequently offline, and a
+      // CDN worker made every PDF fail there while working fine on the operator's
+      // machine.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.js';
 
       let pdf;
       try {
@@ -84,6 +87,13 @@
 
       if (mode === 'step') {
         const doStep = () => {
+          // Nothing to scroll (PDF shorter than the viewport): without this the
+          // timer keeps firing scrollTo(0) forever.
+          if (maxScroll() <= 1) {
+            setTimeout(doStep, Math.max(1000, stepDelay));
+            return;
+          }
+
           if (atBottom()) {
             window.scrollTo({ top: 0, behavior: 'auto' });
             setTimeout(doStep, stepDelay);
