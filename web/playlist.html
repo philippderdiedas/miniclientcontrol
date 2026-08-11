@@ -5,107 +5,283 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Playlist</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 1.5rem auto; padding: 0 1rem; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-    th, td { border-bottom: 1px solid #ddd; padding: .5rem; text-align: left; vertical-align: top; }
-    input, button, select { padding: .35rem; }
-    .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-    .block { border: 1px solid #ddd; border-radius: 8px; padding: .8rem; margin-bottom: 1rem; }
-    .muted { color: #666; }
+    :root {
+      --line: #d8d8d8;
+      --muted: #666;
+      --accent: #0b6b3a;
+      --accent-bg: #e8f5ee;
+      --warn: #8a5a00;
+      --warn-bg: #fff5e0;
+      --err: #a11;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 1000px;
+      margin: 0 auto 4rem;
+      padding: 0 1rem;
+      line-height: 1.45;
+    }
+    h1 { margin-bottom: .2rem; }
+    nav { margin: 0 0 1rem; color: var(--muted); }
+    .muted { color: var(--muted); }
+    .err { color: var(--err); }
+
+    /* Status bar stays put while scrolling a long playlist, so "what is on screen
+       right now" is always answerable without scrolling back up. */
+    .statusbar {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: #fff;
+      border-bottom: 1px solid var(--line);
+      padding: .6rem 0;
+      margin-bottom: 1rem;
+      display: flex;
+      gap: .8rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .dot {
+      width: .6rem; height: .6rem; border-radius: 50%;
+      background: var(--accent); display: inline-block; margin-right: .35rem;
+    }
+
+    .block {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      background: #fff;
+    }
+    .block > summary {
+      cursor: pointer;
+      padding: .7rem .9rem;
+      font-weight: 600;
+      user-select: none;
+    }
+    .block .body { padding: 0 .9rem .9rem; }
+
+    .card {
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--line);
+      border-radius: 8px;
+      padding: .8rem .9rem;
+      margin-bottom: .8rem;
+      background: #fff;
+    }
+    .card.active { border-left-color: var(--accent); background: var(--accent-bg); }
+    .card.dirty { border-left-color: var(--warn); background: var(--warn-bg); }
+    .card-head {
+      display: flex; align-items: baseline; gap: .6rem;
+      flex-wrap: wrap; margin-bottom: .5rem;
+    }
+    .card-head .id { font-weight: 700; }
+    .card-head .src {
+      flex: 1 1 20ch; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--muted);
+    }
+    .badge {
+      font-size: .78rem; padding: .1rem .45rem; border-radius: 999px;
+      border: 1px solid currentColor;
+    }
+    .badge.live { color: var(--accent); }
+    .badge.off { color: var(--muted); }
+    .badge.pending { color: var(--warn); }
+
+    .grid {
+      display: flex; gap: .6rem 1rem; flex-wrap: wrap; align-items: flex-end;
+    }
+    label.f { display: flex; flex-direction: column; font-size: .85rem; color: var(--muted); }
+    label.f > span { margin-bottom: .15rem; }
+    label.inline { display: flex; align-items: center; gap: .35rem; font-size: .9rem; color: #222; }
+    input, select, button { padding: .35rem; font: inherit; }
+    input[type=checkbox] { padding: 0; }
+    button { cursor: pointer; border-radius: 5px; border: 1px solid #888; background: #f6f6f6; }
+    button:hover:not(:disabled) { background: #ececec; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    button.primary { border-color: #333; background: #333; color: #fff; }
+    button.primary:hover:not(:disabled) { background: #111; }
+    button.danger { border-color: #b55; color: #a11; }
+    .actions { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin-top: .6rem; }
+    .feedback { font-size: .85rem; }
+    fieldset { border: 1px dashed var(--line); border-radius: 6px; margin: .6rem 0 0; padding: .5rem .7rem; }
+    legend { font-size: .8rem; color: var(--muted); padding: 0 .3rem; }
   </style>
 </head>
 <body>
-  <h1>Playlist Management</h1>
-  <p><a href="/">Home</a> · <a href="/assets.html">Assets</a></p>
+  <h1>Playlist</h1>
+  <nav><a href="/">Home</a> · <a href="/assets.html">Assets</a></nav>
 
-  <div class="block">
-    <h3>Add item</h3>
-    <div class="row">
-      <label>Asset
-        <select id="assetSelect"><option value="">(none)</option></select>
-      </label>
-      <label>or URL <input id="urlInput" placeholder="https://..." style="width:260px" /></label>
-      <label>Duration(s) <input id="durationInput" type="number" min="1" value="10" style="width:90px" /></label>
-      <label><input id="enabledInput" type="checkbox" checked /> Enabled</label>
-      <label><input id="keepLoadedInput" type="checkbox" /> Keep loaded (tab)</label>
-      <label>Start <input id="startDateInput" type="datetime-local" style="width:190px" /></label>
-      <label>End <input id="endDateInput" type="datetime-local" style="width:190px" /></label>
-      <label>Scroll mode
-        <select id="modeSelect">
-          <option value="none">None</option>
-          <option value="step">Step</option>
-          <option value="continuous">Continuous</option>
-        </select>
-      </label>
-      <label>Step px <input id="stepPx" type="number" min="1" placeholder="viewport" style="width:100px" /></label>
-      <label>Step time ms <input id="stepTime" type="number" min="1" placeholder="jump if empty" style="width:140px" /></label>
-      <label>Step delay ms <input id="stepDelay" type="number" min="0" value="2000" style="width:120px" /></label>
-      <label>Speed <input id="speed" type="number" min="0" step="0.1" value="2.0" style="width:90px" /></label>
-      <label>Top delay ms <input id="topDelay" type="number" min="0" value="2000" style="width:120px" /></label>
-      <label>Return delay ms <input id="returnDelay" type="number" min="0" value="2000" style="width:130px" /></label>
-      <button id="addBtn">Add</button>
-    </div>
-    <p class="muted">For Step mode: leave Step time empty for instant jumps.</p>
+  <div class="statusbar">
+    <strong id="nowPlaying">läuft: –</strong>
+    <span id="overrideState" class="muted"></span>
+    <span style="flex:1"></span>
+    <button id="reloadBtn" type="button">Neu laden</button>
   </div>
 
-  <table>
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>Order</th>
-        <th>Source</th>
-        <th>Duration</th>
-        <th>Enabled</th>
-        <th>Start</th>
-        <th>End</th>
-        <th>Keep loaded</th>
-        <th>Scroll config</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody id="playlistBody"></tbody>
-  </table>
+  <details class="block" id="overrideBlock">
+    <summary>Override – ein Inhalt dauerhaft anzeigen</summary>
+    <div class="body">
+      <p class="muted">
+        Der Override hält die Playlist an und zeigt nur diesen Inhalt, bis er beendet wird.
+      </p>
+      <div class="grid">
+        <label class="f"><span>Asset</span>
+          <select id="ovAsset"><option value="">(keins)</option></select>
+        </label>
+        <label class="f"><span>oder URL</span>
+          <input id="ovUrl" placeholder="https://..." style="width:280px" />
+        </label>
+      </div>
+      <div id="ovScroll"></div>
+      <div class="actions">
+        <button type="button" class="primary" id="ovStart">Override starten</button>
+        <button type="button" id="ovStop">Override beenden</button>
+        <span class="feedback" id="ovFeedback"></span>
+      </div>
+    </div>
+  </details>
+
+  <details class="block" id="addBlock">
+    <summary>Item hinzufügen</summary>
+    <div class="body">
+      <div class="grid">
+        <label class="f"><span>Asset</span>
+          <select id="addAsset"><option value="">(keins)</option></select>
+        </label>
+        <label class="f"><span>oder URL</span>
+          <input id="addUrl" placeholder="https://..." style="width:280px" />
+        </label>
+        <label class="f"><span>Dauer (s)</span>
+          <input id="addDuration" type="number" min="1" value="10" style="width:90px" />
+        </label>
+        <label class="inline"><input id="addEnabled" type="checkbox" checked /> Enabled</label>
+        <label class="inline"><input id="addKeep" type="checkbox" /> Keep loaded</label>
+        <label class="f"><span>Start</span>
+          <input id="addStart" type="datetime-local" style="width:200px" />
+        </label>
+        <label class="f"><span>Ende</span>
+          <input id="addEnd" type="datetime-local" style="width:200px" />
+        </label>
+      </div>
+      <div id="addScroll"></div>
+      <div class="actions">
+        <button type="button" class="primary" id="addBtn">Hinzufügen</button>
+        <span class="feedback" id="addFeedback"></span>
+      </div>
+    </div>
+  </details>
+
+  <div id="list"></div>
+  <p class="muted" id="emptyHint" hidden>Noch keine Items.</p>
 
   <script>
-    function buildScrollConfigFromForm() {
-      const mode = document.getElementById('modeSelect').value;
-      if (mode === 'none') return { type: 'None' };
-
-      if (mode === 'step') {
-        const stepPxRaw = document.getElementById('stepPx').value;
-        const stepTimeRaw = document.getElementById('stepTime').value;
-        const stepDelay = Number(document.getElementById('stepDelay').value || 2000);
-        return {
-          type: 'Step',
-          options: {
-            step_px: stepPxRaw ? Number(stepPxRaw) : null,
-            step_time: stepTimeRaw ? Number(stepTimeRaw) : null,
-            step_delay: stepDelay
-          }
-        };
+    // Every node here is built with createElement/textContent. Filenames and URLs are
+    // operator- and upload-supplied, so string-interpolated innerHTML would be an
+    // injection sink.
+    const el = (tag, props = {}, ...children) => {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') node.className = v;
+        else if (k === 'text') node.textContent = v;
+        else if (k === 'style') node.style.cssText = v;
+        else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+        else if (v !== null && v !== undefined && v !== false) node[k] = v;
       }
+      for (const c of children) if (c) node.append(c);
+      return node;
+    };
+
+    const field = (labelText, input) =>
+      el('label', { class: 'f' }, el('span', { text: labelText }), input);
+
+    const num = (value, width, min = 0) =>
+      el('input', { type: 'number', min: String(min), value: value ?? '', style: `width:${width}` });
+
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+      if (!isError) setTimeout(() => { if (node.textContent === message) node.textContent = ''; }, 2500);
+    }
+
+    async function readError(res, fallback) {
+      try {
+        const body = await res.json();
+        if (body && body.error) return body.error;
+      } catch (_) { /* not a JSON error body */ }
+      return fallback;
+    }
+
+    // --- scroll config editor -------------------------------------------------
+    // One builder for the add form, the override form and every card, so the three
+    // stay in sync. Previously a row's scroll config could only be changed by ticking
+    // a per-row box that silently applied the *global* add form's values.
+    function scrollEditor(initial) {
+      const cfg = initial || { type: 'None' };
+      const o = cfg.options || {};
+
+      const mode = el('select', {},
+        el('option', { value: 'none', text: 'None' }),
+        el('option', { value: 'step', text: 'Step' }),
+        el('option', { value: 'continuous', text: 'Continuous' }));
+      mode.value = (cfg.type || 'None').toLowerCase();
+
+      const stepPx = num(o.step_px ?? '', '110px', 1);
+      stepPx.placeholder = 'Viewport';
+      const stepTime = num(o.step_time ?? '', '130px', 1);
+      stepTime.placeholder = 'leer = Sprung';
+      const stepDelay = num(o.step_delay ?? 2000, '110px');
+      const speed = el('input', { type: 'number', min: '0', step: '0.1', value: o.speed ?? 2.0, style: 'width:90px' });
+      const topDelay = num(o.top_delay ?? 2000, '110px');
+      const returnDelay = num(o.return_delay ?? 2000, '120px');
+
+      const stepRow = el('div', { class: 'grid' },
+        field('Step px', stepPx), field('Step time (ms)', stepTime), field('Step delay (ms)', stepDelay));
+      const contRow = el('div', { class: 'grid' },
+        field('Speed (px/frame)', speed), field('Top delay (ms)', topDelay), field('Return delay (ms)', returnDelay));
+
+      const sync = () => {
+        stepRow.hidden = mode.value !== 'step';
+        contRow.hidden = mode.value !== 'continuous';
+      };
+      mode.addEventListener('change', sync);
+      sync();
+
+      const root = el('fieldset', {},
+        el('legend', { text: 'Scroll' }),
+        el('div', { class: 'grid' }, field('Modus', mode)),
+        stepRow, contRow);
 
       return {
-        type: 'Continuous',
-        options: {
-          speed: Number(document.getElementById('speed').value || 2.0),
-          top_delay: Number(document.getElementById('topDelay').value || 2000),
-          return_delay: Number(document.getElementById('returnDelay').value || 2000)
-        }
+        root,
+        onInput(handler) { root.addEventListener('input', handler); root.addEventListener('change', handler); },
+        read() {
+          if (mode.value === 'none') return { type: 'None' };
+          if (mode.value === 'step') {
+            return {
+              type: 'Step',
+              options: {
+                step_px: stepPx.value ? Number(stepPx.value) : null,
+                step_time: stepTime.value ? Number(stepTime.value) : null,
+                step_delay: Number(stepDelay.value || 2000),
+              },
+            };
+          }
+          return {
+            type: 'Continuous',
+            options: {
+              speed: Number(speed.value || 2.0),
+              top_delay: Number(topDelay.value || 2000),
+              return_delay: Number(returnDelay.value || 2000),
+            },
+          };
+        },
       };
     }
 
-    function configSummary(cfg) {
-      if (!cfg || cfg.type === 'None') return 'None';
-      if (cfg.type === 'Step') {
-        const o = cfg.options || {};
-        return `Step(px:${o.step_px ?? 'viewport'}, time:${o.step_time ?? 'jump'}, delay:${o.step_delay ?? 2000})`;
-      }
-      const o = cfg.options || {};
-      return `Continuous(speed:${o.speed ?? 2}, top:${o.top_delay ?? 2000}, return:${o.return_delay ?? 2000})`;
-    }
-
-    function formatDateForInput(value) {
+    // --- date helpers ---------------------------------------------------------
+    function toInputValue(value) {
       if (!value) return '';
       const d = new Date(value);
       if (Number.isNaN(d.getTime())) return '';
@@ -113,169 +289,341 @@
       return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
-    function dateInputToIso(value) {
+    function toIso(value) {
       if (!value) return null;
       const d = new Date(value);
-      if (Number.isNaN(d.getTime())) return null;
-      return d.toISOString();
+      return Number.isNaN(d.getTime()) ? null : d.toISOString();
     }
 
-    async function loadAssetsSelect() {
+    // --- playability ----------------------------------------------------------
+    // Mirrors the browser loop's WHERE clause: is_enabled = 1 and inside the date
+    // window. "Play now" on anything else is a no-op the loop logs and ignores, so the
+    // button says why instead of appearing to do nothing.
+    function playability(item) {
+      if (!(item.enabled ?? item.is_enabled)) return { ok: false, why: 'deaktiviert' };
+      const now = Date.now();
+      if (item.start_date) {
+        const start = new Date(item.start_date).getTime();
+        if (!Number.isNaN(start) && now < start) return { ok: false, why: 'Startdatum liegt in der Zukunft' };
+      }
+      if (item.end_date) {
+        const end = new Date(item.end_date).getTime();
+        if (!Number.isNaN(end) && now > end) return { ok: false, why: 'Enddatum ist vorbei' };
+      }
+      return { ok: true, why: '' };
+    }
+
+    function sourceLabel(item) {
+      if (item.url) return item.url;
+      if (item.local_path) return `Asset #${item.asset_id} – ${item.local_path}`;
+      if (item.asset_id) return `Asset #${item.asset_id} (fehlt!)`;
+      return '(keine Quelle)';
+    }
+
+    // --- state ----------------------------------------------------------------
+    let assets = [];
+    let items = [];
+    let currentItemId = null;
+    const dirty = new Set();      // cards with unsaved edits, kept across reloads
+    const cardNodes = new Map();  // id -> rendered card element
+
+    async function loadAssets() {
       const res = await fetch('/api/assets');
-      const assets = await res.json();
-      const sel = document.getElementById('assetSelect');
-      sel.innerHTML = '<option value="">(none)</option>';
-      for (const a of assets) {
-        const opt = document.createElement('option');
-        opt.value = a.id;
-        opt.textContent = `${a.id} - ${a.filename}`;
-        sel.appendChild(opt);
+      assets = res.ok ? await res.json() : [];
+      for (const sel of [document.getElementById('addAsset'), document.getElementById('ovAsset')]) {
+        const keep = sel.value;
+        sel.textContent = '';
+        sel.append(el('option', { value: '', text: '(keins)' }));
+        for (const a of assets) sel.append(el('option', { value: String(a.id), text: `#${a.id} – ${a.filename}` }));
+        sel.value = keep;
       }
     }
 
-    // Cells are built with DOM calls, not innerHTML: item URLs and uploaded
-    // filenames are attacker-influenced and would otherwise be parsed as markup.
-    function cell(tr, text) {
-      const td = document.createElement('td');
-      if (text !== undefined) td.textContent = text;
-      tr.appendChild(td);
-      return td;
+    function assetSelect(selectedId) {
+      const sel = el('select', {});
+      for (const a of assets) sel.append(el('option', { value: String(a.id), text: `#${a.id} – ${a.filename}` }));
+      if (selectedId !== null && selectedId !== undefined) {
+        sel.value = String(selectedId);
+        // The asset behind this item was deleted: keep it selectable-looking rather
+        // than silently snapping to a different asset on the next save.
+        if (sel.value !== String(selectedId)) {
+          sel.prepend(el('option', { value: String(selectedId), text: `#${selectedId} – (gelöscht)` }));
+          sel.value = String(selectedId);
+        }
+      }
+      return sel;
     }
 
-    function inputCell(tr, id, type, value, width) {
-      const input = document.createElement('input');
-      input.id = id;
-      input.type = type;
-      if (type === 'checkbox') {
-        input.checked = !!value;
-      } else {
-        input.value = value ?? '';
-      }
-      if (type === 'number') input.min = '1';
-      if (width) input.style.width = width;
-      cell(tr).appendChild(input);
-      return input;
+    function buildCard(item, index, total) {
+      const card = el('div', { class: 'card' });
+      card.dataset.id = String(item.id);
+
+      const liveBadge = el('span', { class: 'badge live', text: '▶ läuft' });
+      const stateBadge = el('span', { class: 'badge off' });
+      const dirtyBadge = el('span', { class: 'badge pending', text: 'ungespeichert', hidden: true });
+
+      const head = el('div', { class: 'card-head' },
+        el('span', { class: 'id', text: `#${item.id}` }),
+        el('span', { class: 'src', text: sourceLabel(item), title: sourceLabel(item) }),
+        liveBadge, stateBadge, dirtyBadge);
+      card.append(head);
+
+      // Source: same-kind swap only. A URL item gets a URL input, an asset item an
+      // asset picker. The server rejects the other direction, so the UI never offers it.
+      const isAsset = item.asset_id !== null && item.asset_id !== undefined;
+      const urlInput = isAsset ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
+      const assetPicker = isAsset ? assetSelect(item.asset_id) : null;
+
+      const duration = num(item.duration ?? item.asset_duration ?? 10, '90px', 1);
+      const enabled = el('input', { type: 'checkbox', checked: !!(item.enabled ?? item.is_enabled) });
+      const keep = el('input', { type: 'checkbox', checked: !!item.keep_loaded });
+      const start = el('input', { type: 'datetime-local', value: toInputValue(item.start_date), style: 'width:200px' });
+      const end = el('input', { type: 'datetime-local', value: toInputValue(item.end_date), style: 'width:200px' });
+
+      card.append(el('div', { class: 'grid' },
+        isAsset ? field('Asset', assetPicker) : field('URL', urlInput),
+        field('Dauer (s)', duration),
+        el('label', { class: 'inline' }, enabled, el('span', { text: 'Enabled' })),
+        el('label', { class: 'inline' }, keep, el('span', { text: 'Keep loaded' })),
+        field('Start', start),
+        field('Ende', end)));
+
+      const scroll = scrollEditor(item.scroll_config);
+      card.append(scroll.root);
+
+      const feedback = el('span', { class: 'feedback' });
+      const playBtn = el('button', { type: 'button', text: 'Play now' });
+      const saveBtn = el('button', { type: 'button', class: 'primary', text: 'Speichern' });
+      const upBtn = el('button', { type: 'button', text: '↑', title: 'nach oben', disabled: index === 0 });
+      const downBtn = el('button', { type: 'button', text: '↓', title: 'nach unten', disabled: index === total - 1 });
+      const delBtn = el('button', { type: 'button', class: 'danger', text: 'Löschen' });
+
+      card.append(el('div', { class: 'actions' }, saveBtn, playBtn, upBtn, downBtn, delBtn, feedback));
+
+      const markDirty = () => {
+        dirty.add(item.id);
+        card.classList.add('dirty');
+        dirtyBadge.hidden = false;
+      };
+      card.addEventListener('input', markDirty);
+      card.addEventListener('change', markDirty);
+
+      saveBtn.addEventListener('click', async () => {
+        const durationValue = Number(duration.value);
+        if (!Number.isFinite(durationValue) || durationValue < 1) {
+          flash(feedback, 'Dauer muss mindestens 1 Sekunde sein.', true);
+          return;
+        }
+        const payload = {
+          duration: durationValue,
+          enabled: enabled.checked,
+          keep_loaded: keep.checked,
+          start_date: toIso(start.value),
+          end_date: toIso(end.value),
+          scroll_config: scroll.read(),
+        };
+        if (isAsset) payload.asset_id = Number(assetPicker.value);
+        else payload.url = urlInput.value.trim();
+
+        saveBtn.disabled = true;
+        const res = await fetch(`/api/playlist/${item.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        saveBtn.disabled = false;
+
+        if (!res.ok) {
+          flash(feedback, await readError(res, `Speichern fehlgeschlagen (HTTP ${res.status})`), true);
+          return;
+        }
+        dirty.delete(item.id);
+        card.classList.remove('dirty');
+        dirtyBadge.hidden = true;
+        flash(feedback, 'gespeichert ✓');
+        await loadPlaylist();
+      });
+
+      playBtn.addEventListener('click', async () => {
+        const res = await fetch('/api/control/current', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_id: item.id }),
+        });
+        flash(feedback, res.ok ? 'wird abgespielt…' : 'Play now fehlgeschlagen', !res.ok);
+        setTimeout(refreshStatus, 700);
+      });
+
+      const move = async (direction) => {
+        upBtn.disabled = downBtn.disabled = true;
+        const res = await fetch(`/api/playlist/${item.id}/move`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ direction }),
+        });
+        if (!res.ok) flash(feedback, await readError(res, 'Verschieben fehlgeschlagen'), true);
+        await loadPlaylist();
+      };
+      upBtn.addEventListener('click', () => move('up'));
+      downBtn.addEventListener('click', () => move('down'));
+
+      delBtn.addEventListener('click', async () => {
+        if (!confirm(`Item #${item.id} löschen?`)) return;
+        const res = await fetch(`/api/playlist/${item.id}`, { method: 'DELETE' });
+        if (!res.ok) { flash(feedback, 'Löschen fehlgeschlagen', true); return; }
+        dirty.delete(item.id);
+        await loadPlaylist();
+      });
+
+      card._refresh = () => {
+        const isLive = currentItemId === item.id;
+        card.classList.toggle('active', isLive);
+        liveBadge.hidden = !isLive;
+        const play = playability(item);
+        stateBadge.hidden = play.ok;
+        stateBadge.textContent = play.why;
+        playBtn.disabled = !play.ok;
+        playBtn.title = play.ok ? '' : `Play now hat keine Wirkung: ${play.why}`;
+      };
+      card._refresh();
+      if (dirty.has(item.id)) { card.classList.add('dirty'); dirtyBadge.hidden = false; }
+
+      return card;
     }
 
     async function loadPlaylist() {
       const res = await fetch('/api/playlist');
-      const items = await res.json();
-      const body = document.getElementById('playlistBody');
-      body.textContent = '';
+      items = res.ok ? await res.json() : [];
+      const list = document.getElementById('list');
 
+      // Cards with unsaved edits are carried over instead of re-rendered, so a save or
+      // reorder elsewhere on the page does not silently throw away typed-in values.
+      const reused = new Map();
+      for (const [id, node] of cardNodes) if (dirty.has(id)) reused.set(id, node);
+
+      list.textContent = '';
+      cardNodes.clear();
+      items.forEach((item, i) => {
+        const node = reused.get(item.id) || buildCard(item, i, items.length);
+        cardNodes.set(item.id, node);
+        list.append(node);
+      });
+
+      document.getElementById('emptyHint').hidden = items.length > 0;
+      refreshCards();
+    }
+
+    function refreshCards() {
       for (const item of items) {
-        const tr = document.createElement('tr');
-        cell(tr, item.id);
-        inputCell(tr, `order-${item.id}`, 'number', item.play_order, '80px');
-        cell(tr, item.url ? item.url : (item.local_path ? '/uploads/' + item.local_path : '(none)'));
-        inputCell(tr, `dur-${item.id}`, 'number', item.duration ?? item.asset_duration ?? 10, '90px');
-        inputCell(tr, `en-${item.id}`, 'checkbox', item.enabled ?? item.is_enabled);
-        inputCell(tr, `start-${item.id}`, 'datetime-local', formatDateForInput(item.start_date), '190px');
-        inputCell(tr, `end-${item.id}`, 'datetime-local', formatDateForInput(item.end_date), '190px');
-        inputCell(tr, `keep-${item.id}`, 'checkbox', item.keep_loaded);
+        const node = cardNodes.get(item.id);
+        if (node && node._refresh) node._refresh();
+      }
+    }
 
-        // Scroll config was display-only, so it could never be changed after the
-        // item was added. Keep the summary, and let Save re-apply the form values.
-        const cfgCell = cell(tr, configSummary(item.scroll_config));
-        const applyLabel = document.createElement('label');
-        applyLabel.style.display = 'block';
-        applyLabel.className = 'muted';
-        const applyBox = document.createElement('input');
-        applyBox.type = 'checkbox';
-        applyBox.id = `applycfg-${item.id}`;
-        applyLabel.append(applyBox, ' apply form config on save');
-        cfgCell.appendChild(applyLabel);
+    async function refreshStatus() {
+      try {
+        const [curRes, ovRes] = await Promise.all([
+          fetch('/api/control/current'),
+          fetch('/api/override'),
+        ]);
 
-        const actions = cell(tr);
-        for (const [label, fn] of [
-          ['Save', () => saveItem(item.id)],
-          ['Play now', () => playNow(item.id)],
-          ['Delete', () => deleteItem(item.id)],
-        ]) {
-          const btn = document.createElement('button');
-          btn.textContent = label;
-          btn.addEventListener('click', fn);
-          actions.append(btn, ' ');
+        currentItemId = curRes.ok ? (await curRes.json()).item_id : null;
+        const item = items.find((x) => x.id === currentItemId);
+        document.getElementById('nowPlaying').textContent = currentItemId
+          ? `▶ läuft: #${currentItemId} – ${item ? sourceLabel(item) : '…'}`
+          : 'läuft: –';
+
+        const ov = ovRes.ok ? await ovRes.json() : { active: false };
+        const ovState = document.getElementById('overrideState');
+        ovState.textContent = '';
+        if (ov.active) {
+          ovState.append(el('span', { class: 'dot' }));
+          ovState.append(document.createTextNode(
+            `Override aktiv: ${ov.url || (ov.asset_id ? `Asset #${ov.asset_id}` : '?')} – Playlist pausiert`));
         }
-
-        body.appendChild(tr);
+        refreshCards();
+      } catch (_) {
+        // Polling failure is transient (controller restarting); the next tick retries.
       }
     }
 
-    async function saveItem(id) {
-      const play_order = Number(document.getElementById(`order-${id}`).value);
-      const duration = Number(document.getElementById(`dur-${id}`).value);
-      if (!Number.isFinite(duration) || duration < 1) {
-        alert('Duration must be at least 1 second.');
-        return;
-      }
-      const enabled = document.getElementById(`en-${id}`).checked;
-      const keep_loaded = document.getElementById(`keep-${id}`).checked;
-      const start_date = dateInputToIso(document.getElementById(`start-${id}`).value);
-      const end_date = dateInputToIso(document.getElementById(`end-${id}`).value);
-
-      const payload = { play_order, duration, enabled, keep_loaded, start_date, end_date };
-      if (document.getElementById(`applycfg-${id}`).checked) {
-        payload.scroll_config = buildScrollConfigFromForm();
-      }
-
-      await fetch(`/api/playlist/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      await loadPlaylist();
-    }
-
-    async function playNow(id) {
-      await fetch('/api/control/current', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_id: id })
-      });
-    }
-
-    async function deleteItem(id) {
-      if (!confirm('Delete playlist item?')) return;
-      await fetch(`/api/playlist/${id}`, { method: 'DELETE' });
-      await loadPlaylist();
-    }
+    // --- add form -------------------------------------------------------------
+    const addScroll = scrollEditor(null);
+    document.getElementById('addScroll').append(addScroll.root);
 
     document.getElementById('addBtn').addEventListener('click', async () => {
-      const assetVal = document.getElementById('assetSelect').value;
-      const urlVal = document.getElementById('urlInput').value.trim();
-      const duration = Number(document.getElementById('durationInput').value || 10);
-      const enabled = document.getElementById('enabledInput').checked;
-      const keep_loaded = document.getElementById('keepLoadedInput').checked;
-      const start_date = dateInputToIso(document.getElementById('startDateInput').value);
-      const end_date = dateInputToIso(document.getElementById('endDateInput').value);
+      const feedback = document.getElementById('addFeedback');
+      const assetVal = document.getElementById('addAsset').value;
+      const urlVal = document.getElementById('addUrl').value.trim();
+      if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
+      if (assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
 
       const payload = {
         asset_id: assetVal ? Number(assetVal) : null,
         url: urlVal || null,
-        duration,
-        enabled,
-        keep_loaded,
-        start_date,
-        end_date,
-        scroll_config: buildScrollConfigFromForm()
+        duration: Number(document.getElementById('addDuration').value || 10),
+        enabled: document.getElementById('addEnabled').checked,
+        keep_loaded: document.getElementById('addKeep').checked,
+        start_date: toIso(document.getElementById('addStart').value),
+        end_date: toIso(document.getElementById('addEnd').value),
+        scroll_config: addScroll.read(),
       };
 
-      await fetch('/api/playlist', {
+      const res = await fetch('/api/playlist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
       });
+      if (!res.ok) { flash(feedback, await readError(res, 'Anlegen fehlgeschlagen'), true); return; }
 
-      document.getElementById('urlInput').value = '';
-      document.getElementById('startDateInput').value = '';
-      document.getElementById('endDateInput').value = '';
+      document.getElementById('addUrl').value = '';
+      document.getElementById('addStart').value = '';
+      document.getElementById('addEnd').value = '';
+      flash(feedback, 'hinzugefügt ✓');
       await loadPlaylist();
     });
 
-    (async function init() {
-      await loadAssetsSelect();
+    // --- override -------------------------------------------------------------
+    const ovScroll = scrollEditor(null);
+    document.getElementById('ovScroll').append(ovScroll.root);
+
+    document.getElementById('ovStart').addEventListener('click', async () => {
+      const feedback = document.getElementById('ovFeedback');
+      const assetVal = document.getElementById('ovAsset').value;
+      const urlVal = document.getElementById('ovUrl').value.trim();
+      if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
+
+      const res = await fetch('/api/override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset_id: assetVal ? Number(assetVal) : null,
+          url: urlVal || null,
+          scroll_config: ovScroll.read(),
+        }),
+      });
+      flash(feedback, res.ok ? 'Override aktiv' : await readError(res, 'Override fehlgeschlagen'), !res.ok);
+      await refreshStatus();
+    });
+
+    document.getElementById('ovStop').addEventListener('click', async () => {
+      const feedback = document.getElementById('ovFeedback');
+      const res = await fetch('/api/override', { method: 'DELETE' });
+      flash(feedback, res.ok ? 'Override beendet' : 'Beenden fehlgeschlagen', !res.ok);
+      await refreshStatus();
+    });
+
+    document.getElementById('reloadBtn').addEventListener('click', async () => {
+      await loadAssets();
       await loadPlaylist();
+      await refreshStatus();
+    });
+
+    (async function init() {
+      await loadAssets();
+      await loadPlaylist();
+      await refreshStatus();
+      setInterval(refreshStatus, 2000);
     })();
   </script>
 </body>

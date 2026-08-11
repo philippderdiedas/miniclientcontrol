@@ -55,6 +55,31 @@ pub struct UpdatePlaylistRequest {
     #[serde(default, deserialize_with = "double_option")]
     pub end_date: Option<Option<String>>,
     pub scroll_config: Option<ScrollMode>,
+    /// Replacement URL. Only accepted for items that already are URL-backed.
+    pub url: Option<String>,
+    /// Replacement asset. Only accepted for items that already are asset-backed.
+    pub asset_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct MovePlaylistItemRequest {
+    /// `"up"` or `"down"`.
+    pub direction: String,
+}
+
+#[derive(Serialize)]
+pub struct ApiError {
+    pub error: String,
+}
+
+fn bad_request(message: impl Into<String>) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: message.into(),
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -87,6 +112,16 @@ pub struct SetOverrideRequest {
 #[derive(Serialize)]
 pub struct OverrideResponse {
     pub active: bool,
+}
+
+/// Read model for the override, so the operator UI can show what is pinned instead of
+/// only being able to set and clear it blind.
+#[derive(Serialize)]
+pub struct OverrideStateResponse {
+    pub active: bool,
+    pub asset_id: Option<i64>,
+    pub url: Option<String>,
+    pub scroll_config: Option<ScrollMode>,
 }
 
 // --- Handlers ---
@@ -347,6 +382,93 @@ pub async fn update_playlist_item(
     Path(id): Path<i64>,
     Json(payload): Json<UpdatePlaylistRequest>,
 ) -> impl IntoResponse {
+    // A source edit may only swap like for like: a URL item gets a different URL, an
+    // asset item a different asset. Allowing a kind change would need the other column
+    // cleared in the same write, and `playlist_target_url` silently prefers one column
+    // over the other, so a half-changed row plays the wrong thing with no error.
+    if payload.url.is_some() || payload.asset_id.is_some() {
+        let existing = sqlx::query_as::<_, (Option<i64>, Option<String>)>(
+            "SELECT asset_id, url FROM playlist_items WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await;
+
+        let (existing_asset_id, _existing_url) = match existing {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("playlist item {} does not exist", id),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                error!("Failed to read playlist item {} before source edit: {}", id, e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+
+        let is_asset_item = existing_asset_id.is_some();
+
+        if payload.url.is_some() && is_asset_item {
+            return bad_request(
+                "this item plays an asset; choose a different asset instead of a URL",
+            );
+        }
+        if payload.asset_id.is_some() && !is_asset_item {
+            return bad_request("this item plays a URL; edit the URL instead of choosing an asset");
+        }
+
+        if let Some(raw_url) = payload.url.as_deref() {
+            let trimmed = raw_url.trim();
+            if trimmed.is_empty() {
+                return bad_request("URL must not be empty");
+            }
+            if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+                return bad_request("URL must start with http:// or https://");
+            }
+            if let Err(e) = sqlx::query("UPDATE playlist_items SET url = ? WHERE id = ?")
+                .bind(trimmed)
+                .bind(id)
+                .execute(&state.pool)
+                .await
+            {
+                error!("Failed to update url of playlist item {}: {}", id, e);
+            }
+        }
+
+        if let Some(new_asset_id) = payload.asset_id {
+            // Without this check a typo'd id would be written happily; the LEFT JOIN in
+            // the loop's query then yields NULL local_path and the item shows nothing.
+            let exists = sqlx::query_scalar::<_, i64>("SELECT id FROM assets WHERE id = ?")
+                .bind(new_asset_id)
+                .fetch_optional(&state.pool)
+                .await;
+
+            match exists {
+                Ok(Some(_)) => {
+                    if let Err(e) =
+                        sqlx::query("UPDATE playlist_items SET asset_id = ? WHERE id = ?")
+                            .bind(new_asset_id)
+                            .bind(id)
+                            .execute(&state.pool)
+                            .await
+                    {
+                        error!("Failed to update asset of playlist item {}: {}", id, e);
+                    }
+                }
+                Ok(None) => return bad_request(format!("asset {} does not exist", new_asset_id)),
+                Err(e) => {
+                    error!("Failed to check asset {}: {}", new_asset_id, e);
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+        }
+    }
+
     if let Some(val) = payload.play_order {
         let _ = sqlx::query("UPDATE playlist_items SET play_order = ? WHERE id = ?").bind(val).bind(id).execute(&state.pool).await;
     }
@@ -374,7 +496,94 @@ pub async fn update_playlist_item(
 
     state.playlist_signal.notify_one();
 
-    StatusCode::OK
+    StatusCode::OK.into_response()
+}
+
+/// Move an item one slot up or down and renumber the whole list.
+///
+/// Renumbering rather than swapping two values on purpose: `play_order` is typed by hand
+/// in the UI, so duplicates and gaps accumulate, and a pairwise swap between two rows
+/// that share an order does nothing visible.
+pub async fn move_playlist_item(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<MovePlaylistItemRequest>,
+) -> impl IntoResponse {
+    let up = match payload.direction.as_str() {
+        "up" => true,
+        "down" => false,
+        other => {
+            return bad_request(format!(
+                "direction must be \"up\" or \"down\", got {:?}",
+                other
+            ));
+        }
+    };
+
+    let mut ids = match sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM playlist_items ORDER BY play_order ASC, id ASC",
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to read playlist order: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let Some(pos) = ids.iter().position(|x| *x == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: format!("playlist item {} does not exist", id),
+            }),
+        )
+            .into_response();
+    };
+
+    let neighbour = if up {
+        pos.checked_sub(1)
+    } else if pos + 1 < ids.len() {
+        Some(pos + 1)
+    } else {
+        None
+    };
+
+    // Already at the top or bottom: nothing to do, and not an error worth reporting.
+    let Some(neighbour) = neighbour else {
+        return StatusCode::OK.into_response();
+    };
+
+    ids.swap(pos, neighbour);
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            error!("Failed to open transaction for reorder: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    for (offset, item_id) in ids.iter().enumerate() {
+        if let Err(e) = sqlx::query("UPDATE playlist_items SET play_order = ? WHERE id = ?")
+            .bind(offset as i64 + 1)
+            .bind(item_id)
+            .execute(&mut *tx)
+            .await
+        {
+            error!("Failed to renumber playlist item {}: {}", item_id, e);
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        error!("Failed to commit reorder: {}", e);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    state.playlist_signal.notify_one();
+    StatusCode::OK.into_response()
 }
 
 pub async fn delete_playlist_item(
@@ -416,6 +625,30 @@ pub async fn get_current(State(state): State<AppState>) -> impl IntoResponse {
         *lock
     };
     (StatusCode::OK, Json(CurrentItemResponse { item_id: id }))
+}
+
+pub async fn get_override(State(state): State<AppState>) -> impl IntoResponse {
+    let current = {
+        let lock = state.override_item.lock().await;
+        lock.clone()
+    };
+
+    let body = match current {
+        Some(item) => OverrideStateResponse {
+            active: true,
+            asset_id: item.asset_id,
+            url: item.url,
+            scroll_config: Some(item.scroll_config),
+        },
+        None => OverrideStateResponse {
+            active: false,
+            asset_id: None,
+            url: None,
+            scroll_config: None,
+        },
+    };
+
+    (StatusCode::OK, Json(body))
 }
 
 pub async fn set_override(

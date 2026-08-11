@@ -212,6 +212,28 @@ pub async fn browser_loop(state: AppState) {
                 None => 0,
             };
 
+            // A "Play now" for an item that was added or re-enabled after the previous
+            // playlist fetch cannot be resolved against that older snapshot. Resolve it
+            // here, against the list just read, and clear it only once it has been
+            // checked against a fresh list — consuming it earlier dropped the click and
+            // resumed playback on an unrelated item.
+            {
+                let mut pending = state.pending_jump.lock().await;
+                if let Some(target_id) = *pending {
+                    match playlist.iter().position(|x| x.id == target_id) {
+                        Some(pos) => {
+                            info!("Resolving pending play-now for item {}", target_id);
+                            index = pos;
+                        }
+                        None => warn!(
+                            "Play-now target {} is not in the active playlist, ignoring",
+                            target_id
+                        ),
+                    }
+                    *pending = None;
+                }
+            }
+
             while index < playlist.len() {
                 let item = &playlist[index];
                 // Update current item ID
@@ -354,19 +376,28 @@ pub async fn browser_loop(state: AppState) {
                 }
 
                 if skip_requested {
-                    // take() so a jump request is consumed exactly once.
-                    let target_id = state.pending_jump.lock().await.take();
+                    // Peek instead of take(): if the target is missing from this
+                    // snapshot the playlist is re-read at the top of the loop and the
+                    // jump is resolved there. Consuming it here threw the click away,
+                    // because the snapshot can be a whole item duration out of date.
+                    let target_id = *state.pending_jump.lock().await;
                     if let Some(target_id) = target_id {
                         match playlist.iter().position(|x| x.id == target_id) {
                             Some(pos) => {
+                                *state.pending_jump.lock().await = None;
                                 index = pos;
                                 continue;
                             }
                             None => {
                                 warn!(
-                                    "Play-now target {} is not in the active playlist, reloading",
+                                    "Play-now target {} not in current snapshot, re-reading playlist",
                                     target_id
                                 );
+                                // If the fresh list does not contain it either (disabled
+                                // item, outside its date window), carry on from here
+                                // instead of restarting at the top of the playlist. A
+                                // resolvable jump overrides this below.
+                                resume_after_order = Some(item.play_order);
                                 break;
                             }
                         }

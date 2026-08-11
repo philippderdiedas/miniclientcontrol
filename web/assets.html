@@ -5,22 +5,33 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Assets</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 1.5rem auto; padding: 0 1rem; line-height: 1.45; }
+    h1 { margin-bottom: .2rem; }
+    nav { margin: 0 0 1rem; color: #666; }
     table { width: 100%; border-collapse: collapse; }
-    th, td { border-bottom: 1px solid #ddd; padding: .5rem; text-align: left; }
-    input, button, select { padding: .4rem; }
+    th, td { border-bottom: 1px solid #d8d8d8; padding: .5rem; text-align: left; vertical-align: middle; }
+    th { font-size: .85rem; color: #666; font-weight: 600; }
+    input, button, select { padding: .35rem; font: inherit; }
+    button { cursor: pointer; border-radius: 5px; border: 1px solid #888; background: #f6f6f6; }
+    button:hover:not(:disabled) { background: #ececec; }
+    button.primary { border-color: #333; background: #333; color: #fff; }
+    button.danger { border-color: #b55; color: #a11; }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
     .muted { color: #666; }
+    .err { color: #a11; }
+    .feedback { font-size: .85rem; margin-left: .3rem; }
+    .used { font-size: .85rem; }
     a { color: #0a58ca; }
   </style>
 </head>
 <body>
-  <h1>Asset Management</h1>
-  <p><a href="/">Home</a> · <a href="/playlist.html">Playlist</a></p>
+  <h1>Assets</h1>
+  <nav><a href="/">Home</a> · <a href="/playlist.html">Playlist</a></nav>
 
   <div class="row">
     <input id="fileInput" type="file" multiple />
-    <button id="uploadBtn">Upload</button>
+    <button id="uploadBtn" class="primary">Upload</button>
     <span id="uploadMsg" class="muted"></span>
   </div>
 
@@ -30,9 +41,10 @@
         <th>ID</th>
         <th>Filename</th>
         <th>MIME</th>
-        <th>Duration(s)</th>
-        <th>Preview</th>
-        <th>Actions</th>
+        <th>Dauer (s)</th>
+        <th>In Playlist</th>
+        <th>Vorschau</th>
+        <th>Aktionen</th>
       </tr>
     </thead>
     <tbody id="assetsBody"></tbody>
@@ -48,9 +60,29 @@
       return td;
     }
 
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+      if (!isError) setTimeout(() => { if (node.textContent === message) node.textContent = ''; }, 2500);
+    }
+
     async function loadAssets() {
-      const res = await fetch('/api/assets');
-      const items = await res.json();
+      // The playlist is fetched alongside the assets purely to count usages. Deleting an
+      // asset cascades to its playlist items (ON DELETE CASCADE), and that used to
+      // happen behind a generic confirm dialog with no hint that items would vanish too.
+      const [assetRes, playlistRes] = await Promise.all([
+        fetch('/api/assets'),
+        fetch('/api/playlist'),
+      ]);
+      const items = assetRes.ok ? await assetRes.json() : [];
+      const playlist = playlistRes.ok ? await playlistRes.json() : [];
+
+      const usage = new Map();
+      for (const entry of playlist) {
+        if (entry.asset_id === null || entry.asset_id === undefined) continue;
+        usage.set(entry.asset_id, (usage.get(entry.asset_id) || 0) + 1);
+      }
+
       const body = document.getElementById('assetsBody');
       body.textContent = '';
 
@@ -68,43 +100,58 @@
         durInput.style.width = '90px';
         cell(tr).appendChild(durInput);
 
+        const uses = usage.get(asset.id) || 0;
+        const useCell = cell(tr, uses === 0 ? '–' : `${uses}×`);
+        useCell.className = 'used';
+        if (uses > 0) useCell.title = `${uses} Playlist-Item(s) verwenden dieses Asset`;
+
         const link = document.createElement('a');
         link.href = `/uploads/${encodeURIComponent(asset.local_path)}`;
         link.target = '_blank';
         link.rel = 'noopener';
-        link.textContent = 'open';
+        link.textContent = 'öffnen';
         cell(tr).appendChild(link);
 
         const actions = cell(tr);
+        const feedback = document.createElement('span');
+        feedback.className = 'feedback';
         const saveBtn = document.createElement('button');
-        saveBtn.textContent = 'Save';
-        saveBtn.addEventListener('click', () => updateDuration(asset.id));
+        saveBtn.className = 'primary';
+        saveBtn.textContent = 'Speichern';
+        saveBtn.addEventListener('click', () => updateDuration(asset.id, feedback));
         const delBtn = document.createElement('button');
-        delBtn.textContent = 'Delete';
-        delBtn.addEventListener('click', () => deleteAsset(asset.id));
-        actions.append(saveBtn, ' ', delBtn);
+        delBtn.className = 'danger';
+        delBtn.textContent = 'Löschen';
+        delBtn.addEventListener('click', () => deleteAsset(asset.id, uses, feedback));
+        actions.append(saveBtn, ' ', delBtn, feedback);
 
         body.appendChild(tr);
       }
     }
 
-    async function updateDuration(id) {
+    async function updateDuration(id, feedback) {
       const duration = Number(document.getElementById(`dur-${id}`).value);
       if (!Number.isFinite(duration) || duration < 1) {
-        alert('Duration must be at least 1 second.');
+        flash(feedback, 'Dauer muss mindestens 1 Sekunde sein.', true);
         return;
       }
-      await fetch(`/api/assets/${id}`, {
+      const res = await fetch(`/api/assets/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ duration })
       });
+      if (!res.ok) { flash(feedback, `Speichern fehlgeschlagen (HTTP ${res.status})`, true); return; }
+      flash(feedback, 'gespeichert ✓');
       await loadAssets();
     }
 
-    async function deleteAsset(id) {
-      if (!confirm('Delete this asset?')) return;
-      await fetch(`/api/assets/${id}`, { method: 'DELETE' });
+    async function deleteAsset(id, uses, feedback) {
+      const warning = uses > 0
+        ? `Asset #${id} löschen?\n\nAchtung: ${uses} Playlist-Item(s) verwenden dieses Asset und werden mitgelöscht.`
+        : `Asset #${id} löschen?`;
+      if (!confirm(warning)) return;
+      const res = await fetch(`/api/assets/${id}`, { method: 'DELETE' });
+      if (!res.ok) { flash(feedback, `Löschen fehlgeschlagen (HTTP ${res.status})`, true); return; }
       await loadAssets();
     }
 

@@ -5,17 +5,66 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mini Client Control</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-    .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-    a.button { display: inline-block; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px; text-decoration: none; color: #111; margin-right: .5rem; }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; }
+    h1 { margin-bottom: .2rem; }
+    .card { border: 1px solid #d8d8d8; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    a.button {
+      display: inline-block; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px;
+      text-decoration: none; color: #111; margin-right: .5rem;
+    }
+    a.button:hover { background: #f0f0f0; }
+    .muted { color: #666; }
+    .status { font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>Mini Client Control</h1>
+  <p class="muted">Steuerung für das Display an diesem Gerät.</p>
+
   <div class="card">
-    <p>Choose a management page:</p>
-    <a class="button" href="/assets.html">Asset Management</a>
-    <a class="button" href="/playlist.html">Playlist Management</a>
+    <p class="status" id="status">Status wird geladen…</p>
   </div>
+
+  <div class="card">
+    <a class="button" href="/playlist.html">Playlist</a>
+    <a class="button" href="/assets.html">Assets</a>
+  </div>
+
+  <script>
+    // Same polling contract as the playlist page: report what is on screen right now,
+    // so the landing page answers the first question an operator has.
+    async function refresh() {
+      const status = document.getElementById('status');
+      try {
+        const [curRes, ovRes, plRes] = await Promise.all([
+          fetch('/api/control/current'),
+          fetch('/api/override'),
+          fetch('/api/playlist'),
+        ]);
+        const current = curRes.ok ? (await curRes.json()).item_id : null;
+        const override = ovRes.ok ? await ovRes.json() : { active: false };
+        const playlist = plRes.ok ? await plRes.json() : [];
+
+        if (override.active) {
+          const what = override.url || (override.asset_id ? `Asset #${override.asset_id}` : '?');
+          status.textContent = `Override aktiv: ${what} – Playlist pausiert`;
+          return;
+        }
+        if (!current) {
+          status.textContent = playlist.length ? 'Playlist läuft an…' : 'Playlist ist leer';
+          return;
+        }
+        const item = playlist.find((x) => x.id === current);
+        const source = item ? (item.url || `Asset #${item.asset_id}`) : '…';
+        status.textContent = `▶ läuft: #${current} – ${source}`;
+      } catch (_) {
+        status.textContent = 'Controller nicht erreichbar';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
 </body>
 </html>

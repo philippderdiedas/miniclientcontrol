@@ -145,9 +145,12 @@ pub struct AppState {
     pub override_signal: Arc<Notify>,
     /// What the browser loop is currently showing. Owned by the loop; the API only reads it.
     pub current_item_id: Arc<Mutex<Option<i64>>>,
-    /// "Play now" request. Written by the API, `take()`n by the loop when it wakes on
-    /// `skip_signal`. Kept separate from `current_item_id`, which the loop overwrites at
-    /// the start of every item and would therefore clobber the request.
+    /// "Play now" request. Written by the API; cleared by the loop only once the target
+    /// has been looked up in a freshly fetched playlist. It must survive a lookup miss:
+    /// the loop's playlist snapshot can be a whole item duration stale, so an item added
+    /// or re-enabled since the last fetch is not in it yet. Kept separate from
+    /// `current_item_id`, which the loop overwrites at the start of every item and would
+    /// therefore clobber the request.
     pub pending_jump: Arc<Mutex<Option<i64>>>,
     pub override_item: Arc<Mutex<Option<OverrideItem>>>,
 }

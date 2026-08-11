@@ -27,7 +27,7 @@ use base64::Engine;
 use handlers::{
     list_assets, upload_asset, update_asset, delete_asset,
     get_playlist, add_to_playlist, update_playlist_item, delete_playlist_item,
-    get_current, set_current, set_override, clear_override
+    move_playlist_item, get_current, set_current, get_override, set_override, clear_override
 };
 use browser::browser_loop;
 use web::serve_embedded_ui;
@@ -148,8 +148,12 @@ async fn main() -> Result<()> {
         .route("/api/assets/{id}", put(update_asset).delete(delete_asset)) 
         .route("/api/playlist", get(get_playlist).post(add_to_playlist))
         .route("/api/playlist/{id}", put(update_playlist_item).delete(delete_playlist_item))
+        .route("/api/playlist/{id}/move", axum::routing::post(move_playlist_item))
         .route("/api/control/current", get(get_current).post(set_current))
-        .route("/api/override", axum::routing::post(set_override).delete(clear_override))
+        .route(
+            "/api/override",
+            get(get_override).post(set_override).delete(clear_override),
+        )
         .nest_service("/uploads", serve_dir)
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 

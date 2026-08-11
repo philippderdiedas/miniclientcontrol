@@ -14,7 +14,14 @@ client/display device itself** (typically a Raspberry Pi — note the
    navigating it through the playlist and injecting a scroll runtime.
 
 The controller does **not** launch Chromium. Chromium must already be running with
-`--remote-debugging-port=9222 --kiosk`; the controller *connects* to it.
+`--remote-debugging-port=9222 --kiosk`; the controller *connects* to it. On the Pi
+that launch lives in `~/.config/sway/config`, outside this repo.
+
+Chromium's "translate this page?" bubble must be suppressed with
+`--disable-features=Translate`. The old `--disable-translate` and
+`--disable-infobars` flags are silently ignored by current Chromium (144 on the
+device) — they parse fine and do nothing, so the prompt keeps appearing over the
+signage.
 
 ## Build & run
 
@@ -92,7 +99,17 @@ currently parked, which silently loses "Play now" clicks and override changes.
 `POST /api/control/current` writes `AppState::pending_jump`, **not**
 `current_item_id`. `current_item_id` is loop-owned (it reports what is on screen);
 the loop overwrites it at the top of every item, so a request writing there would
-be clobbered. The loop `take()`s `pending_jump` when it wakes on `skip_signal`.
+be clobbered.
+
+**Never consume `pending_jump` before the target has been looked up in a freshly
+fetched playlist.** The loop's `playlist` snapshot is read once per inner-loop pass
+and then iterated item by item, so it can be a whole item duration out of date — an
+item added or re-enabled since the last fetch is simply not in it. The loop
+therefore *peeks* on `skip_signal`: if the target is in the current snapshot it
+jumps immediately, otherwise it breaks out, re-reads the playlist, and resolves the
+jump against the fresh list before the item loop starts. Only then is it cleared.
+`take()`ing it on the miss path silently dropped the click and resumed playback on
+an unrelated item, which is what "Play now plays something random" was.
 
 ### Scroll runtime
 
@@ -135,9 +152,25 @@ playlist, so one bad row would blank the screen.
 | GET/POST | `/api/assets` | POST is multipart; each field is one file |
 | PUT/DELETE | `/api/assets/{id}` | PUT body `{ duration }` |
 | GET/POST | `/api/playlist` | |
-| PUT/DELETE | `/api/playlist/{id}` | |
+| PUT/DELETE | `/api/playlist/{id}` | PUT also takes `url` / `asset_id`, see below |
+| POST | `/api/playlist/{id}/move` | `{ direction: "up" \| "down" }`, renumbers the list |
 | GET/POST | `/api/control/current` | POST `{ item_id }` = play now |
-| POST/DELETE | `/api/override` | POST `{ asset_id? , url?, scroll_config? }` |
+| GET/POST/DELETE | `/api/override` | POST `{ asset_id? , url?, scroll_config? }` |
+
+`PUT /api/playlist/{id}` may change an item's source, but only like for like: a
+URL item takes a new `url`, an asset item a new `asset_id`. The opposite is a
+`400` — a kind change would need the other column cleared in the same write, and
+`playlist_target_url` picks one column over the other silently, so a half-changed
+row plays the wrong thing with no error anywhere. `asset_id` is checked against
+`assets` first; a dangling id yields a `NULL` `local_path` from the loop's
+`LEFT JOIN` and a blank screen.
+
+`POST /api/playlist/{id}/move` renumbers every row to `1..n` instead of swapping
+two values. `play_order` is typed by hand in the UI, so duplicates and gaps
+accumulate, and a pairwise swap between two rows sharing an order does nothing.
+
+Handlers that can reject a request answer with `{ "error": "..." }`; the UI shows
+that string inline. Everything else stays on the "swallow and log" rule below.
 
 Nullable-clearable fields (`start_date`, `end_date`) use
 `Option<Option<String>>` with `#[serde(default, deserialize_with = "double_option")]`
@@ -150,7 +183,12 @@ outer `None` and the field can never be cleared.
   display never dies on a bad request. Keep that, but `error!`-log first.
 - The UI is dependency-free vanilla HTML/JS. Build rows with `textContent` /
   `createElement`, not `innerHTML` string interpolation — filenames and URLs are
-  attacker-influenced.
+  attacker-influenced. `playlist.html` funnels this through a small `el()` helper.
+- `playlist.html` polls `/api/control/current` and `/api/override` every 2s and
+  only updates badges and highlight classes from the poll. It must not re-render
+  the item list on a tick: the cards *are* the edit form, so a re-render would wipe
+  whatever the operator is typing. Cards with unsaved edits are tracked in a
+  `dirty` set and carried over verbatim across list reloads for the same reason.
 - `duration` is in seconds and comes from the DB as `i64`; clamp before casting to
   `u64` (a negative value became ~584 billion years of `Duration` and froze the
   playlist on one item).
