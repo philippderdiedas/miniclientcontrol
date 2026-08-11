@@ -17,11 +17,23 @@ The controller does **not** launch Chromium. Chromium must already be running wi
 `--remote-debugging-port=9222 --kiosk`; the controller *connects* to it. On the Pi
 that launch lives in `~/.config/sway/config`, outside this repo.
 
-Chromium's "translate this page?" bubble must be suppressed with
-`--disable-features=Translate`. The old `--disable-translate` and
-`--disable-infobars` flags are silently ignored by current Chromium (144 on the
-device) — they parse fine and do nothing, so the prompt keeps appearing over the
-signage.
+Chromium's "translate this page?" bubble is **not** suppressible by a command-line
+flag. It needs the managed policy, on the device at
+`/etc/chromium/policies/managed/no-translate.json`:
+
+```json
+{ "TranslateEnabled": false }
+```
+
+Verify with `chrome://policy`: the row must read `TranslateEnabled / false /
+Platform / Machine / Mandatory / OK`. Three flags look like they should do this
+and do not: `--disable-translate` and `--disable-infobars` are ignored outright by
+current Chromium (144 on the device), and `--disable-features=Translate` *is*
+applied — child processes inherit it — but does not gate the bubble. The prompt
+appears because the profile's `intl.selected_languages` is `en-GB,en-US,en` while
+the signage shows German pages. The policy is also the only durable fix here:
+`--user-data-dir=/tmp/chromium-1` is wiped on boot, so a profile preference would
+not survive.
 
 ## Build & run
 
@@ -37,7 +49,41 @@ Cross build for the Pi target that is already configured:
 cargo build --release --target arm-unknown-linux-gnueabihf
 ```
 
+The device (`pi@10.124.11.124`) reports `uname -m` = `armv7l`, so the build that
+actually ships is `armv7-unknown-linux-gnueabihf` via `cross` (Docker daemon must
+be running). Give each cross target its **own** `--target-dir`: host proc-macro
+`.so`s land in the shared `target/release/build/`, and the per-target `cross`
+images carry different glibc versions, so reusing one directory across two targets
+fails with `symbol getrandom, version GLIBC_2.25 not defined`.
+
+```bash
+cross build --release --target armv7-unknown-linux-gnueabihf --target-dir target/cross-armv7
+```
+
 There is no test suite and no linting config. `cargo build` is the only gate.
+
+### Deploying to the device
+
+The binary is running, so copy beside it and rename over the top — an in-place
+`scp` gets `ETXTBSY`. Keep the previous binary as a rollback.
+
+```bash
+scp <binary> pi@10.124.11.124:~/miniclientcontrol/miniclientcontrol.new
+ssh pi@10.124.11.124 'cd ~/miniclientcontrol && cp -a miniclientcontrol miniclientcontrol.bak && mv miniclientcontrol.new miniclientcontrol'
+```
+
+**Restart with `sudo loginctl terminate-session <id>`, not by restarting
+`getty@tty1`.** Sway is launched from an autologin `/bin/login -f` and lives in a
+logind session scope; restarting the getty *service* leaves that scope alone. The
+controller and Chromium then survive as orphans re-parented to PID 1, the old
+controller keeps port 3000, and the fresh one from sway's `exec` dies on the bind
+— leaving the display running the old, already-deleted binary. Terminating the
+session kills the whole cgroup, orphans included, and autologin brings everything
+back. Find the id with `loginctl list-sessions` (the one with a `tty1` seat).
+
+Also beware `pkill -f` over SSH: a pattern like `miniclientcontrol/miniclientcontrol`
+matches the remote shell running the command and kills it mid-script, so the rest
+of the command never runs and the output is silently empty.
 After changing anything under `web/`, you must **rebuild** — `web/` is compiled
 into the binary via `include_dir!` (see `src/web.rs`), it is not read from disk.
 
