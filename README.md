@@ -7,7 +7,9 @@ It provides:
 - a SQLite-backed scheduler (order, enable/disable, optional date window),
 - browser automation via Chrome DevTools Protocol (CDP),
 - optional scroll behavior for long pages and PDFs,
-- an override mode to immediately play a specific asset or URL.
+- an override mode to immediately play a specific asset or URL,
+- screen casting: anyone on the LAN can share their screen or camera to the
+  display over WebRTC, and the playlist resumes automatically afterwards.
 
 ## Tech Stack
 
@@ -20,15 +22,17 @@ It provides:
 ## Requirements
 
 - Rust toolchain (stable)
-- A Chromium/Chrome instance running with remote debugging enabled
+- Chrome or Chromium installed
 
-Example:
+The controller starts the browser itself, in kiosk mode, with the flags it needs.
+It is found automatically (`google-chrome-stable`, `chromium`,
+`chromium-browser`, …); pin it with `--chromium /path/to/binary` if that guesses
+wrong.
 
-```bash
-chromium --remote-debugging-port=9222 --kiosk
-```
-
-If Chromium is not available as `chromium`, try your local binary (for example `google-chrome` or `chromium-browser`).
+If something is already listening on the debugging port, the controller connects
+to that instead of starting its own — so an existing setup that launches Chromium
+from a session file keeps working. `--no-launch-browser` disables starting one
+entirely.
 
 ## Quick Start
 
@@ -38,9 +42,14 @@ If Chromium is not available as `chromium`, try your local binary (for example `
 cargo run --release
 ```
 
-2. Open the control UI:
+2. Open the pages (accept the certificate warning once):
 
-- `http://localhost:3000/`
+- `https://<device-ip>:3443/` — the **cast page** for guests
+- `https://<device-ip>:3443/admin.html` — the **operator UI**
+
+Port 3000 is plain HTTP and binds to loopback only. It exists for the display
+browser on this device, not for people; `--http-listen 0.0.0.0` opens it up if
+something really needs the unencrypted API.
 
 3. In the UI:
 
@@ -48,9 +57,12 @@ cargo run --release
 - Add assets/URLs in **Playlist Management**
 - Set order, duration, schedule window, and scroll mode
 
-### Enable Basic Auth
+### Protecting the operator UI
 
-Basic Auth is optional. To enable it, set both username and password:
+Credentials can be set in the admin UI under **Zugang zur Verwaltung**; they are
+stored as a PBKDF2 hash, not in plaintext. They can also be given on the command
+line, which takes precedence and is the way back in if the password set in the UI
+is ever forgotten:
 
 ```bash
 cargo run --release -- \
@@ -68,22 +80,46 @@ cargo run --release
 
 If credentials are enabled, the control UI and the API require authentication.
 
-The pages the *display* browser renders are exempt, but **only when requested from
-loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
-`/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html` and `/logo.svg`.
+The operator UI (`/admin.html`, `/playlist.html`, `/assets.html`, `/api/*`)
+requires the credentials. The pages the *display* browser renders are exempt, but
+**only when requested from loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
+`/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`,
+`/cast_display.html`, `/cast.js` and `/api/cast/state`.
 Chromium is driven over CDP and cannot present credentials, so without this
 exemption enabling Basic Auth leaves the screen showing 401 errors. Anything
 reaching those paths from another host still has to authenticate.
 
+The cast sender pages (`/`, `/index.html`, `/cast.js`, `/api/cast/ws`,
+`/api/cast/pair`, `/api/cast/info`) are exempt from Basic Auth **from any
+address**, because the sender is a guest's laptop rather than the operator.
+Control who may cast in the admin UI, or remove the feature entirely with
+`--disable-cast`.
+
 ## Command Line Options
 
 ```text
---port <u16>                 (default: 3000)
+--port <u16>                 (default: 3000, plain HTTP)
+--http-listen <ip>           (default: 127.0.0.1 — loopback only)
 --assets-dir <path>          (default: ./assets)
 --database-path <path>       (default: miniclient.db)
 --cdp-url <url>              (default: http://127.0.0.1:9222)
 --basic-auth-user <string>   (optional, must be set with password)
 --basic-auth-password <string> (optional, must be set with user)
+--disable-cast               (default: false)
+--cast-tls-port <u16>        (unset: 3443 or next free; set: fatal if taken)
+--cast-cert-path <path>      (default: cast-cert.pem)
+--cast-cert-san <name,...>   (extra hostnames/IPs for the certificate)
+--cast-auth <none|code|pairing>  (default: none)
+--cast-code <string>         (required when --cast-auth=code)
+--cast-stun-url <url>        (optional, only if LAN ICE fails)
+--no-launch-browser          (connect to an existing browser only)
+--chromium <path>            (autodetected when unset)
+--chromium-user-data-dir <p> (default: /tmp/miniclientcontrol-chromium)
+--no-kiosk                   (windowed browser, useful when testing)
+--chromium-arg <flag>        (extra browser flags, repeatable)
+--browser-language <list>    (default: de,de-DE,en-US,en)
+--public-url <none|mdns|X>   (how guests reach this device; default: none;
+                              a custom .local name is published via avahi)
 ```
 
 These options also support environment variables through `clap` `env` support.
@@ -91,7 +127,7 @@ These options also support environment variables through `clap` `env` support.
 ## Runtime Behavior
 
 - Creates the asset directory if missing.
-- Creates/migrates SQLite tables (`assets`, `playlist_items`).
+- Creates/migrates SQLite tables (`assets`, `playlist_items`, `settings`).
 - Starts an HTTP server on `0.0.0.0:<port>`.
 - Serves uploaded files from `/uploads/...`.
 - Serves embedded UI files with fallback to `index.html`.
@@ -117,6 +153,12 @@ These options also support environment variables through `clap` `env` support.
 - `PUT /api/playlist/{id}` — update order/duration/enabled/schedule/scroll config
 - `DELETE /api/playlist/{id}` — remove playlist item
 
+### Settings
+
+- `GET /api/settings` — current settings plus which ones the command line pinned
+- `PUT /api/settings` — `{ cast_enabled?, cast_auth?, cast_code?, auth_enabled?,
+  auth_user?, auth_password? }`; a pinned setting answers `409`
+
 ### Playback Control
 
 - `GET /api/control/current` — get current item id
@@ -128,6 +170,167 @@ These options also support environment variables through `clap` `env` support.
   - body supports either `asset_id` or `url`
   - optional `scroll_config`
 - `DELETE /api/override` — clear override and return to playlist loop
+
+### Casting
+
+- `GET /api/cast/ws?role=sender|display[&code=]` — WebSocket signaling relay
+- `GET /api/cast/info` — public: `{ enabled, auth, busy, sender_url }`
+- `GET /api/cast/qr.svg` — public: QR code for the guest URL
+- `GET /api/cast/state` — operator: who is casting and since when
+- `DELETE /api/cast/session` — operator: end the current cast
+- `POST /api/cast/pair` — request a pairing code (pairing mode only); the code is
+  shown on the display and never returned in the response
+- `POST /api/cast/claim` — guest: check the code and reserve the session before
+  sharing; returns a ticket the WebSocket needs
+- `DELETE /api/cast/claim` — give the reservation back
+
+## Screen Casting
+
+A guest opens `https://<device-ip>:3443/`, enters the code if one is required,
+and picks **Bildschirm teilen** or **Kamera teilen**. The code is checked the
+moment it is typed and the session is reserved right then — before the browser's
+screen picker opens, so nobody chooses a window only to be told the code was
+wrong, and two guests cannot both get that far. Stopping the share —
+or closing the laptop — hands the screen back to the playlist automatically.
+
+The cast page is the site root on purpose, so the address a guest has to type is
+as short as possible. The operator UI sits at `/admin.html`, linked from a
+discreet button at the bottom of the cast page. Opening the cast page over plain
+HTTP from the LAN redirects to the HTTPS address automatically.
+
+The stream itself is peer-to-peer WebRTC; the controller only relays the
+handshake and decides when the display switches over. Internally a cast is just
+an override, so it interrupts the current playlist item and resumes exactly where
+it left off.
+
+### The address guests are given
+
+By default that is the device's LAN address. `--public-url` changes it:
+
+```bash
+--public-url none                        # https://<lan-ip>:3443/   (default)
+--public-url mdns                        # https://<hostname>.local:3443/
+--public-url signage.example.com         # https://signage.example.com:3443/
+--public-url https://signage.example.com # taken as-is, for a reverse proxy
+```
+
+`mdns` uses this machine's hostname, which Avahi already announces. Any *other*
+`.local` name is announced by the controller itself (`avahi-publish`), which is
+how one machine driving two screens becomes `kiosk2-links.local` and
+`kiosk2-rechts.local` rather than one ambiguous name. It needs `avahi-daemon` and
+`avahi-utils`; without them the controller says so and falls back to the address.
+
+Whichever name is chosen is added to the certificate automatically.
+
+A machine that publishes with Avahi but resolves with systemd-resolved may not be
+able to look up its own published names. Guests on the LAN still can — that is the
+case that matters.
+
+The address, a QR code for it and — in code mode — the code are shown on the
+display whenever the playlist is empty, and on the cast standby screen.
+
+### Why HTTPS
+
+`getDisplayMedia` only works in a secure context. `http://<lan-ip>:3000` is not
+one, so the sender page gets its own HTTPS listener with a self-signed
+certificate that is generated on first start. Browsers warn about it once;
+accepting the warning is enough. The display browser is unaffected — it reaches
+the controller over loopback, which counts as secure either way.
+
+The certificate is regenerated automatically if the device's addresses change,
+and covers `localhost`, `127.0.0.1`, the primary LAN address, the hostname and
+`<hostname>.local`. Add more with `--cast-cert-san`.
+
+### Access control
+
+Set in the admin UI under **Übertragung**, and persisted in the database:
+
+- **Offen** — anyone on the LAN can cast (default)
+- **Fester Code** — a 4-character PIN you hand out or put on a label
+- **Code auf dem Display** — a fresh code appears on screen for 30 seconds and
+  can only be used once
+
+**Command-line flags always win.** A setting passed as a flag is pinned: the
+admin UI shows it as locked and refuses to change it. Anything not passed falls
+back to the stored value and stays editable. Besides respecting whoever wrote the
+service file, this is the recovery path — a forgotten UI password is always
+fixable by passing `--basic-auth-user`/`--basic-auth-password`.
+
+`--disable-cast` additionally stops the HTTPS listener from binding at all, so it
+can only be changed by restarting.
+
+Basic Auth is deliberately *not* used for casting: it would mean handing the
+operator password to every guest. Wrong codes are rate-limited per address.
+
+For unattended audio, start the display Chromium with
+`--autoplay-policy=no-user-gesture-required` — otherwise the receiver falls back
+to muted playback, since nobody is there to click.
+
+Notes and limitations:
+
+- Only one sender at a time; a second one is told the display is busy.
+- Screen sharing needs a desktop browser. Mobile browsers have no
+  `getDisplayMedia`, though camera sharing works.
+- Screen *audio* is only shared reliably by Chrome, and only when the user ticks
+  the audio box in the picker. The page says so when no audio track arrives.
+
+## Invalid TLS certificates
+
+Playlist URLs are loaded even when their certificate does not validate, so
+internal dashboards on self-signed certificates work without ceremony. Whoever
+adds a URL is trusted to know what they are pointing the display at.
+
+This is a property of the browser connection and cannot be set per playlist item.
+
+## Two displays on one machine
+
+Run one controller per screen. Everything that can collide must differ:
+
+```bash
+miniclientcontrol --port 3000 --cdp-url http://127.0.0.1:9222 \
+    --chromium-class chrome-1 --database-path .../one.db --assets-dir .../one
+miniclientcontrol --port 3001 --cdp-url http://127.0.0.1:9223 \
+    --chromium-class chrome-2 --database-path .../two.db --assets-dir .../two
+```
+
+`--chromium-user-data-dir` and `--chromium-class` default to values derived from
+the CDP port, so they are already distinct; the TLS port picks the next free one
+by itself (3443, then 3444). Only the HTTP port, the database and the assets
+directory have to be spelled out.
+
+Window placement is the window manager's job. `--chromium-class` sets `WM_CLASS`,
+which i3 matches on:
+
+```
+assign [class="chrome-1"] 1
+assign [class="chrome-2"] 2
+workspace 1 output HDMI-1
+workspace 2 output HDMI-3
+```
+
+The last two lines matter: `assign` only chooses a workspace, and without pinning
+them to outputs i3 decides which screen a workspace lands on — not reliably the
+same way after a restart.
+
+A systemd unit that lets the controller start the browser needs the display in
+its environment:
+
+```ini
+[Service]
+Environment=DISPLAY=:0
+```
+
+## The "translate this page?" bubble
+
+Chromium offers to translate any page whose language is not among the profile's
+accepted languages, and on Linux this cannot be turned off with a flag. Because
+the controller writes the browser profile before every launch, it sets the
+accepted languages to `--browser-language` (default `de,de-DE,en-US,en`) and
+disables translation there. Set it to whatever your signage actually shows.
+
+If the browser is started outside the controller, use the managed policy instead:
+`/etc/chromium/policies/managed/no-translate.json` containing
+`{ "TranslateEnabled": false }`.
 
 ## Scroll Configuration
 
@@ -147,6 +350,8 @@ PDFs are rendered through the internal viewer (`/pdf_viewer.html`) and support b
 - `src/db.rs` — schema init + lightweight migrations
 - `src/models.rs` — CLI args, DTOs, app state
 - `src/web.rs` — embedded static file serving
+- `src/cast.rs` — cast signaling relay and session lifecycle
+- `src/tls.rs` — self-signed certificate + HTTPS listener for the sender page
 - `web/` — frontend pages and JS helpers
 - `assets/` — uploaded files (runtime)
 

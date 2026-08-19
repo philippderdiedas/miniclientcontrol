@@ -13,12 +13,57 @@ client/display device itself** (typically a Raspberry Pi — note the
 2. Drives a locally running Chromium over the Chrome DevTools Protocol (CDP),
    navigating it through the playlist and injecting a scroll runtime.
 
-The controller does **not** launch Chromium. Chromium must already be running with
-`--remote-debugging-port=9222 --kiosk`; the controller *connects* to it. On the Pi
-that launch lives in `~/.config/sway/config`, outside this repo.
+The controller **starts Chromium itself** (`src/chromium.rs`) unless something is
+already listening on the CDP port, in which case it connects to that instead. So
+an existing deployment whose sway `exec` line starts Chromium keeps working
+untouched, and a fresh one needs no browser configuration at all.
+`--no-launch-browser` forces connect-only.
+
+The binary is found via `chromiumoxide::detection` (`CHROME` env var, then
+`google-chrome-stable`, `chromium`, `chromium-browser`, …) or pinned with
+`--chromium`. The supervisor also restarts the browser if it exits, which the
+connect-only arrangement could not do — the loop just sat there reconnecting.
+
+**Two displays on one machine** run two controllers, and everything that can
+collide has to differ. `--chromium-user-data-dir` and `--chromium-class` therefore
+default to values derived from the CDP port, which instances already have to keep
+distinct. Sharing a profile directory is the nasty one: a second Chromium started
+on a profile that is already in use hands its URL to the running instance and
+exits, taking its debugging port with it — so the second display silently never
+appears, and nothing looks wrong except that it is not there.
+
+`--class` sets the second field of `WM_CLASS`, which is what an i3
+`assign [class="..."] <workspace>` rule matches. Measured on the two-screen kiosk:
+`class=chrome-1` landed on HDMI-1 at `0,0` and `class=chrome-2` on HDMI-3 at
+`1920,0`. Note that `assign` only picks the workspace — pin workspaces to outputs
+with `workspace 1 output HDMI-1`, or which screen gets which is up to i3 and not
+stable across restarts.
+
+A unit that lets the controller start the browser needs `DISPLAY` (and
+`XAUTHORITY`) in its environment, which a unit that only talked CDP did not.
+
+It deliberately does **not** kill the browser when the controller stops: a deploy
+or a crash should not blank the screen, and the next start simply reattaches.
 
 Chromium's "translate this page?" bubble is **not** suppressible by a command-line
-flag. It needs the managed policy, on the device at
+flag, and there is no CDP command for it either.
+
+Since the controller owns the launch, the fix is now in the profile it writes
+before every start (`chromium::write_preferences`): `intl.accept_languages` is set
+to `--browser-language` (default `de,de-DE,en-US,en`) and `translate.enabled` to
+`false`. The language list is the part that matters — the bubble appears when the
+page's language is not among the accepted ones, so matching them removes the
+trigger rather than fighting the symptom. Measured: with these written,
+`navigator.languages` follows, and Chromium keeps both keys when it rewrites the
+file. Writing it on every launch is also what makes it survive the profile
+directory being wiped on boot, which is why a profile preference used to be
+useless here.
+
+The keys are merged into any existing `Preferences` rather than replacing the
+file, so window bounds and zoom levels are not thrown away.
+
+The managed policy below still works and is the right answer when the browser is
+started outside this controller. It needs root, on the device at
 `/etc/chromium/policies/managed/no-translate.json`:
 
 ```json
@@ -43,6 +88,18 @@ cargo build --release
 cargo run --release -- --port 3000 --cdp-url http://127.0.0.1:9222
 ```
 
+Casting adds an HTTPS listener (default `3443`) and a self-signed certificate:
+
+```bash
+cargo run --release
+# guests:   https://<lan-ip>:3443/            (accept the cert warning once)
+# operator: https://<lan-ip>:3443/admin.html
+# port 3000 is loopback-only and serves the display browser
+```
+
+`--disable-cast` turns the whole thing off. When testing locally, share a single
+*window* rather than the whole screen, or the display shows an infinite mirror.
+
 Cross build for the Pi target that is already configured:
 
 ```bash
@@ -60,7 +117,11 @@ fails with `symbol getrandom, version GLIBC_2.25 not defined`.
 cross build --release --target armv7-unknown-linux-gnueabihf --target-dir target/cross-armv7
 ```
 
-There is no test suite and no linting config. `cargo build` is the only gate.
+There is no linting config, and `cargo build` is the gate for the Rust side.
+`tests/cast/` holds stdlib-only Python end-to-end tests for the cast feature
+(signaling, override coupling, auth modes, runtime settings, basic-auth
+boundaries, and a real two-Chrome WebRTC session). They are not wired into any
+CI; run them by hand after touching `cast.rs`, `tls.rs` or the route table.
 
 ### Deploying to the device
 
@@ -97,24 +158,48 @@ src/db.rs        run_migrations() — idempotent CREATE TABLE + ADD COLUMN probe
 src/handlers.rs  JSON/multipart API handlers
 src/browser.rs   the CDP control loop (largest file; all playback logic)
 src/web.rs       serves web/ embedded via include_dir
+src/cast.rs      screen-cast signaling relay + session lifecycle
+src/settings.rs  runtime settings (cast + operator credentials) and their API
+src/chromium.rs  finds, launches and supervises the display browser
+src/mdns.rs      publishes an extra `.local` name via avahi-publish
+src/tls.rs       self-signed cert + HTTPS listener for the cast sender page
 web/             operator UI + the pages the *display* browser renders
 ```
 
-### Two audiences for HTTP
+### Three audiences for HTTP
 
 This is the single most important thing to keep in mind when touching routes or
-middleware. The HTTP server has **two different clients**:
+middleware. The HTTP server has **three different clients**:
 
-- The **operator** (a human, possibly remote): `/`, `/index.html`,
+- The **operator** (a human, possibly remote): `/admin.html`,
   `/assets.html`, `/playlist.html`, `/api/*`.
 - The **display browser** (Chromium on loopback, sends no credentials):
   `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
-  `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`.
+  `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`,
+  `/cast_display.html`, `/cast.js`, `/api/cast/state`.
+- The **cast sender** (a guest's laptop, *remote*, no credentials):
+  `/`, `/index.html`, `/cast.js`, `/api/cast/ws`, `/api/cast/pair`,
+  `/api/cast/info`.
+
+**The site root is the guest page, not the operator page.** `/` serves the cast
+sender so a guest can be handed `https://<device>:3443` and nothing longer; the
+operator landing page lives at `/admin.html`. Moving a page between those two
+sets means moving it between `is_cast_public_path` and plain (authenticated)
+routing — get that backwards and either the signage guests are locked out or the
+admin UI is wide open. `/cast.html` 301s to `/` so the older URL keeps working.
 
 Basic auth must never be applied to the second set, or the signage goes blank.
 `src/main.rs` handles this by exempting loopback peers (`ConnectInfo<SocketAddr>`)
 — which is why the server is started with
-`into_make_service_with_connect_info::<SocketAddr>()`. Do not drop that.
+`into_make_service_with_connect_info::<SocketAddr>()`. Do not drop that. The TLS
+listener uses it too, and the extractor panics without it.
+
+The third set is exempt **regardless of address** (`cast::is_cast_public_path`),
+because the sender is by definition not loopback. Gating it behind basic auth
+would mean giving the operator password to everyone who wants to share a screen;
+`--cast-auth` is what guards those routes instead. Keep the two predicates
+separate — widening `is_display_path` would expose the display-only paths to the
+whole LAN.
 
 ### Control loop (`src/browser.rs`)
 
@@ -175,9 +260,214 @@ drives its own scrolling from query parameters. `browser.rs` detects this with
 from the same origin. Never point `workerSrc` at a CDN — the device is often
 offline, and the operator page would work while the display silently failed.
 
+### Screen casting (`src/cast.rs`, `src/tls.rs`)
+
+Replaces a separate picklecast process. A sender on the LAN opens `cast.html`,
+the display browser opens `cast_display.html`, and the two do WebRTC directly;
+the controller only relays opaque `{sdp}` / `{ice}` blobs and owns the session
+lifecycle. It never parses WebRTC payloads — not parsing them means it cannot
+break them.
+
+**A cast is an override.** Starting one pins `override_item` to
+`http://127.0.0.1:<port>/cast_display.html`; ending one puts back whatever was
+there before. `browser.rs` needed *no changes at all*, because two things there
+already do the right thing, and both are load-bearing:
+
+- `run_override_loop` skips a notification whose override is unchanged. Without
+  that guard a redundant `notify_one()` would re-navigate the page and tear down
+  the live `RTCPeerConnection` mid-cast.
+- The per-item `tokio::select!` watches `override_signal`, so a cast interrupts
+  the current item instead of waiting out its duration.
+
+On teardown the previous override is only restored **if the one on screen is
+still ours**. An operator who set a different override during the cast made a
+newer decision, and silently reverting it would look like the UI ignoring them.
+
+**Plain HTTP is loopback-only** (`--http-listen`, default `127.0.0.1`). That
+listener exists for the display browser, which fetches assets from
+`http://127.0.0.1` — already a secure context, so TLS there would buy nothing and
+cost a certificate the kiosk browser has no way to trust. Everything a human
+touches goes over TLS instead, which also stops basic-auth credentials from
+crossing the network base64-encoded.
+
+Do **not** be tempted to serve the display over HTTPS to drop this listener: the
+self-signed certificate makes Chromium show an interstitial, and the fixes are
+worse than the problem. `--ignore-certificate-errors` weakens the whole browser,
+and the scoped `--ignore-certificate-errors-spki-list` breaks every time the
+certificate is regenerated — which happens on a DHCP move, producing a blackout
+nobody would connect to the certificate.
+
+**The cast HTTPS port is bound up front** in `main`, before `AppState` exists, so
+a clash is a startup error rather than a background task that logs and leaves
+casting silently dead. An explicit `--cast-tls-port` that is taken is fatal (the
+usual cause is an older instance of this binary still holding it — see the
+restart note above); with no flag, the next free port after 3443 is taken and
+logged. `AppState::cast_tls_port` is the port actually bound, which is what the
+guest URL must be built from — not `args.cast_tls_port`.
+
+**Operator credentials are runtime state too.** The basic-auth middleware is
+always installed and decides per request, because auth can be switched on from
+the admin UI. Stored passwords are PBKDF2-SHA256 hashes, so a copy of the
+database is not a copy of the credentials; a password passed on the CLI stays
+`Secret::Plain` and is never written. Because PBKDF2 is deliberately slow and the
+admin page polls every two seconds, `AppState::auth_cache` remembers the last
+`Authorization` header that verified — and **must** be cleared whenever the
+credentials change, or the old password keeps working.
+
+**HTTPS is not optional for the guest page.** `getDisplayMedia` and `RTCPeerConnection` only exist
+in a secure context. The display is fine — it reaches the controller over
+loopback, which counts as secure — but the sender is a laptop opening
+`http://10.x.x.x:3000`, which does not. Hence the second listener on
+`--cast-tls-port` with a self-signed cert. Both listeners serve the *same*
+`Router` and the same `AppState`, so sender and display land in one signaling
+registry and the sender never fetches cross-origin. Serving the sender page and
+its API from different origins is what forced the mixed-content `/api/override`
+proxy in the picklecast setup this replaces.
+
+**`--public-url` decides what guests are told**, and `src/tls.rs` resolves it:
+`none` (the LAN address), `mdns` (`<hostname>.local`, which needs Avahi —
+`avahi-daemon` plus `nss-mdns` in `/etc/nsswitch.conf` — on this device *and* on
+the guest's machine; startup resolves the name once and warns if it fails), a bare
+host, or a full base URL for a device behind a proxy that owns the port. Whatever
+name comes out is appended to the certificate SANs in `main.rs`, or guests get a
+name mismatch on top of the unknown-issuer warning.
+
+Avahi announces `<hostname>.local` by itself but nothing else, so a
+`--public-url` ending in `.local` that is *not* this machine's hostname is
+published by supervising `avahi-publish -a -R <name> <address>` (`src/mdns.rs`).
+That is what makes a two-screen machine addressable as `kiosk2-links.local` and
+`kiosk2-rechts.local` instead of one ambiguous `kiosk2.local`. Holding the record
+for the lifetime of a child process is deliberate: it disappears when the
+controller stops, which is the wanted behaviour, and it costs no D-Bus dependency.
+
+Note that the machine doing the publishing may not resolve those names *itself*
+if it runs Avahi for publishing and systemd-resolved for lookups — two mDNS
+stacks that do not share a cache. Measured on the kiosk: `avahi-resolve` finds the
+name, `curl` on the same box does not, and a guest on the LAN does. Only the last
+one matters.
+
+The QR code is rendered server-side as SVG (`GET /api/cast/qr.svg`). A
+client-side library would have to be vendored for an offline device, and an SVG
+scales to whatever the display is.
+
+The idle screen (`empty_playlist.html`) shows the cast address, the QR code and —
+in `code` mode — the standing code. That is the one moment the display has
+nothing better to say, so it is the best place to explain how to use it. It reads
+`/api/cast/state` rather than `/api/cast/info` because only the loopback endpoint
+carries the code.
+
+`src/tls.rs` regenerates the certificate when the recorded SAN list no longer
+matches the machine's addresses (sidecar file `<cert>.sans`). After a DHCP move a
+stale cert would fail *name* validation, which is a scarier browser warning than
+an unknown issuer. The cert file holds the private key and is written `0600`.
+
+`rustls` is pinned to the `ring` backend, not the default `aws-lc-rs`: the latter
+needs a C toolchain that the armv7 `cross` image does not have.
+
+**Session rules**, all enforced server-side (picklecast enforced none of them):
+
+- **The code is checked, and the slot taken, before anything is shared.**
+  `POST /api/cast/claim` validates and returns an opaque ticket; the socket
+  carries only that ticket. Doing it the other way round — the obvious way —
+  means a guest picks a window in their browser's screen picker and *then* hears
+  the code was wrong, and lets two guests sit in the picker with one guaranteed
+  to lose. A reservation holds for `RESERVATION_TTL`, is released on `pagehide`,
+  and does **not** pin the display: the playlist keeps running until someone
+  actually streams.
+- Exactly one sender and one display. A second guest is refused at claim time,
+  with a reason.
+- Ticket admission happens *after* the WebSocket upgrade, deliberately. A socket
+  rejected at the HTTP layer gives the page neither status nor body, so the
+  reason would surface as nothing but "connection failed".
+- `role=display` is loopback-only. That page is only ever opened by our Chromium.
+- Ping every 15s, drop after 45s of silence. A laptop whose lid closes stops
+  answering without ever sending a TCP FIN, so the socket looks healthy until
+  something probes it — this is what keeps a dead cast from freezing the signage.
+- Watchdogs: 5s grace after the sender's socket drops (so a page reload does not
+  bounce the display back to the playlist), 30s for the display to connect back,
+  30s TTL on a pairing code.
+
+`cast_auth` picks how a guest proves themselves: `none` (trusted LAN), `code`
+(fixed PIN, known out of band), or `pairing` (fresh code shown on the display for
+30s, single-use). Wrong codes are compared in constant time and lock the address
+out after 5 tries.
+
+**Settings are runtime state (see `src/settings.rs`), and the command line
+always wins.** `cast_enabled`, `cast_auth`, `cast_code` and the operator
+credentials live in the `settings` table and are edited from the admin UI — but a
+flag that was actually passed pins that setting: `/api/settings` answers `409`
+naming the flag, and the UI renders the control as locked. This is why the
+CLI-settable `Args` fields are `Option<T>` with no clap default: `None` has to
+mean "not given", not "given the default".
+
+The precedence is not just deference to whoever wrote the unit file. It is the
+**recovery path**: an operator who enables basic auth in the UI and forgets the
+password would otherwise have locked themselves out of the only place that can
+undo it. Adding `--basic-auth-user/--basic-auth-password` always gets them back
+in, and `Locks` makes that visible rather than mysterious.
+
+Read settings from `state.settings`, never from `state.args` — the args are the
+input to resolution, not the answer.
+
+`--disable-cast` additionally decides whether the HTTPS listener binds at all, so
+it cannot be undone without a restart either way. It is the deployment-level kill
+switch; `cast_enabled` is the operator-level one, and turning that off ends any
+cast already running.
+
+A code-auth misconfiguration (mode `code`, empty code) logs an error and refuses
+every sender, but does **not** stop the process. Casting must never keep the
+signage from booting, and the operator can fix it in the UI without a restart.
+
+The sender page bounces itself from `http://` to the TLS origin when it is
+reached from a non-loopback address, because `getDisplayMedia` does not exist on
+the plain-HTTP origin and the failure would otherwise be silent.
+
+Taken from the local picklecast patches: the `ontrack` guard (it fires once per
+track, and the second `play()` aborts the first with `AbortError` — a naive catch
+then re-mutes a stream that was playing fine) and the unmuted-first playback with
+a muted fallback. Deliberately *not* taken: p2pt/WebTorrent trackers, the
+tracker-vs-local transport probe, the YouTube iframe remote control, the
+`--webhook` callback and the `/api/override` proxy (both unnecessary once this
+lives in-process).
+
+For unattended audio, launch the display Chromium with
+`--autoplay-policy=no-user-gesture-required`; otherwise the receiver falls back
+to muted playback because nobody is there to click.
+
+### Invalid TLS certificates are accepted, on purpose
+
+`browser_loop` connects with `ignore_https_errors: true`. Signage points at
+internal dashboards on self-signed certificates, and whoever adds a playlist URL
+is the one judging it trustworthy — there is no end user here to protect from
+their own click. It also matches `chromiumoxide`'s own default, so this is
+documenting an existing property rather than choosing a new one.
+
+**Do not try to make this per playlist item.** It was attempted and measured:
+sending `Security.setIgnoreCertificateErrors` to the adopted control page has no
+effect whatsoever — the page still ends on `chrome-error://chromewebdata/`. Only
+the handler's setting takes, and it is applied while its `NetworkManager`
+initialises each target, i.e. once per connection.
+
+Two traps found on the way, worth not rediscovering:
+
+- Do **not** send `Security.enable` first. Enabling the domain switches Chromium
+  into override mode, where a certificate error becomes a
+  `Security.certificateError` event and the load blocks until someone answers
+  `handleCertificateError`. Nobody does, so the interstitial stays up and the
+  flag looks inert.
+- Flipping the handler setting at runtime needs a reconnect *and* a page that is
+  not already on the target URL, or `navigate_page` takes its same-document
+  branch and reloads without re-running the certificate decision.
+
+`examples/certtest.rs` is the reproduction: it takes a URL and a mode (`none`,
+`explicit`, `adopt`, `adopt-explicit`, `wait`).
+
 ## Database
 
 SQLite, path from `--database-path` (default `miniclient.db`, gitignored).
+Tables: `assets`, `playlist_items`, and `settings` (key/value, for the cast
+options the operator can change without a restart — key/value rather than columns
+because they are a handful of unrelated scalars).
 Schema lives **only** in `src/db.rs::run_migrations`, which is idempotent:
 `CREATE TABLE IF NOT EXISTS` plus `pragma_table_info` probes before each
 `ALTER TABLE ADD COLUMN`. Add new columns the same way. `main.rs` must not
@@ -202,6 +492,14 @@ playlist, so one bad row would blank the screen.
 | POST | `/api/playlist/{id}/move` | `{ direction: "up" \| "down" }`, renumbers the list |
 | GET/POST | `/api/control/current` | POST `{ item_id }` = play now |
 | GET/POST/DELETE | `/api/override` | POST `{ asset_id? , url?, scroll_config? }` |
+| GET | `/api/cast/ws` | WebSocket signaling, `?role=sender\|display[&code=]` |
+| GET | `/api/cast/info` | Public: `{ enabled, auth, busy, sender_url }` |
+| GET | `/api/cast/qr.svg` | Public: QR code for the guest URL |
+| GET | `/api/cast/state` | Operator/loopback: who is casting, since when |
+| DELETE | `/api/cast/session` | Operator: end the cast now |
+| POST | `/api/cast/pair` | `--cast-auth=pairing` only; shows a code on the display |
+| GET/PUT | `/api/settings` | Operator: runtime settings + which flags pinned them |
+| POST/DELETE | `/api/cast/claim` | Guest: reserve the session before sharing |
 
 `PUT /api/playlist/{id}` may change an item's source, but only like for like: a
 URL item takes a new `url`, an asset item a new `asset_id`. The opposite is a
