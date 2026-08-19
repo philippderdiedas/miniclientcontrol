@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bildschirmübertragung</title>
+  <style>
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #fff;
+      color: #222;
+      overflow: hidden;
+    }
+    /* Standby: same look as the other display placeholders. */
+    #standby {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      padding: 2rem;
+    }
+    #standby img { width: min(260px, 55vw); margin-bottom: 1.5rem; }
+    h1 { margin: 0 0 .5rem; font-size: 2rem; }
+    p { margin: 0 0 1.25rem; font-size: 1.2rem; line-height: 1.5; }
+    .url {
+      font-family: ui-monospace, monospace;
+      font-size: clamp(1.4rem, 3.5vw, 2.4rem);
+      background: #f2f2f2;
+      border-radius: .5rem;
+      padding: .4rem .9rem;
+      display: inline-block;
+    }
+    .urlrow {
+      display: flex;
+      gap: 1.5rem;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .qr { width: clamp(140px, 18vw, 220px); height: auto; }
+    .code {
+      display: flex;
+      gap: .6rem;
+      justify-content: center;
+      margin-top: 1.6rem;
+    }
+    .code span {
+      font-family: ui-monospace, monospace;
+      font-size: clamp(2.5rem, 9vw, 6rem);
+      font-weight: 700;
+      line-height: 1;
+      border: 3px solid #222;
+      border-radius: .6rem;
+      padding: .3em .25em;
+      min-width: 1.2em;
+    }
+    .hint { margin-top: 1rem; font-size: 1rem; color: #666; }
+    /* Video takes the whole screen; letterboxing beats cropping someone's slides. */
+    #video {
+      display: none;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #000;
+    }
+    body.streaming { background: #000; }
+    body.streaming #standby { display: none; }
+    body.streaming #video { display: block; }
+  </style>
+  <script src="/cast.js"></script>
+</head>
+<body>
+  <main id="standby">
+    <div>
+      <img src="/logo.svg" alt="Logo" />
+      <h1>Bildschirm übertragen</h1>
+      <p>QR-Code scannen oder diese Adresse öffnen:</p>
+      <div class="urlrow">
+        <img class="qr" id="qr" alt="QR-Code zur Übertragungsseite" />
+        <div class="url" id="senderUrl">…</div>
+      </div>
+      <div class="code" id="codeBoxes" hidden></div>
+      <p class="hint" id="hint"></p>
+    </div>
+  </main>
+  <video id="video" autoplay playsinline></video>
+
+  <script>
+    const standby = document.getElementById('standby');
+    const video = document.getElementById('video');
+    const codeBoxes = document.getElementById('codeBoxes');
+    const hint = document.getElementById('hint');
+
+    let socket = null;
+    let peer = null;
+
+    function setHint(text) { hint.textContent = text || ''; }
+
+    function showCode(code) {
+      // Built character by character with textContent -- the code comes off the
+      // wire, and this page follows the same no-innerHTML rule as the operator UI.
+      codeBoxes.replaceChildren();
+      for (const char of code) {
+        const box = document.createElement('span');
+        box.textContent = char;
+        codeBoxes.appendChild(box);
+      }
+      codeBoxes.hidden = false;
+      setHint('Diesen Code am eigenen Gerät eingeben.');
+    }
+
+    function hideCode() {
+      codeBoxes.replaceChildren();
+      codeBoxes.hidden = true;
+    }
+
+    function toStandby(message) {
+      document.body.classList.remove('streaming');
+      video.srcObject = null;
+      if (peer) { peer.close(); peer = null; }
+      setHint(message || '');
+    }
+
+    // The sender's URL is not knowable from this page: it is served over loopback,
+    // and the sender needs the LAN address of the HTTPS listener.
+    fetch('/api/cast/state')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((state) => {
+        if (state && state.sender_url) {
+          document.getElementById('senderUrl').textContent = state.sender_url;
+          document.getElementById('qr').src =
+            '/api/cast/qr.svg?v=' + encodeURIComponent(state.sender_url);
+        }
+      })
+      .catch(() => { /* the placeholder dash stays */ });
+
+    async function onSignal(data) {
+      if (data.sdp) {
+        // A fresh offer means a new media session -- the sender switched from
+        // screen to camera, or reconnected. Replace the old connection rather
+        // than ignoring the offer, which is what left picklecast showing a
+        // frozen frame after a source change.
+        if (peer) peer.close();
+
+        peer = Cast.createPeer(window.__iceServers, socket, {
+          track: (event) => {
+            document.body.classList.add('streaming');
+            hideCode();
+            Cast.attachStream(video, event.streams[0]);
+          },
+          dead: () => toStandby('Verbindung beendet.'),
+        });
+
+        await peer.applyRemote(data.sdp);
+        const answer = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(answer);
+        socket.signal({ sdp: answer });
+      } else if (data.ice && peer) {
+        await peer.addCandidate(data.ice);
+      }
+    }
+
+    function connect() {
+      socket = Cast.openSocket('display', null, {
+        welcome: (frame) => {
+          window.__iceServers = frame.ice_servers;
+          if (frame.pairing) showCode(frame.pairing.code);
+          else setHint(frame.peer ? 'Verbindung wird aufgebaut…' : '');
+        },
+        pairing: (frame) => showCode(frame.code),
+        peer: (connected) => {
+          if (connected) setHint('Verbindung wird aufgebaut…');
+          else toStandby('');
+        },
+        signal: (data) => { onSignal(data).catch(console.error); },
+        error: (frame) => setHint(frame.message || 'Fehler'),
+        // The controller may have restarted; keep trying so the display recovers
+        // without anyone having to touch it.
+        closed: () => { toStandby(''); setTimeout(connect, 2000); },
+      });
+    }
+
+    connect();
+  </script>
+</body>
+</html>

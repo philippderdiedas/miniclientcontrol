@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bildschirm übertragen</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 640px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      line-height: 1.45;
+    }
+    h1 { margin-bottom: .2rem; }
+    .muted { color: #666; }
+    .card {
+      border: 1px solid #d8d8d8;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    button {
+      font: inherit;
+      padding: .7rem 1.1rem;
+      border: 1px solid #333;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      margin: 0 .4rem .4rem 0;
+    }
+    button:hover:enabled { background: #f0f0f0; }
+    button:disabled { opacity: .45; cursor: default; }
+    button.primary { background: #0b6b3a; border-color: #0b6b3a; color: #fff; }
+    button.primary:hover:enabled { background: #0d7d44; }
+    .code-boxes { display: flex; gap: .5rem; margin: .5rem 0 1rem; }
+    .code-boxes input {
+      width: 3rem;
+      height: 3.6rem;
+      font: 700 1.8rem/1 ui-monospace, monospace;
+      text-align: center;
+      border: 2px solid #bbb;
+      border-radius: .5rem;
+      text-transform: uppercase;
+    }
+    .code-boxes input:focus { border-color: #0b6b3a; outline: none; }
+    .status { font-weight: 600; margin-top: .5rem; }
+    .codestatus { margin: .2rem 0 0; font-weight: 600; min-height: 1.4em; }
+    .codestatus.ok { color: #0b6b3a; }
+    .codestatus.bad { color: #a11; }
+    .code-boxes input.bad { border-color: #a11; }
+    .code-boxes input.ok { border-color: #0b6b3a; }
+    footer { margin-top: 1.5rem; }
+    footer a {
+      color: #666; text-decoration: none; font-size: .9rem;
+      border: 1px solid #ccc; border-radius: 6px; padding: .45rem .8rem;
+      display: inline-block;
+    }
+    footer a:hover { background: #f0f0f0; color: #222; }
+    .warn { color: #8a5a00; background: #fff5e0; border-radius: 6px; padding: .6rem .8rem; margin-top: .8rem; }
+    .err { color: #a11; }
+    [hidden] { display: none !important; }
+  </style>
+  <script src="/cast.js"></script>
+</head>
+<body>
+  <h1>Bildschirm übertragen</h1>
+  <p class="muted">Überträgt an das Display in diesem Raum.</p>
+
+  <div class="card" id="setup">
+    <div id="pairingBlock" hidden>
+      <p>Erst einen Code anfordern — er erscheint dann auf dem Display.</p>
+      <button id="requestCode">Code anfordern</button>
+    </div>
+
+    <div id="codeBlock" hidden>
+      <label for="code0">Code eingeben:</label>
+      <div class="code-boxes">
+        <input id="code0" maxlength="1" autocomplete="off" inputmode="latin" aria-label="Code Zeichen 1" />
+        <input maxlength="1" autocomplete="off" aria-label="Code Zeichen 2" />
+        <input maxlength="1" autocomplete="off" aria-label="Code Zeichen 3" />
+        <input maxlength="1" autocomplete="off" aria-label="Code Zeichen 4" />
+      </div>
+      <p class="codestatus" id="codeStatus"></p>
+    </div>
+
+    <div id="shareBlock">
+      <button class="primary" id="shareScreen">Bildschirm teilen</button>
+      <button id="shareCamera">Kamera teilen</button>
+      <p class="muted" id="reservation" hidden></p>
+    </div>
+
+    <div id="liveBlock" hidden>
+      <button id="stopShare">Übertragung beenden</button>
+    </div>
+
+    <p class="status" id="status"></p>
+    <p class="warn" id="audioWarning" hidden>
+      Kein Ton übertragen — Browser oder Betriebssystem haben keinen Audiokanal
+      freigegeben. In Chrome beim Teilen „Systemaudio teilen“ ankreuzen.
+    </p>
+  </div>
+
+  <!-- Deliberately understated and last: this page is for guests, and the
+       admin area is behind credentials anyway. -->
+  <footer><a href="/admin.html">Verwaltung</a></footer>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const codeInputs = [...document.querySelectorAll('.code-boxes input')];
+
+    let authMode = 'none';
+    let socket = null;
+    let peer = null;
+    let stream = null;
+    let iceServers = [];
+
+    // The claim ticket. Held from the moment the code checks out until the
+    // stream starts, and it is what makes the session ours in between.
+    let ticket = null;
+    let reservedUntil = 0;
+    let countdown = null;
+
+    function setStatus(message, isError) {
+      const node = el('status');
+      node.textContent = message || '';
+      node.classList.toggle('err', !!isError);
+    }
+
+    function setCodeStatus(message, kind) {
+      const node = el('codeStatus');
+      node.textContent = message || '';
+      node.className = 'codestatus' + (kind ? ' ' + kind : '');
+      codeInputs.forEach((input) => {
+        input.classList.toggle('ok', kind === 'ok');
+        input.classList.toggle('bad', kind === 'bad');
+      });
+    }
+
+    function getCode() {
+      return codeInputs.map((input) => input.value).join('');
+    }
+
+    function clearCode() {
+      codeInputs.forEach((input) => { input.value = ''; });
+      codeInputs[0].focus();
+    }
+
+    // --- reservation ------------------------------------------------------
+
+    // Share buttons stay locked until the session is actually ours, so nobody
+    // gets as far as the screen picker on a wrong code or a busy display.
+    function setShareEnabled(enabled) {
+      el('shareScreen').disabled = !enabled;
+      el('shareCamera').disabled = !enabled;
+    }
+
+    function stopCountdown() {
+      if (countdown) { clearInterval(countdown); countdown = null; }
+      el('reservation').hidden = true;
+    }
+
+    function startCountdown() {
+      stopCountdown();
+      const node = el('reservation');
+      node.hidden = false;
+      const tick = () => {
+        const left = Math.max(0, Math.round((reservedUntil - Date.now()) / 1000));
+        node.textContent = `Sitzung ist für dich reserviert – noch ${left}s zum Starten.`;
+        if (left <= 0) {
+          stopCountdown();
+          dropReservation();
+          setShareEnabled(authMode === 'none');
+          setCodeStatus('Reservierung abgelaufen. Code bitte erneut eingeben.', 'bad');
+          clearCode();
+        }
+      };
+      tick();
+      countdown = setInterval(tick, 1000);
+    }
+
+    function dropReservation() {
+      ticket = null;
+      reservedUntil = 0;
+    }
+
+    // Returns true once the session belongs to us.
+    async function claim(code) {
+      try {
+        const res = await fetch('/api/cast/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(code ? { code } : {}),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          dropReservation();
+          return { ok: false, error: body.error || 'Reservierung fehlgeschlagen.' };
+        }
+        ticket = body.ticket;
+        reservedUntil = Date.now() + (body.expires_in || 120) * 1000;
+        startCountdown();
+        return { ok: true };
+      } catch (_) {
+        dropReservation();
+        return { ok: false, error: 'Controller nicht erreichbar.' };
+      }
+    }
+
+    function releaseReservation() {
+      if (!ticket) return;
+      dropReservation();
+      stopCountdown();
+      // keepalive so the release still goes out while the tab is closing
+      fetch('/api/cast/claim', { method: 'DELETE', keepalive: true }).catch(() => {});
+    }
+
+    // Someone who opens the page and wanders off should not hold the slot for
+    // the full two minutes.
+    window.addEventListener('pagehide', () => {
+      if (!stream) releaseReservation();
+    });
+
+    // --- code entry -------------------------------------------------------
+
+    async function validateCode() {
+      const code = getCode();
+      if (code.length < 4) return;
+      setCodeStatus('Code wird geprüft…', null);
+      setShareEnabled(false);
+
+      const result = await claim(code);
+      if (result.ok) {
+        setCodeStatus('Code stimmt – du kannst jetzt teilen.', 'ok');
+        setShareEnabled(true);
+        el('shareScreen').focus();
+      } else {
+        setCodeStatus(result.error, 'bad');
+        setShareEnabled(false);
+        clearCode();
+      }
+    }
+
+    codeInputs.forEach((input, i) => {
+      input.addEventListener('input', () => {
+        input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+        if (input.value && i < codeInputs.length - 1) codeInputs[i + 1].focus();
+        // Checked the moment the last box is filled: finding out the code was
+        // wrong after picking a window is what this whole step exists to avoid.
+        if (getCode().length === 4) validateCode();
+      });
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Backspace' && !input.value && i > 0) codeInputs[i - 1].focus();
+        if (event.key === 'Enter') validateCode();
+      });
+      input.addEventListener('paste', (event) => {
+        event.preventDefault();
+        const text = (event.clipboardData || window.clipboardData)
+          .getData('text').toUpperCase().replace(/[^A-Z0-9]/g, '');
+        for (let j = 0; j < Math.min(text.length, codeInputs.length - i); j++)
+          codeInputs[i + j].value = text[j];
+        codeInputs[Math.min(i + text.length, codeInputs.length) - 1].focus();
+        if (getCode().length === 4) validateCode();
+      });
+    });
+
+    // --- streaming --------------------------------------------------------
+
+    function showLive(live) {
+      el('shareBlock').hidden = live;
+      el('liveBlock').hidden = !live;
+      el('codeBlock').hidden = live || authMode === 'none';
+      el('pairingBlock').hidden = live || authMode !== 'pairing';
+      if (live) stopCountdown();
+    }
+
+    function teardown(message, isError) {
+      if (peer) { peer.close(); peer = null; }
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+      }
+      if (socket) { socket.close(); socket = null; }
+      dropReservation();
+      stopCountdown();
+      showLive(false);
+      setShareEnabled(authMode === 'none');
+      if (authMode !== 'none') {
+        setCodeStatus('', null);
+        clearCode();
+      }
+      setStatus(message, isError);
+    }
+
+    async function startOffer() {
+      setStatus('Display gefunden, Verbindung wird aufgebaut…');
+      if (peer) peer.close();
+
+      peer = Cast.createPeer(iceServers, socket, {
+        connected: () => setStatus('Übertragung läuft.'),
+        dead: () => teardown('Verbindung getrennt.'),
+      });
+      stream.getTracks().forEach((track) => peer.pc.addTrack(track, stream));
+
+      const offer = await peer.pc.createOffer();
+      await peer.pc.setLocalDescription(offer);
+      socket.signal({ sdp: offer });
+    }
+
+    async function onSignal(data) {
+      if (data.sdp && peer) await peer.applyRemote(data.sdp);
+      else if (data.ice && peer) await peer.addCandidate(data.ice);
+    }
+
+    function connect() {
+      socket = Cast.openSocket('sender', ticket, {
+        welcome: (frame) => {
+          iceServers = frame.ice_servers || [];
+          if (frame.peer) startOffer().catch((e) => teardown(e.message, true));
+          else setStatus('Warte auf das Display…');
+        },
+        peer: (connected) => {
+          if (connected) startOffer().catch((e) => teardown(e.message, true));
+          else teardown('Das Display hat die Verbindung beendet.');
+        },
+        signal: (data) => { onSignal(data).catch(console.error); },
+        error: (frame) => teardown(frame.message || 'Fehler', true),
+        closed: () => teardown('Verbindung zum Server verloren.', true),
+      });
+    }
+
+    async function share(kind) {
+      // Open access has no code step, so the slot is claimed here instead --
+      // still before the picker, so "someone else is casting" is known first.
+      if (!ticket) {
+        setStatus('Sitzung wird reserviert…');
+        const result = await claim(null);
+        if (!result.ok) {
+          setStatus(result.error, true);
+          return;
+        }
+      }
+
+      el('audioWarning').hidden = true;
+      setStatus('Freigabe wird angefordert…');
+
+      try {
+        // Must run inside the click handler: both APIs require a user gesture.
+        stream = kind === 'camera'
+          ? await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      } catch (error) {
+        // The reservation is kept: cancelling the picker usually means another
+        // attempt in a moment, and re-typing the code for that would be rude.
+        setStatus('Zugriff nicht möglich: ' + error.message, true);
+        return;
+      }
+
+      if (kind !== 'camera' && stream.getAudioTracks().length === 0)
+        el('audioWarning').hidden = false;
+
+      // Fires when the user hits the browser's own "Stop sharing" button.
+      stream.getTracks().forEach((track) => {
+        track.addEventListener('ended', () => {
+          if (socket) socket.stop();
+          teardown('Übertragung beendet.');
+        });
+      });
+
+      showLive(true);
+      connect();
+    }
+
+    el('shareScreen').addEventListener('click', () => share('screen'));
+    el('shareCamera').addEventListener('click', () => share('camera'));
+    el('stopShare').addEventListener('click', () => {
+      if (socket) socket.stop();
+      teardown('Übertragung beendet.');
+    });
+
+    el('requestCode').addEventListener('click', async () => {
+      setStatus('');
+      setCodeStatus('Code wird auf dem Display angezeigt…', null);
+      try {
+        const res = await fetch('/api/cast/pair', { method: 'POST' });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          setCodeStatus(body.error || 'Code konnte nicht angefordert werden.', 'bad');
+          return;
+        }
+        const body = await res.json();
+        setCodeStatus(`Code steht auf dem Display (${body.expires_in}s gültig).`, null);
+        clearCode();
+      } catch (_) {
+        setCodeStatus('Controller nicht erreichbar.', 'bad');
+      }
+    });
+
+    // navigator.mediaDevices only exists in a secure context. Saying so beats an
+    // opaque TypeError when someone reaches this page over plain HTTP.
+    function checkSecureContext() {
+      if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) return true;
+      setShareEnabled(false);
+      setStatus(
+        'Dieser Browser erlaubt keine Bildschirmfreigabe. Die Seite muss über https:// '
+        + 'geöffnet werden, und mobile Browser unterstützen das Teilen des Bildschirms nicht.',
+        true
+      );
+      return false;
+    }
+
+    fetch('/api/cast/info')
+      .then((res) => res.json())
+      .then((info) => {
+        // Reached over plain HTTP from the LAN: there is no getDisplayMedia here,
+        // so send the guest to the TLS origin instead of letting them hit a wall.
+        // Loopback is left alone -- it is already a secure context.
+        if (location.protocol === 'http:' && info.sender_url
+            && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)) {
+          location.replace(info.sender_url);
+          return;
+        }
+
+        authMode = info.auth || 'none';
+        showLive(false);
+
+        if (!info.enabled) {
+          el('setup').hidden = true;
+          setStatus('Übertragung ist auf diesem Gerät deaktiviert.', true);
+          return;
+        }
+        if (!checkSecureContext()) return;
+
+        // With a code step, sharing unlocks only once the code checks out.
+        setShareEnabled(authMode === 'none');
+        if (authMode === 'code') {
+          setCodeStatus('Code eingeben, um die Sitzung zu reservieren.', null);
+          codeInputs[0].focus();
+        }
+        if (info.busy) setStatus('Es überträgt gerade jemand anderes.', true);
+      })
+      .catch(() => setStatus('Controller nicht erreichbar.', true));
+  </script>
+</body>
+</html>

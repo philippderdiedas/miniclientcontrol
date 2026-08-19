@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::sync::Mutex;
-use clap::Parser;
+use tokio::sync::{Mutex, RwLock};
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 // --- Config ---
@@ -11,9 +11,19 @@ use std::path::PathBuf;
 #[derive(Parser, Clone, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// Port for the web server
+    /// Port for the plain-HTTP server
     #[arg(long, env, default_value_t = 3000)]
     pub port: u16,
+
+    /// Address the plain-HTTP server binds to.
+    ///
+    /// Loopback by default: that listener exists for the display browser, which
+    /// fetches assets from `http://127.0.0.1` and treats it as a secure context
+    /// anyway. Everything a human touches goes over TLS, so basic-auth
+    /// credentials never cross the network in the clear. Set to `0.0.0.0` only
+    /// if something outside this device really needs the unencrypted API.
+    #[arg(long, env, default_value = "127.0.0.1")]
+    pub http_listen: std::net::IpAddr,
 
     /// Directory to store uploaded assets
     #[arg(long, env, default_value = "./assets")]
@@ -34,6 +44,106 @@ pub struct Args {
     /// Basic auth password (set together with basic_auth_user)
     #[arg(long, env)]
     pub basic_auth_password: Option<String>,
+
+    /// Disable screen casting entirely (no HTTPS listener, no signaling endpoints)
+    #[arg(long, env, default_value_t = false)]
+    pub disable_cast: bool,
+
+    /// Port for the HTTPS listener that serves the cast sender page.
+    ///
+    /// Screen sharing needs a secure context, which plain HTTP on a LAN address
+    /// is not. Left unset, the listener takes 3443 or the next free port after
+    /// it; set explicitly, a clash is a startup error instead.
+    #[arg(long, env)]
+    pub cast_tls_port: Option<u16>,
+
+    /// Path to the self-signed cast certificate (generated if missing)
+    #[arg(long, env, default_value = "cast-cert.pem")]
+    pub cast_cert_path: PathBuf,
+
+    /// Extra hostnames/IPs to put in the cast certificate. Repeatable.
+    #[arg(long, env, value_delimiter = ',')]
+    pub cast_cert_san: Vec<String>,
+
+    /// How a sender proves it is allowed to cast.
+    ///
+    /// Unset means the stored setting applies and the admin UI may change it;
+    /// passing it pins the value and locks that control.
+    #[arg(long, env, value_enum)]
+    pub cast_auth: Option<CastAuth>,
+
+    /// Fixed pairing code for --cast-auth=code. Pins the stored value when given.
+    #[arg(long, env)]
+    pub cast_code: Option<String>,
+
+    /// Do not start a browser; only connect to one that is already running.
+    #[arg(long, env, default_value_t = false)]
+    pub no_launch_browser: bool,
+
+    /// Path to the Chrome/Chromium binary. Autodetected when unset.
+    #[arg(long, env)]
+    pub chromium: Option<PathBuf>,
+
+    /// Profile directory for the browser we start. Rewritten on every launch.
+    ///
+    /// Defaults to `/tmp/miniclientcontrol-chromium-<cdp-port>`. It **must** differ
+    /// between instances on one machine: a second Chromium started on a profile
+    /// that is already in use hands its URL to the running one and exits, taking
+    /// its debugging port with it — so the second display would silently never
+    /// come up.
+    #[arg(long, env)]
+    pub chromium_user_data_dir: Option<PathBuf>,
+
+    /// `WM_CLASS` of the browser window, for window-manager placement rules.
+    ///
+    /// Defaults to `miniclientcontrol-<cdp-port>`. With two displays this is what
+    /// an i3 `assign [class="..."] <workspace>` rule matches on.
+    #[arg(long, env)]
+    pub chromium_class: Option<String>,
+
+    /// Do not start the browser in kiosk mode (useful when testing on a desktop)
+    #[arg(long, env, default_value_t = false)]
+    pub no_kiosk: bool,
+
+    /// Extra browser flags, repeatable (e.g. --chromium-arg=--ozone-platform=wayland)
+    #[arg(long, env)]
+    pub chromium_arg: Vec<String>,
+
+    /// Languages written into the browser profile.
+    ///
+    /// Chromium offers to translate a page whose language is not in this list, and
+    /// that bubble cannot be suppressed by a flag on Linux — so the fix is to make
+    /// the list match what the signage actually shows.
+    #[arg(long, env, default_value = "de,de-DE,en-US,en")]
+    pub browser_language: String,
+
+    /// How guests reach this device, when it is not simply its LAN address.
+    ///
+    /// * `none`    — use the primary IPv4 address (default)
+    /// * `mdns`    — use `<hostname>.local`, which needs Avahi on the device
+    /// * anything else — used literally, either as a host (`signage.example.com`)
+    ///   or as a full base URL (`https://signage.example.com`) for a device that
+    ///   sits behind a proxy
+    #[arg(long, env, default_value = "none")]
+    pub public_url: String,
+
+    /// Optional STUN server for cast ICE. Only needed when host candidates on the
+    /// LAN do not connect (mDNS `.local` candidates failing to resolve).
+    #[arg(long, env)]
+    pub cast_stun_url: Option<String>,
+}
+
+/// How the cast sender authenticates. Basic auth is deliberately not an option:
+/// it would hand the operator password to every guest who wants to share a screen.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CastAuth {
+    /// Anyone who can reach the page may cast. Appropriate on a trusted LAN.
+    None,
+    /// A fixed code from --cast-code, known out of band (label on the display).
+    Code,
+    /// A fresh code shown on the display for 30s when a sender asks to pair.
+    Pairing,
 }
 
 // --- Models ---
@@ -153,4 +263,21 @@ pub struct AppState {
     /// therefore clobber the request.
     pub pending_jump: Arc<Mutex<Option<i64>>>,
     pub override_item: Arc<Mutex<Option<OverrideItem>>>,
+    /// The port the cast listener actually bound, which is not necessarily the
+    /// one in `args` — see `tls::bind_cast_listener`.
+    pub cast_tls_port: u16,
+    /// Operator-editable configuration. Read on nearly every request, so it sits
+    /// behind its own `RwLock` rather than inside the cast session's mutex,
+    /// which is held across signaling work.
+    pub settings: Arc<RwLock<crate::settings::AppSettings>>,
+    /// Which settings the command line pinned. Fixed for the process lifetime.
+    pub locks: crate::settings::Locks,
+    /// The last `Authorization` header that verified successfully.
+    ///
+    /// Stored passwords are PBKDF2 hashes, which are deliberately slow; the
+    /// operator UI polls every two seconds, so verifying every request would
+    /// burn real time on a Pi. Cleared whenever the credentials change.
+    pub auth_cache: Arc<Mutex<Option<String>>>,
+    /// Screen-cast session. A running cast owns `override_item`; see `cast.rs`.
+    pub cast: crate::cast::SharedCastSession,
 }

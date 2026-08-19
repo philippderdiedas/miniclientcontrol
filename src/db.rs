@@ -86,5 +86,35 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             .await;
     }
 
+    // 7. Runtime settings the operator can change without a restart.
+    // Key/value rather than columns: these are a handful of unrelated scalars,
+    // and adding one should not need another ALTER TABLE probe.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );"
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn load_setting(pool: &Pool<Sqlite>, key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None)
+}
+
+pub async fn save_setting(pool: &Pool<Sqlite>, key: &str, value: &str) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await?;
     Ok(())
 }

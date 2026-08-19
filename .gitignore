@@ -1,3 +1,11 @@
 /target
 /assets
 /*.db
+# Cast TLS certificate -- contains the private key
+cast-cert.pem
+cast-cert.pem.sans
+tests/cast/*.db
+tests/cast/cert.pem*
+tests/cast/assets/
+tests/cast/*-profile/
+tests/cast/__pycache__/

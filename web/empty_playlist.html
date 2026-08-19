@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -14,33 +14,110 @@
       background: #fff;
       color: #222;
     }
-    .wrap {
-      text-align: center;
-      padding: 2rem;
-      max-width: 720px;
+    .wrap { text-align: center; padding: 2rem; max-width: 900px; }
+    img.logo { width: min(280px, 60vw); height: auto; margin-bottom: 1.25rem; }
+    h1 { margin: 0 0 .75rem; font-size: 1.9rem; font-weight: 700; }
+    p { margin: 0; font-size: 1.15rem; line-height: 1.5; }
+
+    /* An idle screen is the best possible place to say how to use it. */
+    .cast {
+      margin-top: 2.5rem;
+      padding-top: 1.75rem;
+      border-top: 1px solid #ddd;
+      display: flex;
+      gap: 2rem;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
     }
-    img {
-      width: min(320px, 70vw);
-      height: auto;
-      margin-bottom: 1.25rem;
+    .cast h2 { margin: 0 0 .6rem; font-size: 1.35rem; }
+    .cast .text { text-align: left; }
+    .url {
+      font-family: ui-monospace, monospace;
+      font-size: clamp(1.2rem, 2.6vw, 1.9rem);
+      background: #f2f2f2;
+      border-radius: .5rem;
+      padding: .35rem .8rem;
+      display: inline-block;
+      margin-top: .3rem;
     }
-    h1 {
-      margin: 0 0 .75rem;
-      font-size: 1.9rem;
+    .qr { width: clamp(150px, 20vw, 230px); height: auto; display: block; }
+    .code { display: flex; gap: .4rem; margin-top: .9rem; }
+    .code span {
+      font-family: ui-monospace, monospace;
+      font-size: clamp(1.6rem, 4vw, 2.6rem);
       font-weight: 700;
+      line-height: 1;
+      border: 3px solid #222;
+      border-radius: .45rem;
+      padding: .25em .2em;
+      min-width: 1.1em;
+      text-align: center;
     }
-    p {
-      margin: 0;
-      font-size: 1.15rem;
-      line-height: 1.5;
-    }
+    .hint { color: #666; font-size: 1rem; margin-top: .6rem; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <main class="wrap">
-    <img src="/logo.svg" alt="Logo" />
-    <h1>No playlist items available</h1>
-    <p>Please create and enable playlist items in Playlist Management.</p>
+    <img class="logo" src="/logo.svg" alt="Logo" />
+    <h1>Keine Playlist-Inhalte</h1>
+    <p>Bitte im Verwaltungsbereich Einträge anlegen und aktivieren.</p>
+
+    <section class="cast" id="cast" hidden>
+      <img class="qr" id="qr" alt="QR-Code zur Übertragungsseite" />
+      <div class="text">
+        <h2>Bildschirm hierher übertragen</h2>
+        <p>QR-Code scannen oder im Browser öffnen:</p>
+        <div class="url" id="url">…</div>
+        <div class="code" id="code" hidden></div>
+        <p class="hint" id="hint"></p>
+      </div>
+    </section>
   </main>
+
+  <script>
+    // `/api/cast/state` rather than `/api/cast/info`: this page is only ever
+    // rendered by the display browser over loopback, and it is the loopback
+    // endpoint that also carries the standing code.
+    async function showCast() {
+      try {
+        const res = await fetch('/api/cast/state');
+        if (!res.ok) return;
+        const cast = await res.json();
+        if (!cast.enabled || cast.hard_disabled) {
+          document.getElementById('cast').hidden = true;
+          return;
+        }
+
+        document.getElementById('url').textContent = cast.sender_url;
+        // Cache-busted so the QR follows a changed address without a reload loop.
+        document.getElementById('qr').src = '/api/cast/qr.svg?v=' + encodeURIComponent(cast.sender_url);
+
+        const codeBox = document.getElementById('code');
+        codeBox.replaceChildren();
+        if (cast.auth === 'code' && cast.code) {
+          for (const char of cast.code) {
+            const cell = document.createElement('span');
+            cell.textContent = char;
+            codeBox.appendChild(cell);
+          }
+          codeBox.hidden = false;
+          document.getElementById('hint').textContent = 'Diesen Code auf der Seite eingeben.';
+        } else {
+          codeBox.hidden = true;
+          document.getElementById('hint').textContent = cast.auth === 'pairing'
+            ? 'Ein Code erscheint hier, sobald jemand eine Übertragung anfordert.'
+            : '';
+        }
+        document.getElementById('cast').hidden = false;
+      } catch (_) {
+        // Controller restarting; the next tick picks it up.
+      }
+    }
+
+    showCast();
+    setInterval(showCast, 10000);
+  </script>
 </body>
 </html>

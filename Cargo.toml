@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"] }
-axum = { version = "0.8.1", features = ["multipart", "macros"] }
+axum = { version = "0.8.1", features = ["multipart", "macros", "ws"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 chromiumoxide = "0.9.0"
 futures = "0.3.32"
@@ -24,3 +24,16 @@ chrono = { version = "0.4.39", features = ["serde"] }
 include_dir = "0.7"
 urlencoding = "2.1"
 base64 = "0.22"
+
+# Cast: HTTPS listener. getDisplayMedia only works in a secure context, so the
+# sender page cannot be served over plain HTTP from a LAN IP.
+# rustls defaults to aws-lc-rs, which needs a C toolchain and does not
+# cross-compile cleanly to armv7 -- pin the pure-Rust ring backend instead.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rcgen = "0.14"   # default features already select ring
+rand = "0.9"
+# svg only -- the default `image` feature drags in the whole image crate
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# already in the tree via rustls/rcgen; used directly for PBKDF2 password hashing
+ring = "0.17"

@@ -3,6 +3,11 @@ mod handlers;
 mod models;
 mod browser;
 mod web;
+mod tls;
+mod cast;
+mod settings;
+mod chromium;
+mod mdns;
 
 use anyhow::Result;
 use axum::{
@@ -32,10 +37,7 @@ use handlers::{
 use browser::browser_loop;
 use web::serve_embedded_ui;
 
-#[derive(Clone)]
-struct BasicAuthConfig {
-    expected_header: String,
-}
+
 
 /// Paths the *display* browser fetches. Chromium runs on this device over CDP and
 /// has no way to present credentials, so requiring auth here blanks the signage.
@@ -53,28 +55,76 @@ fn is_display_path(path: &str) -> bool {
             | "/no_content.svg"
             | "/empty_playlist.html"
             | "/logo.svg"
+            // the cast display page reads this to show the sender's HTTPS address;
+            // remote operators still need credentials for it
+            | "/api/cast/state"
     )
 }
 
+/// Decode a `Basic` header into its user and password halves.
+fn decode_basic(header: &str) -> Option<(String, String)> {
+    let encoded = header.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (user, password) = text.split_once(':')?;
+    Some((user.to_string(), password.to_string()))
+}
+
+/// Guards the operator surface.
+///
+/// Always installed, because credentials can now be switched on at runtime from
+/// the admin UI -- there is no longer a startup-time answer to "is auth on".
 async fn basic_auth_middleware(
-    State(auth): State<BasicAuthConfig>,
+    State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    if peer.ip().is_loopback() && is_display_path(request.uri().path()) {
+    let path = request.uri().path();
+
+    if peer.ip().is_loopback() && is_display_path(path) {
         return next.run(request).await;
     }
 
-    let authorized = headers
+    // The cast sender is a guest's laptop on the LAN, not the operator and not
+    // loopback, so this exemption is *not* address-scoped. Requiring basic auth
+    // here would mean handing the operator password to everyone who wants to
+    // share a screen; the cast's own auth guards these routes instead. Gated on
+    // the hard switch only: with casting merely turned off at runtime the page
+    // still has to load to say so.
+    if !state.args.disable_cast && cast::is_cast_public_path(path) {
+        return next.run(request).await;
+    }
+
+    let (expected_user, secret) = {
+        let settings = state.settings.read().await;
+        (settings.auth_user.clone(), settings.auth_secret.clone())
+    };
+    let (Some(expected_user), Some(secret)) = (expected_user, secret) else {
+        return next.run(request).await;
+    };
+
+    let provided = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value == auth.expected_header)
-        .unwrap_or(false);
+        .unwrap_or("");
 
-    if authorized {
-        return next.run(request).await;
+    if !provided.is_empty() {
+        // A stored password is a PBKDF2 hash, which is slow by design. The admin
+        // page polls every two seconds, so repeat the full check only when the
+        // header is one we have not already accepted.
+        if state.auth_cache.lock().await.as_deref() == Some(provided) {
+            return next.run(request).await;
+        }
+        if let Some((user, password)) = decode_basic(provided) {
+            if settings::constant_time_eq(user.as_bytes(), expected_user.as_bytes())
+                && secret.verify(&password)
+            {
+                *state.auth_cache.lock().await = Some(provided.to_string());
+                return next.run(request).await;
+            }
+        }
     }
 
     let mut response = StatusCode::UNAUTHORIZED.into_response();
@@ -110,16 +160,41 @@ async fn main() -> Result<()> {
     // Schema lives entirely in db::run_migrations so there is a single source of truth.
     db::run_migrations(&pool).await?;
 
-    let basic_auth_config = match (&args.basic_auth_user, &args.basic_auth_password) {
-        (Some(user), Some(password)) => {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", user, password));
-            Some(BasicAuthConfig {
-                expected_header: format!("Basic {}", encoded),
-            })
-        }
-        (None, None) => None,
-        _ => anyhow::bail!("Both --basic-auth-user and --basic-auth-password must be set together"),
+    // Stored settings, with anything passed on the command line winning.
+    let app_settings = settings::load(&pool, &args).await;
+    let locks = settings::Locks::from_args(&args);
+    // Not a hard failure: casting must never keep the signage from booting, and
+    // an operator can now fix this in the admin UI without a restart. Senders are
+    // refused with an explicit reason until then.
+    if !args.disable_cast
+        && app_settings.cast_auth == models::CastAuth::Code
+        && app_settings.cast_code.is_empty()
+    {
+        tracing::error!(
+            "Cast auth is set to 'code' but no code is configured -- every sender \
+             will be refused until one is set in the admin UI or via --cast-code"
+        );
+    }
+
+    if args.basic_auth_user.is_some() != args.basic_auth_password.is_some() {
+        anyhow::bail!("Both --basic-auth-user and --basic-auth-password must be set together");
+    }
+
+    // Bound before anything else needs the port: a clash has to surface as a
+    // startup failure, and the resolved port feeds the URLs handed to guests.
+    let cast_listener = if args.disable_cast {
+        None
+    } else {
+        tls::check_mdns(&args.public_url).await;
+        let listener = tls::bind_cast_listener(args.cast_tls_port)?;
+        listener.set_nonblocking(true)?;
+        Some(listener)
     };
+    let cast_tls_port = cast_listener
+        .as_ref()
+        .and_then(|listener| listener.local_addr().ok())
+        .map(|addr| addr.port())
+        .unwrap_or(tls::DEFAULT_CAST_TLS_PORT);
 
     // 3. Init State
     let state = AppState {
@@ -131,7 +206,24 @@ async fn main() -> Result<()> {
         current_item_id: Arc::new(Mutex::new(None)),
         pending_jump: Arc::new(Mutex::new(None)),
         override_item: Arc::new(Mutex::new(None)),
+        cast: Arc::new(Mutex::new(Default::default())),
+        cast_tls_port,
+        settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
+        locks,
+        auth_cache: Arc::new(Mutex::new(None)),
     };
+
+    // A custom `.local` name has to be announced; Avahi only does the hostname.
+    let mdns_args = state.args.clone();
+    tokio::spawn(async move { mdns::supervise(mdns_args).await });
+
+    // Keep a browser alive on the CDP port. Skipped when something else manages
+    // it (an existing sway `exec` line), which the supervisor detects by finding
+    // the port already answering.
+    if !args.no_launch_browser {
+        let browser_args = state.args.clone();
+        tokio::spawn(async move { chromium::supervise(browser_args).await });
+    }
 
     // 4. Spawn Browser Controller Task
     let browser_state = state.clone();
@@ -154,22 +246,71 @@ async fn main() -> Result<()> {
             "/api/override",
             get(get_override).post(set_override).delete(clear_override),
         )
+        .merge(cast::routes())
+        .merge(settings::routes())
         .nest_service("/uploads", serve_dir)
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(state.clone());
 
-    let app = if let Some(auth) = basic_auth_config {
-        tracing::info!("HTTP Basic Auth enabled");
-        app.layer(middleware::from_fn_with_state(auth, basic_auth_middleware))
+    let app = app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        basic_auth_middleware,
+    ));
+
+    // The cast sender page needs HTTPS (secure context), everything else is happy
+    // over plain HTTP. Both listeners serve the *same* Router and the same AppState,
+    // so a sender on the TLS origin and the display on loopback meet in one signaling
+    // registry -- and the sender never has to fetch across origins, which is what
+    // forced the mixed-content proxy in the picklecast setup this replaces.
+    if let Some(listener) = cast_listener {
+        // A name guests are told to type has to be in the certificate too, or
+        // they get a name mismatch on top of the unknown-issuer warning.
+        let mut cert_names = args.cast_cert_san.clone();
+        if let Some(host) = tls::public_host(&args.public_url) {
+            cert_names.push(host);
+        }
+        match tls::load_cast_tls(&args.cast_cert_path, &cert_names).await {
+            Ok(config) => {
+                let tls_app = app.clone();
+                tracing::info!(
+                    "Guests: https://{ip}:{port}/  |  Operator: https://{ip}:{port}/admin.html",
+                    ip = tls::primary_local_ipv4(),
+                    port = cast_tls_port
+                );
+                let server = axum_server::from_tcp_rustls(listener, config)?;
+                tokio::spawn(async move {
+                    // ConnectInfo here too: without it the loopback exemption in
+                    // basic_auth_middleware panics on the extractor for TLS requests.
+                    if let Err(e) = server
+                        .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>())
+                        .await
+                    {
+                        tracing::error!("Cast HTTPS listener stopped: {}", e);
+                    }
+                });
+            }
+            // A certificate problem must never take the signage down with it --
+            // the playlist does not need TLS, only screen casting does. A port
+            // clash is different and already failed above: that one usually means
+            // a second copy of this binary is running.
+            Err(e) => tracing::error!("Cast HTTPS listener disabled: {:#}", e),
+        }
+    }
+
+    // Loopback by default -- see Args::http_listen. The display browser is the
+    // only intended client of this listener.
+    let addr = SocketAddr::new(args.http_listen, args.port);
+    if addr.ip().is_loopback() {
+        tracing::info!("Local HTTP (display browser) on {}", addr);
     } else {
-        tracing::warn!("HTTP Basic Auth is disabled");
-        app
-    };
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
-    tracing::info!("Listening on {}", addr);
+        tracing::warn!(
+            "Plain HTTP is exposed on {} -- basic-auth credentials sent to it \
+             travel unencrypted",
+            addr
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // ConnectInfo is required by basic_auth_middleware to recognise loopback peers.

@@ -14,6 +14,22 @@
       text-decoration: none; color: #111; margin-right: .5rem;
     }
     a.button:hover { background: #f0f0f0; }
+    button {
+      font: inherit; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px;
+      background: #fff; cursor: pointer;
+    }
+    button:hover { background: #f0f0f0; }
+    [hidden] { display: none !important; }
+    hr { border: none; border-top: 1px solid #e5e5e5; margin: 1rem 0; }
+    select, input[type="text"], #setCode {
+      font: inherit; padding: .35rem .5rem; border: 1px solid #bbb; border-radius: 5px;
+    }
+    #setCode { text-transform: uppercase; font-family: ui-monospace, monospace; }
+    label { margin-right: .4rem; }
+    .ok { color: #0b6b3a; }
+    .bad { color: #a11; }
+    .lock { color: #8a5a00; font-size: .85rem; margin-left: .4rem; }
+    input:disabled, select:disabled { background: #f3f3f3; color: #888; }
     .muted { color: #666; }
     .status { font-weight: 600; }
   </style>
@@ -29,6 +45,68 @@
   <div class="card">
     <a class="button" href="/playlist.html">Playlist</a>
     <a class="button" href="/assets.html">Assets</a>
+  </div>
+
+  <div class="card" id="castCard" hidden>
+    <p class="status" id="castStatus">Übertragung: –</p>
+    <p class="muted" id="castHint"></p>
+    <button id="castStop" hidden>Übertragung beenden</button>
+
+    <hr />
+    <p class="muted" id="castHardOff" hidden>
+      Casting ist per <code>--disable-cast</code> abgeschaltet. Diese Einstellungen
+      greifen erst nach einem Neustart ohne dieses Flag.
+    </p>
+    <div id="castSettings">
+      <p>
+        <label><input type="checkbox" id="setEnabled" /> Übertragung erlauben</label>
+        <span class="lock" id="lockEnabled" hidden>per Kommandozeile festgelegt</span>
+      </p>
+      <p>
+        <label for="setAuth">Zugang:</label>
+        <select id="setAuth">
+          <option value="none">Offen — jeder im Netz kann übertragen</option>
+          <option value="code">Fester Code</option>
+          <option value="pairing">Code erscheint auf dem Display</option>
+        </select>
+        <span class="lock" id="lockAuth" hidden>per Kommandozeile festgelegt</span>
+      </p>
+      <p id="setCodeRow" hidden>
+        <label for="setCode">Code (4 Zeichen):</label>
+        <input id="setCode" maxlength="4" size="6" autocomplete="off" />
+        <span class="lock" id="lockCode" hidden>per Kommandozeile festgelegt</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="card" id="authCard">
+    <p class="status">Zugang zur Verwaltung</p>
+    <p class="muted" id="lockAuthBasic" hidden>
+      Per <code>--basic-auth-user</code> / <code>--basic-auth-password</code>
+      festgelegt und hier nicht änderbar.
+    </p>
+    <div id="authSettings">
+      <p>
+        <label><input type="checkbox" id="authEnabled" /> Anmeldung verlangen</label>
+      </p>
+      <div id="authFields" hidden>
+        <p>
+          <label for="authUser">Benutzer:</label>
+          <input id="authUser" autocomplete="username" />
+        </p>
+        <p>
+          <label for="authPassword">Passwort:</label>
+          <input id="authPassword" type="password" autocomplete="new-password"
+                 placeholder="unverändert lassen" />
+        </p>
+      </div>
+      <p class="muted">
+        Gilt für Verwaltung, Playlist und Assets. Die Gästeseite bleibt offen —
+        wer überträgt, wird über den Zugang oben geregelt.
+      </p>
+    </div>
+    <button id="setSave">Alle Einstellungen speichern</button>
+    <span class="muted" id="setFeedback"></span>
   </div>
 
   <script>
@@ -63,8 +141,146 @@
       }
     }
 
+    // The cast card polls separately: it is the one thing on this page an
+    // operator may need to act on while a meeting is running.
+    async function refreshCast() {
+      const card = document.getElementById('castCard');
+      const status = document.getElementById('castStatus');
+      const hint = document.getElementById('castHint');
+      const stop = document.getElementById('castStop');
+      try {
+        const res = await fetch('/api/cast/state');
+        if (!res.ok) { card.hidden = true; return; }
+        const cast = await res.json();
+        card.hidden = false;
+        document.getElementById('castHardOff').hidden = !cast.hard_disabled;
+
+        if (!cast.enabled || cast.hard_disabled) {
+          status.textContent = cast.hard_disabled
+            ? 'Übertragung: per Startparameter abgeschaltet'
+            : 'Übertragung: deaktiviert';
+          hint.textContent = '';
+          stop.hidden = true;
+          return;
+        }
+        if (!cast.active) {
+          status.textContent = 'Übertragung: bereit';
+          hint.textContent = `Sender-Seite: ${cast.sender_url} (Zugang: ${cast.auth})`;
+          stop.hidden = true;
+          return;
+        }
+        const since = cast.started_at
+          ? new Date(cast.started_at).toLocaleTimeString('de-DE')
+          : '?';
+        status.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
+        hint.textContent = cast.display_connected
+          ? 'Display ist verbunden. Playlist pausiert.'
+          : 'Warte auf das Display…';
+        stop.hidden = false;
+      } catch (_) {
+        card.hidden = true;
+      }
+    }
+
+    // Settings form.
+    //
+    // Loaded once and after each save, never on the status poll: the form *is*
+    // the state, so a periodic refresh would eat what the operator is typing.
+    // (Same reason playlist.html never re-renders its cards on a tick.)
+    const LOCK_FIELDS = {
+      cast_enabled: ['setEnabled', 'lockEnabled'],
+      cast_auth: ['setAuth', 'lockAuth'],
+      cast_code: ['setCode', 'lockCode'],
+    };
+
+    function syncCodeRow() {
+      document.getElementById('setCodeRow').hidden =
+        document.getElementById('setAuth').value !== 'code';
+    }
+
+    function syncAuthFields() {
+      document.getElementById('authFields').hidden =
+        !document.getElementById('authEnabled').checked;
+    }
+
+    function applySettings(settings) {
+      document.getElementById('setEnabled').checked = settings.cast_enabled;
+      document.getElementById('setAuth').value = settings.cast_auth;
+      document.getElementById('setCode').value = settings.cast_code || '';
+      document.getElementById('authEnabled').checked = settings.auth_enabled;
+      document.getElementById('authUser').value = settings.auth_user || '';
+      document.getElementById('authPassword').value = '';
+
+      // A control the command line pinned is shown as pinned rather than
+      // silently discarding edits.
+      const locks = settings.locks || {};
+      for (const [key, [control, label]] of Object.entries(LOCK_FIELDS)) {
+        document.getElementById(control).disabled = !!locks[key];
+        document.getElementById(label).hidden = !locks[key];
+      }
+      const authLocked = !!locks.basic_auth;
+      document.getElementById('lockAuthBasic').hidden = !authLocked;
+      ['authEnabled', 'authUser', 'authPassword'].forEach((id) => {
+        document.getElementById(id).disabled = authLocked;
+      });
+
+      syncCodeRow();
+      syncAuthFields();
+    }
+
+    async function loadSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        if (res.ok) applySettings(await res.json());
+      } catch (_) { /* the status poll reports unreachability */ }
+    }
+
+    document.getElementById('setAuth').addEventListener('change', syncCodeRow);
+    document.getElementById('authEnabled').addEventListener('change', syncAuthFields);
+
+    function feedback(message, ok) {
+      const node = document.getElementById('setFeedback');
+      node.textContent = message;
+      node.className = ok ? 'ok' : 'bad';
+    }
+
+    document.getElementById('setSave').addEventListener('click', async () => {
+      feedback('', true);
+      const password = document.getElementById('authPassword').value;
+      const body = {
+        cast_enabled: document.getElementById('setEnabled').checked,
+        cast_auth: document.getElementById('setAuth').value,
+        cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
+        auth_enabled: document.getElementById('authEnabled').checked,
+        auth_user: document.getElementById('authUser').value.trim(),
+      };
+      // An empty field means "keep the current password", not "clear it".
+      if (password) body.auth_password = password;
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const problem = await res.json().catch(() => ({}));
+          feedback(problem.error || 'Speichern fehlgeschlagen.', false);
+          return;
+        }
+        applySettings(await res.json());
+        feedback('Gespeichert.', true);
+        refreshCast();
+      } catch (_) {
+        feedback('Controller nicht erreichbar.', false);
+      }
+    });
+
     refresh();
+    refreshCast();
+    loadSettings();
     setInterval(refresh, 3000);
+    setInterval(refreshCast, 2000);
   </script>
 </body>
 </html>

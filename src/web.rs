@@ -1,5 +1,5 @@
 use axum::http::{header, HeaderValue, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use include_dir::{include_dir, Dir};
 
 static WEB_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/web");
@@ -10,6 +10,13 @@ pub async fn serve_embedded_ui(uri: Uri) -> Response {
 
     if path.contains("..") {
         return StatusCode::BAD_REQUEST.into_response();
+    }
+
+    // The sender page moved to `/` so guests can be handed a short URL. Redirect
+    // rather than serve both, so there is one canonical address and the browser's
+    // address bar shows it.
+    if path == "cast.html" {
+        return Redirect::permanent("/").into_response();
     }
 
     if let Some(file) = WEB_DIR.get_file(path) {
