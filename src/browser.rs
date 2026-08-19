@@ -23,7 +23,26 @@ pub async fn browser_loop(state: AppState) {
 
     loop {
         // 1. Launch or Connect to Chrome
-        let (mut browser, mut handler) = match Browser::connect(&state.args.cdp_url).await {
+        // Deliberately permissive. Signage routinely points at internal dashboards
+        // on self-signed certificates, and whoever adds a playlist URL is the one
+        // deciding it is trustworthy -- there is no end user here to protect from
+        // their own click. This is also chromiumoxide's own default.
+        //
+        // It cannot be made per item even if we wanted to: sending
+        // `Security.setIgnoreCertificateErrors` to the adopted control page has no
+        // effect (verified -- the page still lands on
+        // `chrome-error://chromewebdata/`). Only the handler setting takes, and it
+        // is applied once, while each target is initialised.
+        let handler_config = chromiumoxide::handler::HandlerConfig {
+            ignore_https_errors: true,
+            ..Default::default()
+        };
+        let (mut browser, mut handler) = match Browser::connect_with_config(
+            &state.args.cdp_url,
+            handler_config,
+        )
+        .await
+        {
             Ok(res) => res,
             Err(_) => {
                 info!("Could not launch browser, trying to connect to {}", state.args.cdp_url);
