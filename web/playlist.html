@@ -92,6 +92,10 @@
     .grid {
       display: flex; gap: .6rem 1rem; flex-wrap: wrap; align-items: flex-end;
     }
+    /* Must beat `.grid { display: flex }`: a class selector outranks the user
+       agent's `[hidden]` rule, so without this the scroll parameter rows stayed
+       on screen (and editable) after being marked hidden. */
+    [hidden] { display: none !important; }
     label.f { display: flex; flex-direction: column; font-size: .85rem; color: var(--muted); }
     label.f > span { margin-bottom: .15rem; }
     label.inline { display: flex; align-items: center; gap: .35rem; font-size: .9rem; color: #222; }
@@ -111,7 +115,7 @@
 </head>
 <body>
   <h1>Playlist</h1>
-  <nav><a href="/">Home</a> · <a href="/assets.html">Assets</a></nav>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/assets.html">Assets</a></nav>
 
   <div class="statusbar">
     <strong id="nowPlaying">läuft: –</strong>
@@ -242,8 +246,15 @@
         field('Speed (px/frame)', speed), field('Top delay (ms)', topDelay), field('Return delay (ms)', returnDelay));
 
       const sync = () => {
-        stepRow.hidden = mode.value !== 'step';
-        contRow.hidden = mode.value !== 'continuous';
+        const active = mode.value;
+        stepRow.hidden = active !== 'step';
+        contRow.hidden = active !== 'continuous';
+        // Disabled as well as hidden: a control that does not apply should not be
+        // reachable by keyboard either, and it makes "None means none" explicit
+        // rather than relying on read() to ignore the values.
+        for (const row of [stepRow, contRow]) {
+          for (const input of row.querySelectorAll('input')) input.disabled = row.hidden;
+        }
       };
       mode.addEventListener('change', sync);
       sync();
