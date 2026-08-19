@@ -1,0 +1,144 @@
+"""Real WebRTC session: two Chrome instances, the real browser_loop, real media.
+
+The sender shares a synthetic camera rather than a screen, because a headless
+Chrome has no desktop to pick. Everything after the getMedia call -- addTrack,
+offer, relay, answer, ontrack, playback -- is the identical code path.
+"""
+import asyncio, json, os, shutil, subprocess, sys, time, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cdp
+from test_cast import check, failures, http
+
+SP = os.path.dirname(os.path.abspath(__file__))
+BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "debug", "miniclientcontrol")
+CHROME = "/usr/bin/google-chrome-stable"
+HTTP, TLS = 3031, 3474
+LAN = subprocess.run(["python3", "-c",
+    "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.connect(('10.254.254.254',1));print(s.getsockname()[0])"],
+    capture_output=True, text=True).stdout.strip()
+
+procs = []
+
+def spawn(cmd):
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(p)
+    return p
+
+def chrome(port, profile, *extra):
+    shutil.rmtree(f"{SP}/{profile}", ignore_errors=True)
+    return spawn([CHROME, "--headless=new", f"--remote-debugging-port={port}",
+                  f"--user-data-dir={SP}/{profile}", "--no-first-run", "--no-sandbox",
+                  "--disable-gpu", "--window-size=1280,720", *extra, "about:blank"])
+
+def wait_for(fn, timeout=30, interval=0.3):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            value = fn()
+            if value:
+                return value
+        except Exception:
+            pass
+        time.sleep(interval)
+    return None
+
+async def main():
+    print(f"\n[10] real WebRTC through two Chrome instances (LAN {LAN})")
+
+    chrome(9222, "display-profile")
+    check("display chrome up", wait_for(lambda: cdp.targets(9222)) is not None)
+
+    spawn([BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
+           "--database-path", f"{SP}/browser.db", "--assets-dir", f"{SP}/assets",
+           "--cast-cert-path", f"{SP}/cert.pem", "--cdp-url", "http://127.0.0.1:9222"])
+    check("controller up", wait_for(lambda: http("GET", "/api/cast/info", port=HTTP)[0] == 200) is not None)
+
+    # the controller drives the display browser to the empty-playlist placeholder
+    got = wait_for(lambda: "empty_playlist" in (cdp.page_ws(9222)[1] or {}).get("url", ""), 40)
+    check("browser_loop took over the display browser", got is not None,
+          (cdp.page_ws(9222)[1] or {}).get("url"))
+
+    chrome(9223, "sender-profile", "--use-fake-ui-for-media-stream",
+           "--use-fake-device-for-media-stream", "--ignore-certificate-errors",
+           "--autoplay-policy=no-user-gesture-required")
+    check("sender chrome up", wait_for(lambda: cdp.targets(9223)) is not None)
+
+    sender_url = f"https://{LAN}:{TLS}/"
+    ws_url, _ = cdp.page_ws(9223)
+    async with cdp.Session(ws_url) as sender:
+        await sender.call("Page.enable")
+        await sender.call("Page.navigate", {"url": sender_url})
+        loaded = None
+        for _ in range(60):
+            loaded = await sender.eval("document.readyState === 'complete' && !!window.Cast")
+            if loaded:
+                break
+            await asyncio.sleep(0.4)
+        check("sender page loaded over TLS", bool(loaded))
+        check("TLS origin is a secure context (WebRTC precondition)",
+              await sender.eval("isSecureContext") is True)
+        check("getDisplayMedia is available there",
+              await sender.eval("!!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)") is True)
+
+        await sender.eval("document.getElementById('shareCamera').click()")
+
+        # the controller should pin the display and the display browser follow
+        pinned = wait_for(lambda: http("GET", "/api/override", port=HTTP)[1]["url"].endswith("cast_display.html"), 20)
+        check("cast pinned the display override", pinned is not None,
+              http("GET", "/api/override", port=HTTP)[1])
+
+        on_cast_page = wait_for(lambda: "cast_display" in (cdp.page_ws(9222)[1] or {}).get("url", ""), 40)
+        check("browser_loop navigated the display to the cast page", on_cast_page is not None,
+              (cdp.page_ws(9222)[1] or {}).get("url"))
+
+        display_ws, _ = cdp.page_ws(9222, lambda t: "cast_display" in t.get("url", ""))
+        async with cdp.Session(display_ws) as display:
+            streaming = None
+            for _ in range(75):
+                streaming = await display.eval(
+                    "(() => { const v = document.getElementById('video');"
+                    " return document.body.classList.contains('streaming')"
+                    " && v.videoWidth > 0 && v.readyState >= 2; })()")
+                if streaming:
+                    break
+                await asyncio.sleep(0.4)
+            check("video is actually playing on the display", bool(streaming),
+                  await display.eval("document.getElementById('video').videoWidth"))
+
+            dims = await display.eval(
+                "(() => { const v = document.getElementById('video');"
+                " return v.videoWidth + 'x' + v.videoHeight; })()")
+            print(f"        received video: {dims}")
+
+            state = await sender.eval(
+                "(() => document.getElementById('status').textContent)()")
+            print(f"        sender status: {state!r}")
+            check("sender reports a live connection", "läuft" in (state or ""), state)
+
+            status, st = http("GET", "/api/cast/state", port=HTTP)
+            check("state shows sender and display connected",
+                  st["active"] and st["display_connected"], st)
+
+            print("\n[11] stopping the cast returns the display to the playlist")
+            await sender.eval("document.getElementById('stopShare').click()")
+            back = wait_for(lambda: http("GET", "/api/override", port=HTTP)[1]["active"] is False, 20)
+            check("override cleared on stop", back is not None,
+                  http("GET", "/api/override", port=HTTP)[1])
+
+        recovered = wait_for(lambda: "empty_playlist" in (cdp.page_ws(9222)[1] or {}).get("url", ""), 40)
+        check("display browser returned to the playlist", recovered is not None,
+              (cdp.page_ws(9222)[1] or {}).get("url"))
+
+try:
+    asyncio.run(main())
+finally:
+    for p in procs:
+        p.terminate()
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except Exception:
+            p.kill()
+
+print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
+sys.exit(1 if failures else 0)
