@@ -19,6 +19,12 @@
     button.danger { border-color: #b55; color: #a11; }
     .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
     .muted { color: #666; }
+    .hint {
+      display: inline-block; margin-left: .35rem; width: 1.15em; height: 1.15em;
+      line-height: 1.15em; text-align: center; border-radius: 50%;
+      border: 1px solid #999; color: #666; font-size: .8em; font-weight: 400;
+      cursor: help;
+    }
     .err { color: #a11; }
     .feedback { font-size: .85rem; margin-left: .3rem; }
     .used { font-size: .85rem; }
@@ -35,13 +41,21 @@
     <span id="uploadMsg" class="muted"></span>
   </div>
 
+  <p class="muted">
+    Die <strong>Dauer</strong> hier ist die Voreinstellung des Assets. Ein
+    Playlist-Eintrag mit eigener Dauer hat Vorrang — dieser Wert greift also nur,
+    wenn dort keine gesetzt ist, und ersetzt sonst nur das Standardmaß von 10
+    Sekunden. Sinn: ein PDF bringt seine passende Standzeit selbst mit, auch wenn
+    es mehrfach eingeplant wird.
+  </p>
+
   <table>
     <thead>
       <tr>
         <th>ID</th>
         <th>Filename</th>
         <th>MIME</th>
-        <th>Dauer (s)</th>
+        <th>Dauer (s)<span class="hint" title="Voreinstellung dieses Assets: gilt nur, wenn der Playlist-Eintrag keine eigene Dauer hat.">?</span></th>
         <th>In Playlist</th>
         <th>Vorschau</th>
         <th>Aktionen</th>
