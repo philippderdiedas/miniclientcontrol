@@ -163,6 +163,40 @@ async def settings_flow():
         check("the cast QR endpoint still renders an SVG for our own pages",
               status == 200 and "svg" in svg, (status, svg[:60]))
 
+        print("\n[41c] the QR can follow the screen-share address instead of typed text")
+        status, body = put({"enabled": True, "qr_source": "cast", "qr_text": "",
+                            "qr_label": "Bildschirm teilen", "text": ""})
+        check("a cast QR alone counts as content, so it is not refused as empty",
+              status == 200 and body["overlay"]["qr_source"] == "cast", (status, body))
+
+        sender_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        auto_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("and it renders a code", len(auto_rows) >= 21, len(auto_rows))
+        check("with nothing stored in qr_text", body["overlay"]["qr_text"] == "",
+              body["overlay"])
+
+        # The code really encodes the guest address: typing that same address by
+        # hand has to produce the identical matrix.
+        put({"enabled": True, "qr_source": "text", "qr_text": sender_url, "text": ""})
+        typed_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("and it is the guest address, module for module", auto_rows == typed_rows,
+              (sender_url, len(auto_rows), len(typed_rows)))
+        print(f"        guest address the display would show: {sender_url}")
+        put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
+
+        status, _ = http("PUT", "/api/settings", {"cast_enabled": False})
+        no_qr = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules")
+        check("with casting switched off no code is drawn at all", no_qr is None, no_qr)
+        http("PUT", "/api/settings", {"cast_enabled": True})
+
+        status, body = put({"enabled": True, "qr_source": "nonsense", "qr_text": "x"})
+        check("an unknown source falls back to the typed text",
+              body["overlay"]["qr_source"] == "text", body)
+
+        # Back to a plain overlay, so the restart case below checks what it did.
+        put({"enabled": True, "text": "Kaffee 1 Euro", "qr_source": "text",
+             "qr_text": "https://example.invalid/menu", "qr_label": "Karte"})
+
         print("\n[42] the settings survive a restart")
     with Server(fresh=False):
         status, body = http("GET", "/api/settings")

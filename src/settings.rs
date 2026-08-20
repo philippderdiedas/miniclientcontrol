@@ -71,6 +71,14 @@ pub struct Overlay {
     pub show_seconds: bool,
     pub show_date: bool,
     pub qr_text: String,
+    /// `"text"` uses `qr_text`; `"cast"` uses the screen-share URL, resolved when
+    /// the overlay is drawn.
+    ///
+    /// A resolved source rather than a typed one because that URL is not stable:
+    /// `--public-url` decides its shape, an occupied `--cast-tls-port` moves it to
+    /// the next free port, and the LAN address changes on a DHCP lease. A typed
+    /// copy would go quietly wrong on a screen nobody is checking.
+    pub qr_source: String,
     pub qr_label: String,
     pub position: String,
     /// vmin, so one setting reads the same on a 1080p panel and a portrait 4K one.
@@ -93,6 +101,7 @@ impl Default for Overlay {
             show_seconds: false,
             show_date: false,
             qr_text: String::new(),
+            qr_source: "text".to_string(),
             qr_label: String::new(),
             position: "bottom-right".to_string(),
             size: 2.4,
@@ -158,6 +167,9 @@ impl Overlay {
         if !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
             self.position = "bottom-right".to_string();
         }
+        if !matches!(self.qr_source.as_str(), "text" | "cast") {
+            self.qr_source = "text".to_string();
+        }
         self.size = self.size.clamp(0.5, 20.0);
         self.margin = self.margin.clamp(0.0, 40.0);
         self.max_width = self.max_width.clamp(5.0, 100.0);
@@ -177,7 +189,16 @@ impl Overlay {
             && self.image_asset_id.is_none()
             && !self.show_clock
             && !self.show_date
-            && self.qr_text.trim().is_empty()
+            && !self.draws_qr()
+    }
+
+    /// The cast source needs no text of its own, so "has a QR" is not the same
+    /// question as "has qr_text".
+    pub fn draws_qr(&self) -> bool {
+        match self.qr_source.as_str() {
+            "cast" => true,
+            _ => !self.qr_text.trim().is_empty(),
+        }
     }
 }
 
@@ -406,7 +427,13 @@ pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
 /// they stack in when both want the same corner -- and the reason the global one
 /// decides that box's style.
 pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> serde_json::Value {
-    let overlay = state.settings.read().await.overlay.clone();
+    // One acquisition for both: the cast switch decides whether a cast QR is
+    // drawn at all, and taking the lock twice in one build invites a reader to
+    // wonder whether the two halves can disagree.
+    let (overlay, cast_enabled) = {
+        let settings = state.settings.read().await;
+        (settings.overlay.clone(), settings.cast_enabled)
+    };
     let mut layers: Vec<serde_json::Value> = Vec::new();
 
     if overlay.enabled && !overlay.is_empty() {
@@ -416,7 +443,15 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
                 "image_data".to_string(),
                 json!(image_data_uri(state, overlay.image_asset_id).await),
             );
-            object.insert("qr_modules".to_string(), json!(qr_modules(&overlay.qr_text)));
+            let qr_target = match overlay.qr_source.as_str() {
+                // Resolved here, not stored: see the note on `qr_source`. Nothing
+                // is drawn when casting is switched off -- advertising a way to
+                // share a screen that refuses every sender is worse than silence.
+                "cast" if cast_enabled => crate::cast::sender_url(state),
+                "cast" => String::new(),
+                _ => overlay.qr_text.clone(),
+            };
+            object.insert("qr_modules".to_string(), json!(qr_modules(&qr_target)));
         }
         layers.push(layer);
     }

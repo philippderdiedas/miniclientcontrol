@@ -102,11 +102,20 @@
         <label><input type="checkbox" id="ovDate" /> Datum</label>
       </p>
       <p>
-        <label for="ovQrText">QR-Code für:</label>
+        <label>QR-Code:</label>
+        <label class="inline"><input type="radio" name="ovQrSource" value="text" checked />
+          eigene URL oder Text</label>
+        <label class="inline"><input type="radio" name="ovQrSource" value="cast" />
+          Bildschirmübertragung</label>
+        <label class="inline"><input type="radio" name="ovQrSource" value="none" />
+          keiner</label>
+      </p>
+      <p>
         <input id="ovQrText" size="34" placeholder="URL oder Text" />
         <label for="ovQrLabel">Beschriftung:</label>
         <input id="ovQrLabel" size="14" />
       </p>
+      <p class="muted" id="ovCastHint" hidden></p>
       <p>
         <label for="ovPosition">Ecke:</label>
         <select id="ovPosition">
@@ -361,6 +370,29 @@
       opacity: 'ovOpacity', background: 'ovBackground', color: 'ovColor',
     };
 
+    const qrSourceInputs = () => [...document.querySelectorAll('input[name="ovQrSource"]')];
+
+    // "none" is a UI-only third choice: the server knows `text` and `cast`, and an
+    // empty text means no QR. Spelling it out here beats an operator wondering why
+    // clearing the field is how you switch the code off.
+    function syncQrSource() {
+      const chosen = (qrSourceInputs().find((i) => i.checked) || {}).value || 'text';
+      const text = document.getElementById('ovQrText');
+      text.disabled = chosen !== 'text';
+      text.hidden = chosen !== 'text';
+      const hint = document.getElementById('ovCastHint');
+      hint.hidden = chosen !== 'cast';
+      if (chosen === 'cast') {
+        // Shown, never stored: the address is resolved on the device every time
+        // the overlay is drawn, because the port and the LAN address can move.
+        hint.textContent = 'Zeigt automatisch die aktuelle Gastadresse'
+          + (castSenderUrl ? ' — derzeit ' + castSenderUrl : '')
+          + '. Ist die Übertragung ausgeschaltet, erscheint kein Code.';
+      }
+    }
+
+    let castSenderUrl = '';
+
     function applyOverlay(overlay) {
       for (const [key, id] of Object.entries(ov)) {
         const node = document.getElementById(id);
@@ -370,6 +402,12 @@
       document.getElementById('ovImage').value =
         overlay.image_asset_id === null || overlay.image_asset_id === undefined
           ? '' : String(overlay.image_asset_id);
+
+      const source = overlay.qr_source === 'cast'
+        ? 'cast'
+        : ((overlay.qr_text || '').trim() ? 'text' : 'none');
+      for (const input of qrSourceInputs()) input.checked = input.value === source;
+      syncQrSource();
     }
 
     // Only images: offering a PDF here would produce a broken image on a screen
@@ -399,6 +437,10 @@
       }
       const image = document.getElementById('ovImage').value;
       body.image_asset_id = image ? parseInt(image, 10) : null;
+
+      const chosen = (qrSourceInputs().find((i) => i.checked) || {}).value || 'text';
+      body.qr_source = chosen === 'cast' ? 'cast' : 'text';
+      if (chosen !== 'text') body.qr_text = '';
       return body;
     }
 
@@ -461,6 +503,20 @@
         ovFeedback('Vorschau nicht möglich.', false);
       }
     });
+
+    for (const input of qrSourceInputs()) input.addEventListener('change', syncQrSource);
+
+    // The guest address comes from the same endpoint the guest page uses, so the
+    // hint cannot claim an address the device would not hand out.
+    fetch('/api/cast/info')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((info) => {
+        if (info && info.sender_url) {
+          castSenderUrl = info.sender_url;
+          syncQrSource();
+        }
+      })
+      .catch(() => { /* the status poll reports unreachability */ });
 
     loadOverlayImages();
 

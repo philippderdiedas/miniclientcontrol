@@ -222,7 +222,10 @@ pub fn is_cast_public_path(path: &str) -> bool {
 /// The address a guest is handed. Deliberately the bare root: short enough to
 /// read off a screen and type by hand. `--public-url` decides whether that is the
 /// LAN address, an mDNS name or something the operator supplied.
-fn sender_url(state: &AppState) -> String {
+/// The URL a guest is told to open. Resolved every time rather than stored: it
+/// depends on `--public-url`, on the port actually bound, and on the machine's
+/// current address, all of which can change without anybody editing anything.
+pub fn sender_url(state: &AppState) -> String {
     crate::tls::public_base_url(&state.args.public_url, state.cast_tls_port)
 }
 

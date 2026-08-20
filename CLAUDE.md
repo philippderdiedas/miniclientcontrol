@@ -282,6 +282,19 @@ names no corner joins the global overlay's box, which is the arrangement nobody
 has to think about. Two competing background colours in one box would read as a
 bug rather than a choice, which is why the style is not per layer.
 
+The global overlay's QR has a **source**, not just a text: `qr_source` is either
+`text` (whatever was typed) or `cast`, which resolves to the guest URL when the
+overlay is drawn. Resolved rather than stored because that address is not stable —
+`--public-url` decides its shape, an occupied `--cast-tls-port` moves it to the
+next free port, and a DHCP lease changes the LAN address. A typed copy would go
+quietly wrong on a screen nobody is checking. With casting switched off the cast
+source draws nothing at all: advertising a way to share a screen that refuses
+every sender is worse than silence.
+
+The admin UI offers a third choice, `keiner`, which is not a server-side value —
+it just clears `qr_text` with source `text`. Naming it beats an operator guessing
+that emptying a field is how you switch the code off.
+
 An item's overlay carries content and a corner only — colours, sizes and opacity
 come from the global one, so the display keeps one look across items and the
 playlist card stays small enough to edit next to everything else on it.
