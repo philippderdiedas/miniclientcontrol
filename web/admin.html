@@ -446,10 +446,12 @@
         const res = await fetch('/api/overlay');
         if (!res.ok) { ovFeedback('Vorschau nicht möglich.', false); return; }
         const config = await res.json();
-        // Same runtime, same configuration -- only the base swapped, because the
-        // display reaches the controller over loopback and this page does not.
-        if (!globalThis.__ov.apply({ ...config, base: location.origin, enabled: true })) {
-          ovFeedback('Das Overlay zeigt nichts an.', false);
+        // Same runtime, same layers -- only the base swapped, because the display
+        // reaches the controller over loopback and this page does not. The layers
+        // include the item currently on screen, so the preview is what is really
+        // out there and not just the global half of it.
+        if (!globalThis.__ov.apply({ ...config, base: location.origin })) {
+          ovFeedback('Zurzeit zeigt das Overlay nichts an.', false);
           return;
         }
         ovFeedback('Vorschau — verschwindet nach 8 Sekunden.', true);

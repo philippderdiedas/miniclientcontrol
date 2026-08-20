@@ -41,6 +41,8 @@ pub struct AddToPlaylistRequest {
     pub start_date: Option<String>,
     pub end_date: Option<String>,
     pub scroll_config: Option<ScrollMode>,
+    /// This item's own overlay, on top of the global one.
+    pub overlay: Option<crate::settings::ItemOverlay>,
 }
 
 #[derive(Deserialize)]
@@ -55,6 +57,8 @@ pub struct UpdatePlaylistRequest {
     #[serde(default, deserialize_with = "double_option")]
     pub end_date: Option<Option<String>>,
     pub scroll_config: Option<ScrollMode>,
+    /// This item's own overlay, on top of the global one.
+    pub overlay: Option<crate::settings::ItemOverlay>,
     /// Replacement URL. Only accepted for items that already are URL-backed.
     pub url: Option<String>,
     /// Replacement asset. Only accepted for items that already are asset-backed.
@@ -317,6 +321,7 @@ pub async fn get_playlist(State(state): State<AppState>) -> impl IntoResponse {
             p.start_date, p.end_date,
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
+            COALESCE(p.overlay_config, 'null') as overlay_config,
             a.local_path, a.mimetype, a.duration as asset_duration
         FROM playlist_items p
         LEFT JOIN assets a ON p.asset_id = a.id
@@ -352,9 +357,16 @@ pub async fn add_to_playlist(
     let scroll_config = payload.scroll_config.unwrap_or(ScrollMode::None);
     let keep_loaded = payload.keep_loaded.unwrap_or(false);
     let enabled = payload.enabled.unwrap_or(true);
+    // `null` unless it would actually draw something, so the read paths never
+    // have to tell "switched off" from "empty".
+    let overlay = payload
+        .overlay
+        .map(|overlay| overlay.sanitized())
+        .filter(|overlay| overlay.draws())
+        .map(sqlx::types::Json);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
@@ -365,6 +377,7 @@ pub async fn add_to_playlist(
     .bind(payload.start_date)
     .bind(payload.end_date)
     .bind(sqlx::types::Json(scroll_config))
+    .bind(overlay)
     .execute(&state.pool)
     .await
     {
@@ -493,8 +506,44 @@ pub async fn update_playlist_item(
     if let Some(val) = payload.scroll_config {
         let _ = sqlx::query("UPDATE playlist_items SET scroll_config = ? WHERE id = ?").bind(sqlx::types::Json(val)).bind(id).execute(&state.pool).await;
     }
+    let mut overlay_changed = false;
+    if let Some(overlay) = payload.overlay {
+        let overlay = overlay.sanitized();
+        if let Some(asset_id) = overlay.image_asset_id {
+            // A dangling id renders as a broken image on a screen nobody is
+            // standing in front of, so it is refused here like everywhere else.
+            let known = sqlx::query_scalar::<_, i64>("SELECT id FROM assets WHERE id = ?")
+                .bind(asset_id)
+                .fetch_optional(&state.pool)
+                .await;
+            if !matches!(known, Ok(Some(_))) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiError { error: "Das gewählte Bild gibt es nicht.".to_string() }),
+                )
+                    .into_response();
+            }
+        }
+        // Stored as `null` when it draws nothing, so the read paths do not have to
+        // tell "switched off" from "empty".
+        let stored = overlay.draws().then(|| sqlx::types::Json(overlay));
+        if let Err(e) = sqlx::query("UPDATE playlist_items SET overlay_config = ? WHERE id = ?")
+            .bind(stored)
+            .bind(id)
+            .execute(&state.pool)
+            .await
+        {
+            error!("Failed to update overlay of playlist item {}: {}", id, e);
+        }
+        overlay_changed = true;
+    }
 
     state.playlist_signal.notify_one();
+    // The item on screen may be this one, and its badge should not wait for the
+    // next navigation. The loop re-reads the item's overlay when it re-applies.
+    if overlay_changed {
+        state.overlay_signal.notify_one();
+    }
 
     StatusCode::OK.into_response()
 }

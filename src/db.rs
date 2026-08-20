@@ -50,6 +50,21 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             .await;
     }
 
+    let has_overlay: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='overlay_config'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+
+    if !has_overlay {
+        // Default 'null' rather than NULL: the read paths decode this column as
+        // JSON, and a real NULL there fails the whole query -- which both call
+        // sites swallow into an empty playlist, blanking the screen over one row.
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN overlay_config TEXT DEFAULT 'null'")
+            .execute(pool)
+            .await;
+    }
+
     let has_keep_loaded: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='keep_loaded'")
         .fetch_one(pool)
         .await
@@ -117,4 +132,24 @@ pub async fn save_setting(pool: &Pool<Sqlite>, key: &str, value: &str) -> anyhow
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// One item's overlay, for the paths that have an id and no playlist row.
+pub async fn load_item_overlay(
+    pool: &sqlx::SqlitePool,
+    item_id: i64,
+) -> Option<crate::settings::ItemOverlay> {
+    let raw: String =
+        sqlx::query_scalar("SELECT COALESCE(overlay_config, 'null') FROM playlist_items WHERE id = ?")
+            .bind(item_id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to load overlay for item {}: {}", item_id, e);
+                None
+            })
+            .flatten()?;
+    serde_json::from_str::<Option<crate::settings::ItemOverlay>>(&raw)
+        .ok()
+        .flatten()
 }

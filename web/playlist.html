@@ -291,6 +291,74 @@
       };
     }
 
+    // --- per-item overlay editor ---------------------------------------------
+    // Content and a corner only. Colours, sizes and opacity come from the global
+    // overlay in the admin page, so a display keeps one look across items and this
+    // fieldset stays small enough to sit in every card.
+    function overlayEditor(initial, assets) {
+      const cfg = initial || {};
+
+      const enabled = el('input', { type: 'checkbox' });
+      enabled.checked = !!cfg.enabled;
+
+      const text = el('input', { value: cfg.text || '', style: 'width:100%' });
+      text.placeholder = 'z. B. Mehr Infos';
+
+      const qrText = el('input', { value: cfg.qr_text || '', style: 'width:100%' });
+      qrText.placeholder = 'URL für den QR-Code';
+      const qrLabel = el('input', { value: cfg.qr_label || '', style: 'width:140px' });
+
+      const image = el('select', {}, el('option', { value: '', text: '(kein Bild)' }));
+      for (const a of assets || []) {
+        if (!(a.mimetype || '').startsWith('image/')) continue;
+        image.append(el('option', { value: String(a.id), text: `#${a.id} – ${a.filename}` }));
+      }
+      image.value = cfg.image_asset_id ? String(cfg.image_asset_id) : '';
+
+      const position = el('select', {},
+        el('option', { value: '', text: 'wie global (gleiche Box)' }),
+        el('option', { value: 'bottom-right', text: 'unten rechts' }),
+        el('option', { value: 'bottom-left', text: 'unten links' }),
+        el('option', { value: 'bottom-center', text: 'unten mittig' }),
+        el('option', { value: 'top-right', text: 'oben rechts' }),
+        el('option', { value: 'top-left', text: 'oben links' }),
+        el('option', { value: 'top-center', text: 'oben mittig' }));
+      position.value = cfg.position || '';
+
+      const rows = el('div', {},
+        el('div', { class: 'grid' }, field('Text', text)),
+        el('div', { class: 'grid' }, field('QR-Code für', qrText), field('QR-Beschriftung', qrLabel)),
+        el('div', { class: 'grid' }, field('Bild', image), field('Ecke', position)));
+
+      const sync = () => {
+        rows.hidden = !enabled.checked;
+        // Disabled as well as hidden, like the scroll editor: a control that does
+        // not apply should not be reachable by keyboard either.
+        for (const input of rows.querySelectorAll('input, select')) input.disabled = rows.hidden;
+      };
+      enabled.addEventListener('change', sync);
+      sync();
+
+      const root = el('fieldset', {},
+        el('legend', { text: 'Overlay (zusätzlich zum globalen)' }),
+        el('label', { class: 'inline' }, enabled, el('span', { text: 'für dieses Item einblenden' })),
+        rows);
+
+      return {
+        root,
+        read() {
+          return {
+            enabled: enabled.checked,
+            text: text.value,
+            qr_text: qrText.value.trim(),
+            qr_label: qrLabel.value,
+            image_asset_id: image.value ? Number(image.value) : null,
+            position: position.value,
+          };
+        },
+      };
+    }
+
     // --- date helpers ---------------------------------------------------------
     function toInputValue(value) {
       if (!value) return '';
@@ -402,6 +470,9 @@
       const scroll = scrollEditor(item.scroll_config);
       card.append(scroll.root);
 
+      const overlay = overlayEditor(item.overlay_config, assets);
+      card.append(overlay.root);
+
       const feedback = el('span', { class: 'feedback' });
       const playBtn = el('button', { type: 'button', text: 'Play now' });
       const saveBtn = el('button', { type: 'button', class: 'primary', text: 'Speichern' });
@@ -432,6 +503,7 @@
           start_date: toIso(start.value),
           end_date: toIso(end.value),
           scroll_config: scroll.read(),
+          overlay: overlay.read(),
         };
         if (isAsset) payload.asset_id = Number(assetPicker.value);
         else payload.url = urlInput.value.trim();

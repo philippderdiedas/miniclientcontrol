@@ -268,9 +268,23 @@ drives its own scrolling from query parameters. `browser.rs` detects this with
 
 ### The overlay (`web/overlay.js`)
 
-A badge the operator can put on top of whatever is playing — text, an uploaded
-image, a clock, a date, a QR code — configured globally in the admin UI and
-stored as one JSON blob in `settings` (`overlay_config`).
+Badges the operator can put on top of whatever is playing — text, an uploaded
+image, a clock, a date, a QR code. There are **two sources and they are
+additive**: the global overlay in the admin UI (`settings.overlay_config`) and the
+current playlist item's own (`playlist_items.overlay_config`). The point of the
+split is the standing case versus the contextual one — a clock that is always
+there, plus a "Mehr Info" QR that belongs to one item.
+
+The runtime therefore takes a *list* of layers, global first. **Layers that want
+the same corner share one box**, stacked in order, and the first layer in a box
+decides how it looks; layers in different corners get their own box. An item that
+names no corner joins the global overlay's box, which is the arrangement nobody
+has to think about. Two competing background colours in one box would read as a
+bug rather than a choice, which is why the style is not per layer.
+
+An item's overlay carries content and a corner only — colours, sizes and opacity
+come from the global one, so the display keeps one look across items and the
+playlist card stays small enough to edit next to everything else on it.
 
 It is injected the same way as the scroll runtime, via
 `Page.addScriptToEvaluateOnNewDocument` plus a re-evaluation afterwards, and
@@ -294,8 +308,14 @@ Sizes are in `vmin`/`vw`, not pixels, so one configuration reads the same on a
 1080p landscape panel and a portrait 4K one — signage is looked at from across a
 room.
 
+**The loop reads an item's overlay fresh, never from its playlist snapshot**
+(`db::load_item_overlay`). That snapshot is read once per inner-loop pass and can
+be a whole item duration old — the same trap documented for `pending_jump` — so a
+layer edited while the previous item was up would appear one full rotation late.
+
 `AppState::overlay_signal` is what makes an edit land on the item *already* on
-screen. All three places the loop can be parked handle it: the per-item
+screen; `PUT /api/playlist/{id}` pokes it too, because the item being edited may
+be the one on screen. All three places the loop can be parked handle it: the per-item
 `tokio::select!` (which recomputes the remaining time rather than restarting it,
 so an overlay edit cannot extend an item), the idle-screen wait, and
 `run_override_loop` — a cast or a pinned page can stand for hours, which is
@@ -596,9 +616,16 @@ playlist, so one bad row would blank the screen.
 | DELETE | `/api/cast/session` | Operator: end the cast now |
 | POST | `/api/cast/pair` | `--cast-auth=pairing` only; shows a code on the display |
 | GET/PUT | `/api/settings` | Operator: runtime settings + which flags pinned them |
-| GET | `/api/overlay` | The overlay as the display runtime wants it, asset ids resolved |
+| GET | `/api/overlay` | The layers the display runtime wants: global + the item on screen |
 | GET | `/api/qr.svg` | `?text=` — QR for anything, used by the overlay |
 | POST/DELETE | `/api/cast/claim` | Guest: reserve the session before sharing |
+
+`PUT /api/playlist/{id}` also takes an `overlay` object (see the overlay section):
+it is stored as SQL `null` unless it would actually draw something, so the read
+paths never have to tell "switched off" from "empty". The column defaults to the
+JSON string `'null'` rather than SQL `NULL`, for the same reason `scroll_config`
+is `COALESCE`d — a real `NULL` fails to decode, which fails the whole query, and
+both call sites swallow that into an empty playlist.
 
 `PUT /api/playlist/{id}` may change an item's source, but only like for like: a
 URL item takes a new `url`, an asset item a new `asset_id`. The opposite is a

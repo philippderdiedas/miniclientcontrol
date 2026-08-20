@@ -102,6 +102,45 @@ impl Default for Overlay {
     }
 }
 
+/// A playlist item's own overlay, drawn *in addition* to the global one.
+///
+/// Content and a corner only: colours, sizes and opacity come from the global
+/// overlay, so a display does not change character item by item and the playlist
+/// card stays small enough to edit next to everything else on it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ItemOverlay {
+    pub enabled: bool,
+    pub text: String,
+    pub image_asset_id: Option<i64>,
+    pub qr_text: String,
+    pub qr_label: String,
+    /// Empty means "wherever the global overlay is", which puts both in one box.
+    pub position: String,
+}
+
+impl ItemOverlay {
+    pub fn sanitized(mut self) -> Self {
+        if !self.position.is_empty() && !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
+            self.position = String::new();
+        }
+        self.text = self.text.chars().take(500).collect();
+        self.qr_text = self.qr_text.chars().take(500).collect();
+        self.qr_label = self.qr_label.chars().take(100).collect();
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+            && self.image_asset_id.is_none()
+            && self.qr_text.trim().is_empty()
+    }
+
+    pub fn draws(&self) -> bool {
+        self.enabled && !self.is_empty()
+    }
+}
+
 pub const OVERLAY_POSITIONS: &[&str] = &[
     "top-left", "top-right", "bottom-left", "bottom-right", "top-center", "bottom-center",
 ];
@@ -356,47 +395,93 @@ pub async fn qr(Query(query): Query<QrQuery>) -> Response {
 
 /// The overlay as the display runtime wants it: asset ids already resolved to
 /// URLs, because the page has no way to look one up.
+///
+/// Includes the layer of the item *currently on screen*, so the admin preview
+/// shows what is really out there rather than the global half of it.
 pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
-    Json(overlay_payload(&state).await)
+    let current = *state.current_item_id.lock().await;
+    let item = match current {
+        Some(id) => crate::db::load_item_overlay(&state.pool, id).await,
+        None => None,
+    };
+    Json(overlay_payload(&state, item.as_ref()).await)
 }
 
-/// The configuration handed to `__ov.apply()`, on the display and in the preview.
+/// The layers handed to `__ov.apply()`, on the display and in the preview.
 ///
 /// Built in one place so the operator's preview and the screen cannot disagree:
 /// two renderings of the same settings that drift apart would send someone
 /// hunting a display bug that is really a UI bug.
-pub async fn overlay_payload(state: &AppState) -> serde_json::Value {
+///
+/// The global overlay comes first and the item's second, which is also the order
+/// they stack in when both want the same corner -- and the reason the global one
+/// decides that box's style.
+pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> serde_json::Value {
     let overlay = state.settings.read().await.overlay.clone();
-    let image_path = match overlay.image_asset_id {
-        Some(id) => sqlx::query_scalar::<_, String>("SELECT local_path FROM assets WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to resolve overlay asset {}: {}", id, e);
-                None
-            })
-            .map(|path| format!("/uploads/{}", path)),
-        None => None,
-    };
+    let mut layers: Vec<serde_json::Value> = Vec::new();
 
-    let mut payload = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
-    if let Some(object) = payload.as_object_mut() {
-        object.insert("image_path".to_string(), json!(image_path));
+    if overlay.enabled && !overlay.is_empty() {
+        let mut layer = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
+        if let Some(object) = layer.as_object_mut() {
+            object.insert(
+                "image_path".to_string(),
+                json!(asset_path(state, overlay.image_asset_id).await),
+            );
+        }
+        layers.push(layer);
+    }
+
+    if let Some(item) = item.filter(|item| item.draws()) {
+        // An item that names no corner joins the global overlay's box, which is
+        // the arrangement that needs no thought from whoever fills in the card.
+        let position = if item.position.is_empty() {
+            overlay.position.clone()
+        } else {
+            item.position.clone()
+        };
+        layers.push(json!({
+            "position": position,
+            "text": item.text,
+            "image_path": asset_path(state, item.image_asset_id).await,
+            "qr_text": item.qr_text,
+            "qr_label": item.qr_label,
+            // Style follows the global overlay, so a shared box is uniform and a
+            // separate one still looks like it belongs to the same display.
+            "size": overlay.size,
+            "margin": overlay.margin,
+            "max_width": overlay.max_width,
+            "qr_size": overlay.qr_size,
+            "opacity": overlay.opacity,
+            "background": overlay.background,
+            "color": overlay.color,
+        }));
+    }
+
+    json!({
         // Absolute, and this is not a detail: the overlay lives in *someone
         // else's* document, so a relative `/uploads/...` would resolve against
         // the dashboard being displayed and 404 there. The runtime joins every
         // URL onto this base, and the admin preview substitutes its own origin.
-        object.insert(
-            "base".to_string(),
-            json!(format!("http://127.0.0.1:{}", state.args.port)),
-        );
+        "base": format!("http://127.0.0.1:{}", state.args.port),
         // The runtime formats the clock and the date, and the display browser's
         // own locale is whatever `--browser-language` made it. Naming it here
         // keeps a German kiosk German even if that ever changes.
-        object.insert("locale".to_string(), json!("de-DE"));
-    }
-    payload
+        "locale": "de-DE",
+        "layers": layers,
+    })
+}
+
+async fn asset_path(state: &AppState, asset_id: Option<i64>) -> Option<String> {
+    let id = asset_id?;
+    sqlx::query_scalar::<_, String>("SELECT local_path FROM assets WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to resolve overlay asset {}: {}", id, e);
+            None
+        })
+        .map(|path| format!("/uploads/{}", path))
 }
 
 #[derive(Serialize)]

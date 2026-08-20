@@ -44,6 +44,20 @@ def wait_for(fn, timeout=30, interval=0.3):
     return None
 
 
+BOXES = """(() => {
+  const hosts = [...document.querySelectorAll('[id^="__mcc_overlay"]')];
+  return JSON.stringify({
+    count: hosts.length,
+    ids: hosts.map((h) => h.id),
+    text: hosts.map((h) => (h.shadowRoot ? h.shadowRoot.textContent : '')).join(' | '),
+    qr: hosts.flatMap((h) => [...(h.shadowRoot
+      ? h.shadowRoot.querySelectorAll('img.qr') : [])]
+      .map((i) => ({src: i.src, loaded: i.naturalWidth > 0}))),
+    host: location.host,
+  });
+})()"""
+
+
 def put(overlay, port=None):
     return http("PUT", "/api/settings", {"overlay": overlay}, port=port)
 
@@ -92,13 +106,45 @@ async def settings_flow():
         put({"enabled": True, "text": "Kaffee 1 Euro", "qr_text": "https://example.invalid/menu",
              "qr_label": "Karte"})
         status, payload = http("GET", "/api/overlay")
-        check("the runtime payload carries the content", status == 200
-              and payload["text"] == "Kaffee 1 Euro", payload)
+        layers = payload.get("layers") or []
+        check("the runtime payload carries one layer with the content", status == 200
+              and len(layers) == 1 and layers[0]["text"] == "Kaffee 1 Euro", payload)
         check("and a locale, so the clock is not formatted by chance",
               payload.get("locale") == "de-DE", payload)
-        check("with no image chosen the path is null", payload["image_path"] is None, payload)
+        check("with no image chosen the path is null", layers[0]["image_path"] is None, layers)
         check("and the payload names the controller's own origin as the base",
               payload.get("base", "").startswith("http://127.0.0.1:"), payload)
+
+        print("\n[41b] a playlist item can add a layer of its own")
+        http("POST", "/api/playlist", {"url": "http://127.0.0.1:1/x", "duration": 60})
+        items = http("GET", "/api/playlist")[1]
+        item_id = items[-1]["id"]
+        status, _ = http("PUT", f"/api/playlist/{item_id}",
+                         {"overlay": {"enabled": True, "qr_text": "https://example.invalid/item",
+                                      "qr_label": "Mehr Info", "position": "top-left"}})
+        check("the item's overlay saves", status == 200, status)
+        check("and comes back on the playlist",
+              (http("GET", "/api/playlist")[1][-1]["overlay_config"] or {}).get("qr_label")
+              == "Mehr Info", http("GET", "/api/playlist")[1][-1].get("overlay_config"))
+
+        # Nothing is on screen in this half of the test, so the payload is the
+        # global layer only -- the item's layer travels with the item.
+        status, body = http("PUT", f"/api/playlist/{item_id}",
+                            {"overlay": {"enabled": True, "text": "x",
+                                         "image_asset_id": 987654}})
+        check("a dangling image on an item is refused too", status == 400, (status, body))
+
+        status, _ = http("PUT", f"/api/playlist/{item_id}",
+                         {"overlay": {"enabled": True, "position": "nowhere",
+                                      "qr_text": "https://example.invalid/item"}})
+        stored = http("GET", "/api/playlist")[1][-1]["overlay_config"] or {}
+        check("an unknown corner falls back to the global one (a shared box)",
+              status == 200 and stored.get("position") == "", stored)
+
+        status, _ = http("PUT", f"/api/playlist/{item_id}", {"overlay": {"enabled": True}})
+        check("an item overlay with no content is stored as none at all",
+              http("GET", "/api/playlist")[1][-1]["overlay_config"] is None,
+              http("GET", "/api/playlist")[1][-1].get("overlay_config"))
 
         status, svg = qr("https://example.invalid/menu")
         check("the QR endpoint renders an SVG", status == 200 and svg.startswith("<?xml")
@@ -161,11 +207,11 @@ async def browser_flow():
         check("and it put itself in the top layer, above any fullscreen element",
               state.get("inTopLayer") is True, state)
 
-        text = await page.eval(
-            "(() => { const h = document.getElementById('__mcc_overlay');"
-            " return h && h.shadowRoot ? h.shadowRoot.textContent : null; })()")
-        check("the operator's text is on the page", "Werkstatt geschlossen" in (text or ""), text)
-        check("and the clock rendered a time", any(c.isdigit() for c in (text or "")), text)
+        boxes = json.loads(await page.eval(BOXES))
+        check("the operator's text is on the page",
+              "Werkstatt geschlossen" in boxes["text"], boxes)
+        check("and the clock rendered a time", any(c.isdigit() for c in boxes["text"]), boxes)
+        check("one corner in use means one box", boxes["count"] == 1, boxes)
 
         print("\n[45] and on a playlist item, and on an override")
         # Served by the controller itself: the device is often offline, and a test
@@ -177,22 +223,56 @@ async def browser_flow():
 
         on_item = None
         for _ in range(40):
-            on_item = await page.eval(
-                "(() => { const h = document.getElementById('__mcc_overlay');"
-                " return !!(h && h.shadowRoot && h.shadowRoot.textContent"
-                " .includes('Werkstatt geschlossen')); })()")
+            on_item = "Werkstatt geschlossen" in json.loads(await page.eval(BOXES))["text"]
             if on_item:
                 break
             await asyncio.sleep(0.5)
         check("the badge survived the navigation to a playlist item", on_item is True)
 
+        print("\n[45b] the item's own layer is drawn on top of the global one")
+        current = http("GET", "/api/control/current", port=HTTP)[1]["item_id"]
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Mehr Info", "position": ""}}, port=HTTP)
+        shared = None
+        for _ in range(40):
+            shared = json.loads(await page.eval(BOXES))
+            if "Mehr Info" in shared["text"]:
+                break
+            await asyncio.sleep(0.5)
+        check("the item's text appears without a navigation",
+              "Mehr Info" in shared["text"], shared)
+        check("both layers are in the global overlay's box, because the item named no corner",
+              shared["count"] == 1 and "Werkstatt geschlossen" in shared["text"], shared)
+
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Mehr Info", "position": "bottom-left"}},
+             port=HTTP)
+        split = None
+        for _ in range(40):
+            split = json.loads(await page.eval(BOXES))
+            if split["count"] == 2:
+                break
+            await asyncio.sleep(0.5)
+        check("its own corner gives it its own box", split["count"] == 2, split)
+        check("and the two boxes sit where they were asked to",
+              sorted(split["ids"]) == ["__mcc_overlay_bottom-left", "__mcc_overlay_top-center"],
+              split)
+
+        http("PUT", f"/api/playlist/{current}", {"overlay": {"enabled": False}}, port=HTTP)
+        back = None
+        for _ in range(40):
+            back = json.loads(await page.eval(BOXES))
+            if back["count"] == 1:
+                break
+            await asyncio.sleep(0.5)
+        check("switching the item's layer off leaves the global one alone",
+              back["count"] == 1 and "Werkstatt geschlossen" in back["text"]
+              and "Mehr Info" not in back["text"], back)
+
         http("POST", "/api/override", {"url": page_url}, port=HTTP)
         on_override = None
         for _ in range(40):
-            on_override = await page.eval(
-                "(() => { const h = document.getElementById('__mcc_overlay');"
-                " return !!(h && h.shadowRoot && h.shadowRoot.textContent"
-                " .includes('Werkstatt geschlossen')); })()")
+            on_override = "Werkstatt geschlossen" in json.loads(await page.eval(BOXES))["text"]
             if on_override:
                 break
             await asyncio.sleep(0.5)
@@ -202,10 +282,7 @@ async def browser_flow():
         put({"enabled": True, "text": "Neuer Hinweis"}, port=HTTP)
         updated = None
         for _ in range(40):
-            updated = await page.eval(
-                "(() => { const h = document.getElementById('__mcc_overlay');"
-                " return !!(h && h.shadowRoot && h.shadowRoot.textContent"
-                " .includes('Neuer Hinweis')); })()")
+            updated = "Neuer Hinweis" in json.loads(await page.eval(BOXES))["text"]
             if updated:
                 break
             await asyncio.sleep(0.5)
@@ -216,17 +293,8 @@ async def browser_flow():
         # The overlay's DOM lives in the displayed page's document. A relative
         # /api/qr.svg would be fetched from that page's host -- which is not us --
         # so this serves the item from a second port to make the mistake visible.
-        foreign = subprocess.Popen(
-            [sys.executable, "-c",
-             "import http.server, socketserver;"
-             "h = http.server.BaseHTTPRequestHandler;"
-             "\nclass H(h):\n"
-             "  def do_GET(s):\n"
-             "    s.send_response(200); s.send_header('Content-Type','text/html'); s.end_headers();\n"
-             "    s.wfile.write(b'<!doctype html><title>foreign</title><p>foreign page')\n"
-             "  def log_message(s, *a): pass\n"
-             "socketserver.TCPServer(('127.0.0.1', 3061), H).serve_forever()"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        foreign = subprocess.Popen([sys.executable, f"{SP}/foreign_page.py", "3061"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(foreign)
         check("the foreign origin is serving", wait_for(
             lambda: urllib.request.urlopen("http://127.0.0.1:3061/", timeout=2).status == 200,
@@ -235,35 +303,29 @@ async def browser_flow():
         put({"enabled": True, "text": "Mit QR", "qr_text": "https://example.invalid/x"}, port=HTTP)
         http("POST", "/api/override", {"url": "http://127.0.0.1:3061/"}, port=HTTP)
 
-        loaded = None
+        info = {}
         for _ in range(60):
-            loaded = await page.eval(
-                "(() => { const h = document.getElementById('__mcc_overlay');"
-                " if (!h || !h.shadowRoot) return null;"
-                " const img = h.shadowRoot.querySelector('img.qr');"
-                " if (!img) return null;"
-                " return JSON.stringify({src: img.src, w: img.naturalWidth,"
-                "   host: location.host}); })()")
-            if loaded and json.loads(loaded)["w"] > 0:
+            info = json.loads(await page.eval(BOXES))
+            if info["qr"] and info["qr"][0]["loaded"]:
                 break
             await asyncio.sleep(0.5)
-        info = json.loads(loaded) if loaded else {}
         check("the page really is the foreign one", info.get("host") == "127.0.0.1:3061", info)
+        qr_src = info["qr"][0]["src"] if info.get("qr") else ""
         check("the QR src points at the controller, not at the displayed page",
-              str(info.get("src", "")).startswith(f"http://127.0.0.1:{HTTP}/api/qr.svg"), info)
-        check("and the image actually loaded", info.get("w", 0) > 0, info)
+              qr_src.startswith(f"http://127.0.0.1:{HTTP}/api/qr.svg"), info)
+        check("and the image actually loaded",
+              bool(info.get("qr")) and info["qr"][0]["loaded"], info)
         http("DELETE", "/api/override", port=HTTP)
 
         print("\n[47] switching it off takes it away again")
         put({"enabled": False}, port=HTTP)
         gone = None
         for _ in range(40):
-            gone = await page.eval(
-                "(() => !document.getElementById('__mcc_overlay'))()")
+            gone = json.loads(await page.eval(BOXES))["count"] == 0
             if gone:
                 break
             await asyncio.sleep(0.5)
-        check("the badge is removed from the page", gone is True)
+        check("every box is removed from the page", gone is True)
 
 
 async def main():

@@ -210,7 +210,7 @@ pub async fn browser_loop(state: AppState) {
 
                 // The idle screen is a page like any other. It is also the one
                 // most likely to be up when somebody sets a notice.
-                if let Err(e) = apply_overlay(&state, &page).await {
+                if let Err(e) = apply_overlay(&state, &page, None).await {
                     debug!("Failed to apply overlay on the idle page: {}", e);
                 }
 
@@ -343,7 +343,12 @@ pub async fn browser_loop(state: AppState) {
                     }
                 }
 
-                if let Err(e) = apply_overlay(&state, &active_page).await {
+                // Read fresh rather than taken from the playlist snapshot: that
+                // snapshot is read once per inner-loop pass and can be a whole
+                // item duration old, so an overlay edited while the previous item
+                // was up would otherwise appear one full rotation late.
+                let item_overlay = crate::db::load_item_overlay(&state.pool, item.id).await;
+                if let Err(e) = apply_overlay(&state, &active_page, item_overlay.as_ref()).await {
                     error!("Failed to apply overlay: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -385,7 +390,13 @@ pub async fn browser_loop(state: AppState) {
                             // -- an overlay edit must not silently extend the
                             // item it lands on.
                             info!("Overlay settings changed, re-applying.");
-                            if let Err(e) = apply_overlay(&state, &active_page).await {
+                            // Re-read: the edit that woke us may well be this
+                            // item's own layer.
+                            let fresh =
+                                crate::db::load_item_overlay(&state.pool, item.id).await;
+                            if let Err(e) =
+                                apply_overlay(&state, &active_page, fresh.as_ref()).await
+                            {
                                 error!("Failed to re-apply overlay: {}", e);
                                 if is_connection_lost(e.as_ref()) {
                                     reconnect_needed = true;
@@ -531,7 +542,7 @@ async fn run_override_loop(
         if !uses_internal_viewer {
             start_scrolling(page, &override_item.scroll_config).await?;
         }
-        if let Err(e) = apply_overlay(state, page).await {
+        if let Err(e) = apply_overlay(state, page, None).await {
             error!("Failed to apply overlay on the override page: {}", e);
         }
 
@@ -546,7 +557,7 @@ async fn run_override_loop(
                 _ = state.override_signal.notified() => {},
                 _ = state.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
-                    if let Err(e) = apply_overlay(state, page).await {
+                    if let Err(e) = apply_overlay(state, page, None).await {
                         error!("Failed to re-apply overlay: {}", e);
                     }
                     continue;
@@ -1245,8 +1256,12 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
 /// does: a page that blocked the injection must not stall the playlist. The
 /// configuration is resolved by `settings::overlay_payload`, so the display and
 /// the operator's preview cannot render different things.
-async fn apply_overlay(state: &AppState, page: &Page) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = crate::settings::overlay_payload(state).await;
+async fn apply_overlay(
+    state: &AppState,
+    page: &Page,
+    item: Option<&crate::settings::ItemOverlay>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = crate::settings::overlay_payload(state, item).await;
 
     let _ = page.evaluate(overlay_runtime_script()).await;
     let has_api: bool = page

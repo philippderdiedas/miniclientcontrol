@@ -237,6 +237,15 @@ pub struct PlaylistItemWithAsset {
     #[sqlx(default)]
     pub scroll_config: sqlx::types::Json<ScrollMode>,
 
+    /// This item's own overlay, drawn in addition to the global one. `None` for
+    /// the many items that do not want one.
+    ///
+    /// Only the API selects this column; the control loop reads the overlay fresh
+    /// per item (`db::load_item_overlay`), because its playlist snapshot can be a
+    /// whole item duration out of date.
+    #[sqlx(default)]
+    pub overlay_config: sqlx::types::Json<Option<crate::settings::ItemOverlay>>,
+
     // Asset fields
     pub local_path: Option<String>,
     pub mimetype: Option<String>,
