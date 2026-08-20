@@ -90,14 +90,69 @@ async def settings_flow():
               (status, body))
         check("and keeps the corner it was given", body["overlay"]["position"] == "top-left", body)
 
-        status, body = put({"enabled": True, "text": "x", "size": 900, "opacity": 12,
-                            "position": "nowhere"})
+        status, body = put({"enabled": True, "text": "x", "size": 900,
+                            "background_alpha": 12, "position": "nowhere"})
         check("an impossible size is pulled into range, not rejected",
               status == 200 and body["overlay"]["size"] <= 20, body)
-        check("so is the opacity", body["overlay"]["opacity"] <= 1.0, body)
+        check("so is an alpha out of range", body["overlay"]["background_alpha"] <= 1.0, body)
         check("an unknown corner falls back instead of failing",
               body["overlay"]["position"] == "bottom-right", body)
 
+        print("\n[40b] the box style is structured, not free-text CSS")
+        status, body = put({"enabled": True, "text": "x", "background_color": "#123456",
+                            "background_alpha": 0.4, "color": "#00ff00",
+                            "color_alpha": 0.5})
+        style = body["overlay"]
+        check("colour and alpha are stored apart",
+              status == 200 and style["background_color"] == "#123456"
+              and abs(style["background_alpha"] - 0.4) < 0.01, style)
+        check("and the text colour has its own alpha",
+              abs(style["color_alpha"] - 0.5) < 0.01, style)
+
+        status, body = put({"enabled": True, "text": "x", "background_color": "not a colour",
+                            "color": "#12345"})
+        check("a colour that is not one falls back instead of rendering nothing",
+              body["overlay"]["background_color"] == "#000000"
+              and body["overlay"]["color"] == "#ffffff", body["overlay"])
+
+        status, body = put({"enabled": True, "text": "x", "color_alpha": 0.0})
+        check("text cannot be made invisible -- that is indistinguishable from broken",
+              body["overlay"]["color_alpha"] >= 0.1, body["overlay"])
+
+        status, body = put({"enabled": True, "text": "x",
+                            "background_css": "linear-gradient(#000, #333)"})
+        check("the escape hatch keeps a real CSS value",
+              body["overlay"]["background_css"].startswith("linear-gradient"),
+              body["overlay"])
+
+        status, body = put({"enabled": True, "text": "x",
+                            "background_css": "red; } .box { display: none"})
+        check("but a value that would end the declaration is dropped",
+              body["overlay"]["background_css"] == "", body["overlay"])
+
+        print("\n[40c] a stored background from before the split is migrated")
+        # Written the way the old version wrote it, straight into the settings row.
+        legacy = json.dumps({"enabled": True, "text": "alt",
+                             "background": "rgba(17,34,51,0.5)", "opacity": 0.5,
+                             "color": "#abcdef"})
+        import sqlite3
+        con = sqlite3.connect(f"{SP}/t.db")
+        con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('overlay_config', ?)",
+                    (legacy,))
+        con.commit()
+        con.close()
+
+    with Server(fresh=False):
+        migrated = http("GET", "/api/settings")[1]["overlay"]
+        check("the colour survived as a picker value", migrated["background_color"] == "#112233",
+              migrated)
+        # 0.5 alpha dimmed further by the old whole-box opacity of 0.5.
+        check("and the old whole-box opacity folded into its alpha",
+              abs(migrated["background_alpha"] - 0.25) < 0.01, migrated)
+        check("the legacy fields are gone from the response",
+              "background" not in migrated and "opacity" not in migrated, migrated)
+
+    with Server(fresh=True):
         status, body = put({"enabled": True, "text": "  ", "show_clock": False,
                             "show_date": False, "qr_text": ""})
         check("an overlay that would draw nothing is refused",
@@ -257,6 +312,53 @@ async def browser_flow():
               "Werkstatt geschlossen" in boxes["text"], boxes)
         check("and the clock rendered a time", any(c.isdigit() for c in boxes["text"]), boxes)
         check("one corner in use means one box", boxes["count"] == 1, boxes)
+
+        print("\n[44] the colour and alpha reach the rendered box")
+        put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
+             "position": "top-center", "background_color": "#112233",
+             "background_alpha": 0.4, "color": "#00ff00", "color_alpha": 0.6}, port=HTTP)
+        painted = None
+        for _ in range(40):
+            painted = json.loads(await page.eval(
+                """(() => {
+                  const h = document.querySelector('[id^="__mcc_overlay"]');
+                  const box = h && h.shadowRoot && h.shadowRoot.querySelector('.box');
+                  if (!box) return 'null';
+                  const st = getComputedStyle(box);
+                  return JSON.stringify({bg: st.backgroundColor, fg: st.color,
+                                         pad: st.paddingTop});
+                })()"""))
+            if painted and painted.get("bg", "").startswith("rgba(17"):
+                break
+            await asyncio.sleep(0.5)
+        check("the background is the picked colour at the picked alpha",
+              painted.get("bg") == "rgba(17, 34, 51, 0.4)", painted)
+        check("and the text colour carries its own alpha",
+              painted.get("fg") == "rgba(0, 255, 0, 0.6)", painted)
+
+        put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
+             "position": "top-center", "plain": True}, port=HTTP)
+        plain = None
+        for _ in range(40):
+            plain = json.loads(await page.eval(
+                """(() => {
+                  const h = document.querySelector('[id^="__mcc_overlay"]');
+                  const box = h && h.shadowRoot && h.shadowRoot.querySelector('.box');
+                  if (!box) return 'null';
+                  const st = getComputedStyle(box);
+                  return JSON.stringify({bg: st.backgroundColor, pad: st.paddingTop,
+                                         cls: box.className});
+                })()"""))
+            if plain and "plain" in plain.get("cls", ""):
+                break
+            await asyncio.sleep(0.5)
+        check("\"no box\" drops the background and the padding with it",
+              plain.get("bg") == "rgba(0, 0, 0, 0)" and plain.get("pad") == "0px", plain)
+
+        # Back to a box, so the checks below read what they expect.
+        put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
+             "position": "top-center"}, port=HTTP)
+        await asyncio.sleep(2)
 
         print("\n[45] and on a playlist item, and on an override")
         # Served by the controller itself: the device is often offline, and a test

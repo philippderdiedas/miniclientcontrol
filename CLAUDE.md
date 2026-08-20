@@ -342,6 +342,29 @@ Sizes are in `vmin`/`vw`, not pixels, so one configuration reads the same on a
 1080p landscape panel and a portrait 4K one — signage is looked at from across a
 room.
 
+**The box style is stored structured, not as CSS.** `background_color` plus
+`background_alpha`, `color` plus `color_alpha`, and a `plain` flag for "no box at
+all" (its own flag rather than alpha 0, because it also drops the padding and the
+corners). The free-text field this replaced had one failure mode worth
+remembering: an invalid CSS declaration is dropped by the browser without a word,
+so a typo meant a box with no background and no error anywhere — on a screen
+nobody is standing in front of.
+
+`background_css` remains as an escape hatch for a gradient, used verbatim when
+set. `sanitize_css_value` keeps it a *value*: no `;`, no braces, no quotes, no
+`@`, 200 characters. It is interpolated into a declaration in the overlay's own
+stylesheet, and while a shadow-root style cannot reach the page, letting somebody
+rewrite the rest of their own box from a text field is not worth the trouble.
+
+Old configurations are migrated on load (`Overlay::migrate_legacy_style`): a
+stored `rgba(...)`, `#rrggbb` or `#rrggbbaa` becomes colour plus alpha, an
+unparseable value becomes `background_css` rather than being thrown away, and the
+former whole-box `opacity` is folded into the background alpha. Both legacy fields
+are `skip_serializing`, so they leave the API the first time the settings are
+written back. The whole-box opacity is gone on purpose: two controls that both
+read as "transparency" is a trap, and washed-out text on signage is rarely what
+anyone wanted.
+
 **The loop reads an item's overlay fresh, never from its playlist snapshot**
 (`db::load_item_overlay`). That snapshot is read once per inner-loop pass and can
 be a whole item duration old — the same trap documented for `pending_jump` — so a

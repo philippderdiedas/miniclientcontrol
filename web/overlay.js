@@ -131,6 +131,27 @@
   // The box style comes from its *first* layer: when a global overlay and an
   // item overlay share a corner they are one box, and two competing background
   // colours in one box would look like a bug rather than a choice.
+  // rgba() from a hex colour and an alpha, because the two are stored apart: a
+  // CSS string in the settings failed silently on a typo, and there is nobody in
+  // front of the screen to notice a box that lost its background.
+  function rgba(hex, alpha) {
+    const digits = String(hex || '').replace('#', '');
+    const full = digits.length === 3
+      ? digits.split('').map((c) => c + c).join('')
+      : digits.slice(0, 6);
+    const value = parseInt(full, 16);
+    if (!Number.isFinite(value) || full.length !== 6) return `rgba(0,0,0,${alpha})`;
+    return `rgba(${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},${alpha})`;
+  }
+
+  function boxBackground(style) {
+    if (style.plain) return 'transparent';
+    // The escape hatch wins when it is set: it exists for the gradient nobody
+    // wanted to express as one colour.
+    if (style.background_css) return style.background_css;
+    return rgba(style.background_color, style.background_alpha);
+  }
+
   function styles(style, position) {
     const corner = CORNERS[position] || CORNERS['bottom-right'];
     // Sizes are in vmin so one configuration looks the same on a 1080p panel and
@@ -149,9 +170,8 @@
         max-width: ${style.max_width}vw;
         padding: 0.7em 1em;
         border-radius: 0.5em;
-        background: ${style.background};
-        color: ${style.color};
-        opacity: ${style.opacity};
+        background: ${boxBackground(style)};
+        color: ${rgba(style.color, style.color_alpha)};
         font-family: system-ui, sans-serif;
         font-size: ${style.size}vmin;
         line-height: 1.25;
@@ -306,7 +326,7 @@
       style.textContent = styles(group[0], position);
 
       const box = document.createElement('div');
-      box.className = 'box' + (group[0].background === 'transparent' ? ' plain' : '');
+      box.className = 'box' + (group[0].plain ? ' plain' : '');
       for (const layer of group) {
         box.appendChild(renderLayer(layer));
       }
@@ -351,13 +371,16 @@
   }
 
   const DEFAULTS = {
-    margin: 3, size: 2.4, max_width: 40, qr_size: 14, opacity: 1,
-    background: 'rgba(0,0,0,0.65)', color: '#ffffff', position: 'bottom-right',
+    margin: 3, size: 2.4, max_width: 40, qr_size: 14,
+    background_color: '#000000', background_alpha: 0.65, plain: false,
+    background_css: '', color: '#ffffff', color_alpha: 1,
+    position: 'bottom-right',
   };
 
   function normalize(layer) {
     const merged = { ...DEFAULTS, ...layer };
-    for (const key of ['margin', 'size', 'max_width', 'qr_size', 'opacity']) {
+    for (const key of ['margin', 'size', 'max_width', 'qr_size',
+                       'background_alpha', 'color_alpha']) {
       const value = Number(merged[key]);
       merged[key] = Number.isFinite(value) ? value : DEFAULTS[key];
     }

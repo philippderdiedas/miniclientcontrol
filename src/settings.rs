@@ -86,9 +86,29 @@ pub struct Overlay {
     pub margin: f32,
     pub max_width: f32,
     pub qr_size: f32,
-    pub opacity: f32,
-    pub background: String,
+    /// Box background, as a colour and an alpha rather than a CSS string: an
+    /// invalid declaration is dropped by the browser without a word, so a typo
+    /// used to mean a box with no background and no error anywhere.
+    pub background_color: String,
+    pub background_alpha: f32,
+    /// No box at all -- the content sits directly on the page. Its own flag
+    /// rather than alpha 0, because it also drops the padding and the corners.
+    pub plain: bool,
+    /// Escape hatch, used verbatim when set: gradients and the like. Validated to
+    /// be a *value* and nothing more, so it cannot end the declaration and
+    /// rewrite the rest of the box's stylesheet.
+    pub background_css: String,
     pub color: String,
+    pub color_alpha: f32,
+    /// Legacy `rgba(...)`/hex string, migrated into the fields above on load and
+    /// never written again.
+    #[serde(skip_serializing)]
+    pub background: Option<String>,
+    /// Legacy whole-box opacity. Folded into the two alphas: one word for two
+    /// different things is a trap, and washed-out text on signage is rarely what
+    /// anybody wanted.
+    #[serde(skip_serializing)]
+    pub opacity: Option<f32>,
 }
 
 impl Default for Overlay {
@@ -108,9 +128,14 @@ impl Default for Overlay {
             margin: 3.0,
             max_width: 40.0,
             qr_size: 14.0,
-            opacity: 1.0,
-            background: "rgba(0,0,0,0.65)".to_string(),
+            background_color: "#000000".to_string(),
+            background_alpha: 0.65,
+            plain: false,
+            background_css: String::new(),
             color: "#ffffff".to_string(),
+            color_alpha: 1.0,
+            background: None,
+            opacity: None,
         }
     }
 }
@@ -154,6 +179,95 @@ impl ItemOverlay {
     }
 }
 
+fn is_hex_colour(value: &str) -> bool {
+    let Some(digits) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(digits.len(), 3 | 6 | 8) && digits.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A colour as `(#rrggbb, alpha)`, for the shapes an operator could plausibly
+/// have typed into the old free-text field.
+///
+/// `None` means "not a plain colour" -- a gradient, say -- and the caller keeps
+/// the string as the escape-hatch value rather than discarding what was on
+/// screen.
+fn parse_colour(raw: &str) -> Option<(String, f32)> {
+    let raw = raw.trim();
+
+    if let Some(digits) = raw.strip_prefix('#') {
+        if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let expand = |c: char| {
+            let d = c.to_digit(16)? as u8;
+            Some(d * 17)
+        };
+        let (rgb, alpha) = match digits.len() {
+            3 => {
+                let mut it = digits.chars();
+                let r = expand(it.next()?)?;
+                let g = expand(it.next()?)?;
+                let b = expand(it.next()?)?;
+                ([r, g, b], 1.0)
+            }
+            6 | 8 => {
+                let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
+                let rgb = [byte(0)?, byte(2)?, byte(4)?];
+                let alpha = if digits.len() == 8 {
+                    byte(6)? as f32 / 255.0
+                } else {
+                    1.0
+                };
+                (rgb, alpha)
+            }
+            _ => return None,
+        };
+        return Some((format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2]), alpha));
+    }
+
+    let lower = raw.to_ascii_lowercase();
+    let body = lower
+        .strip_prefix("rgba(")
+        .or_else(|| lower.strip_prefix("rgb("))?
+        .strip_suffix(')')?;
+    let parts: Vec<&str> = body.split(',').map(str::trim).collect();
+    if parts.len() < 3 || parts.len() > 4 {
+        return None;
+    }
+    let channel = |part: &str| -> Option<u8> {
+        // Percentages exist in CSS but nobody typed them into this field, and
+        // guessing wrong is worse than falling back to the escape hatch.
+        part.parse::<f32>().ok().map(|v| v.clamp(0.0, 255.0) as u8)
+    };
+    let r = channel(parts[0])?;
+    let g = channel(parts[1])?;
+    let b = channel(parts[2])?;
+    let alpha = match parts.get(3) {
+        Some(value) => value.parse::<f32>().ok()?.clamp(0.0, 1.0),
+        None => 1.0,
+    };
+    Some((format!("#{:02x}{:02x}{:02x}", r, g, b), alpha))
+}
+
+/// Keep a raw CSS value a *value*.
+///
+/// It is interpolated into a declaration inside the overlay's own stylesheet, so
+/// a `;` or a `}` would let whoever typed it rewrite the rest of the box. That is
+/// only ever their own box -- shadow styles do not reach the page -- but a
+/// stylesheet nobody can see breaking is worth not allowing at all.
+fn sanitize_css_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let forbidden = |c: char| matches!(c, ';' | '{' | '}' | '<' | '>' | '@' | '\\' | '"' | '\'');
+    if trimmed.len() > 200 || trimmed.contains(forbidden) || trimmed.contains("*/") {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
 pub const OVERLAY_POSITIONS: &[&str] = &[
     "top-left", "top-right", "bottom-left", "bottom-right", "top-center", "bottom-center",
 ];
@@ -174,11 +288,59 @@ impl Overlay {
         self.margin = self.margin.clamp(0.0, 40.0);
         self.max_width = self.max_width.clamp(5.0, 100.0);
         self.qr_size = self.qr_size.clamp(4.0, 60.0);
-        self.opacity = self.opacity.clamp(0.05, 1.0);
+        self.migrate_legacy_style();
+        if !is_hex_colour(&self.background_color) {
+            self.background_color = "#000000".to_string();
+        }
+        if !is_hex_colour(&self.color) {
+            self.color = "#ffffff".to_string();
+        }
+        self.background_alpha = self.background_alpha.clamp(0.0, 1.0);
+        // Not down to zero: invisible text is indistinguishable from a broken
+        // overlay, and "no box" already has its own switch.
+        self.color_alpha = self.color_alpha.clamp(0.1, 1.0);
+        self.background_css = sanitize_css_value(&self.background_css);
         self.text = self.text.chars().take(500).collect();
         self.qr_text = self.qr_text.chars().take(500).collect();
         self.qr_label = self.qr_label.chars().take(100).collect();
         self
+    }
+
+    /// Fold a stored `background`/`opacity` from before the split into the
+    /// current fields, so nobody's configuration silently resets to the default.
+    ///
+    /// Only when the new fields are untouched: an operator who has since set a
+    /// colour has made the newer decision.
+    fn migrate_legacy_style(&mut self) {
+        let legacy = self.background.take();
+        let opacity = self.opacity.take();
+        let defaults = Self::default();
+        if self.background_color != defaults.background_color
+            || (self.background_alpha - defaults.background_alpha).abs() > f32::EPSILON
+            || !self.background_css.is_empty()
+            || self.plain
+        {
+            return;
+        }
+
+        if let Some(raw) = legacy {
+            let raw = raw.trim();
+            if raw.eq_ignore_ascii_case("transparent") {
+                self.plain = true;
+            } else if let Some((hex, alpha)) = parse_colour(raw) {
+                self.background_color = hex;
+                self.background_alpha = alpha;
+            } else if !raw.is_empty() {
+                // Something exotic (a gradient, say): keep it as the escape hatch
+                // rather than throwing away what was on screen.
+                self.background_css = raw.to_string();
+            }
+        }
+        if let Some(opacity) = opacity {
+            // The old knob dimmed the whole box. The background alpha is the
+            // closest single home for it, and the text stays readable.
+            self.background_alpha = (self.background_alpha * opacity).clamp(0.0, 1.0);
+        }
     }
 
     /// True when the overlay would draw nothing at all. An enabled overlay with
@@ -476,9 +638,12 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
             "margin": overlay.margin,
             "max_width": overlay.max_width,
             "qr_size": overlay.qr_size,
-            "opacity": overlay.opacity,
-            "background": overlay.background,
+            "background_color": overlay.background_color,
+            "background_alpha": overlay.background_alpha,
+            "plain": overlay.plain,
+            "background_css": overlay.background_css,
             "color": overlay.color,
+            "color_alpha": overlay.color_alpha,
         }));
     }
 

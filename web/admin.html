@@ -138,19 +138,34 @@
       <p>
         <label for="ovQrSize">QR-Größe:</label>
         <input type="number" id="ovQrSize" step="1" min="4" max="60" size="4" /> vmin
-        <label for="ovOpacity">Deckkraft:</label>
-        <input type="number" id="ovOpacity" step="0.05" min="0.05" max="1" size="4" />
       </p>
       <p>
-        <label for="ovBackground">Hintergrund:</label>
-        <input id="ovBackground" size="18" placeholder="rgba(0,0,0,0.65)" />
+        <label for="ovBackgroundColor">Hintergrund:</label>
+        <input type="color" id="ovBackgroundColor" />
+        <input type="range" id="ovBackgroundAlpha" min="0" max="100" step="1" />
+        <span class="muted" id="ovBackgroundAlphaOut"></span>
+        <label class="inline"><input type="checkbox" id="ovPlain" /> keine Box</label>
+      </p>
+      <p>
         <label for="ovColor">Textfarbe:</label>
         <input type="color" id="ovColor" />
+        <input type="range" id="ovColorAlpha" min="10" max="100" step="1" />
+        <span class="muted" id="ovColorAlphaOut"></span>
       </p>
+      <details id="ovAdvanced">
+        <summary class="muted">erweitert</summary>
+        <p>
+          <label for="ovBackgroundCss">Hintergrund als CSS-Wert:</label>
+          <input id="ovBackgroundCss" size="34" placeholder="linear-gradient(...)" />
+        </p>
+        <p class="muted">
+          Überschreibt Farbe und Deckkraft, wenn gefüllt. Nur ein Wert, kein
+          <code>;</code> und keine Klammern — sonst wird das Feld verworfen.
+        </p>
+      </details>
       <p class="muted">
         Größen in <code>vmin</code> bzw. <code>vw</code>, damit eine Einstellung auf
-        jedem Panel gleich groß aussieht. <code>transparent</code> als Hintergrund
-        lässt die Box weg.
+        jedem Panel gleich groß aussieht.
       </p>
       <button id="ovSave">Overlay speichern</button>
       <button id="ovPreview" type="button">Vorschau hier zeigen</button>
@@ -367,8 +382,31 @@
       show_seconds: 'ovSeconds', show_date: 'ovDate', qr_text: 'ovQrText',
       qr_label: 'ovQrLabel', position: 'ovPosition', size: 'ovSize',
       margin: 'ovMargin', max_width: 'ovMaxWidth', qr_size: 'ovQrSize',
-      opacity: 'ovOpacity', background: 'ovBackground', color: 'ovColor',
+      background_color: 'ovBackgroundColor', plain: 'ovPlain',
+      background_css: 'ovBackgroundCss', color: 'ovColor',
     };
+
+    // The two alphas are 0..1 on the wire and percent in the UI: a slider in
+    // hundredths is what people expect, and the runtime wants the fraction.
+    const alphas = {
+      background_alpha: ['ovBackgroundAlpha', 'ovBackgroundAlphaOut'],
+      color_alpha: ['ovColorAlpha', 'ovColorAlphaOut'],
+    };
+
+    function syncAlphaOutputs() {
+      for (const [slider, out] of Object.values(alphas)) {
+        document.getElementById(out).textContent =
+          document.getElementById(slider).value + ' %';
+      }
+      // The colour and its slider say nothing while the escape hatch or "no box"
+      // is in charge, so they stop pretending to.
+      const css = document.getElementById('ovBackgroundCss').value.trim();
+      const plain = document.getElementById('ovPlain').checked;
+      for (const id of ['ovBackgroundColor', 'ovBackgroundAlpha']) {
+        document.getElementById(id).disabled = plain || !!css;
+      }
+      document.getElementById('ovBackgroundCss').disabled = plain;
+    }
 
     const qrSourceInputs = () => [...document.querySelectorAll('input[name="ovQrSource"]')];
 
@@ -402,6 +440,12 @@
       document.getElementById('ovImage').value =
         overlay.image_asset_id === null || overlay.image_asset_id === undefined
           ? '' : String(overlay.image_asset_id);
+
+      for (const [key, [slider]] of Object.entries(alphas)) {
+        const value = overlay[key] === undefined || overlay[key] === null ? 1 : overlay[key];
+        document.getElementById(slider).value = String(Math.round(value * 100));
+      }
+      syncAlphaOutputs();
 
       const source = overlay.qr_source === 'cast'
         ? 'cast'
@@ -441,6 +485,10 @@
       const chosen = (qrSourceInputs().find((i) => i.checked) || {}).value || 'text';
       body.qr_source = chosen === 'cast' ? 'cast' : 'text';
       if (chosen !== 'text') body.qr_text = '';
+
+      for (const [key, [slider]] of Object.entries(alphas)) {
+        body[key] = Number(document.getElementById(slider).value) / 100;
+      }
       return body;
     }
 
@@ -505,6 +553,10 @@
     });
 
     for (const input of qrSourceInputs()) input.addEventListener('change', syncQrSource);
+    for (const id of ['ovBackgroundAlpha', 'ovColorAlpha', 'ovPlain', 'ovBackgroundCss']) {
+      document.getElementById(id).addEventListener('input', syncAlphaOutputs);
+      document.getElementById(id).addEventListener('change', syncAlphaOutputs);
+    }
 
     // The guest address comes from the same endpoint the guest page uses, so the
     // hint cannot claim an address the device would not hand out.
