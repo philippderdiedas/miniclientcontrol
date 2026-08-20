@@ -170,11 +170,12 @@ src/handlers.rs  JSON/multipart API handlers
 src/browser.rs   the CDP control loop (largest file; all playback logic)
 src/web.rs       serves web/ embedded via include_dir
 src/cast.rs      screen-cast signaling relay + session lifecycle
-src/settings.rs  runtime settings (cast + operator credentials) and their API
+src/settings.rs  runtime settings (cast, overlay, operator credentials) + their API
 src/chromium.rs  finds, launches and supervises the display browser
 src/mdns.rs      publishes an extra `.local` name via avahi-publish
 src/tls.rs       self-signed cert + HTTPS listener for the cast sender page
 web/             operator UI + the pages the *display* browser renders
+web/overlay.js   the overlay runtime, injected into whatever is on screen
 ```
 
 ### Three audiences for HTTP
@@ -264,6 +265,61 @@ also re-evaluated after navigation, because pages with a strict CSP can block it
 PDFs are a special case: they are rendered by `web/pdf_viewer.html` (pdf.js), which
 drives its own scrolling from query parameters. `browser.rs` detects this with
 `is_internal_pdf_viewer_url` and skips `start_scrolling`/`stop_scrolling` for those.
+
+### The overlay (`web/overlay.js`)
+
+A badge the operator can put on top of whatever is playing — text, an uploaded
+image, a clock, a date, a QR code — configured globally in the admin UI and
+stored as one JSON blob in `settings` (`overlay_config`).
+
+It is injected the same way as the scroll runtime, via
+`Page.addScriptToEvaluateOnNewDocument` plus a re-evaluation afterwards, and
+`apply_overlay` probes `!!globalThis.__ov` and no-ops when a strict CSP kept the
+injection out. There is **no CDP command that draws over a page**: an overlay is
+always DOM in the target document, which is what the three defences in
+`overlay.js` are about.
+
+- **Shadow DOM plus `all: initial`.** Otherwise the target page's CSS decides how
+  the notice looks, and a `div { display: none }` somewhere makes it vanish.
+- **The top layer, via `popover="manual"`.** An element in fullscreen covers
+  *every* z-index there is, so a video or a fullscreen dashboard would hide the
+  overlay exactly when it matters. `manual` and not `auto`: an auto popover
+  closes on the next Escape or outside click, and this one is not the page's to
+  dismiss. The `z-index` in the host style is only the fallback for a browser
+  without popover support.
+- **A `MutationObserver` that re-attaches it.** SPAs replace whole subtrees and
+  take the overlay with them.
+
+Sizes are in `vmin`/`vw`, not pixels, so one configuration reads the same on a
+1080p landscape panel and a portrait 4K one — signage is looked at from across a
+room.
+
+`AppState::overlay_signal` is what makes an edit land on the item *already* on
+screen. All three places the loop can be parked handle it: the per-item
+`tokio::select!` (which recomputes the remaining time rather than restarting it,
+so an overlay edit cannot extend an item), the idle-screen wait, and
+`run_override_loop` — a cast or a pinned page can stand for hours, which is
+exactly when a notice matters, and re-applying touches nothing else so a live
+`RTCPeerConnection` survives it.
+
+The payload carries a `base` (`http://127.0.0.1:<port>`) and the runtime joins
+every URL it fetches onto it. This is load-bearing rather than tidy: the overlay's
+DOM lives in the *displayed page's* document, so a relative `/api/qr.svg` or
+`/uploads/…` would be fetched from whatever dashboard is on screen and 404 there.
+`tests/cast/test_overlay.py` serves an item from a second port for exactly this
+reason and asserts the QR image really loaded.
+
+`settings::overlay_payload` resolves `image_asset_id` to an `/uploads/…` path and
+is the *only* place that builds the runtime's configuration. The admin preview
+fetches `/api/overlay` and runs the display's own runtime against it — with only
+`base` swapped for its own origin — rather than rebuilding the badge in the page:
+two renderings of the same settings drift, and then somebody hunts a display bug
+that is really a UI bug.
+
+An enabled overlay with nothing in it is a `400`, not a silently invisible
+switch. Out-of-range numbers are clamped instead of rejected, and an unknown
+corner falls back — the alternative is an error message on a screen nobody is
+standing in front of.
 
 ### pdf.js
 
@@ -540,6 +596,8 @@ playlist, so one bad row would blank the screen.
 | DELETE | `/api/cast/session` | Operator: end the cast now |
 | POST | `/api/cast/pair` | `--cast-auth=pairing` only; shows a code on the display |
 | GET/PUT | `/api/settings` | Operator: runtime settings + which flags pinned them |
+| GET | `/api/overlay` | The overlay as the display runtime wants it, asset ids resolved |
+| GET | `/api/qr.svg` | `?text=` — QR for anything, used by the overlay |
 | POST/DELETE | `/api/cast/claim` | Guest: reserve the session before sharing |
 
 `PUT /api/playlist/{id}` may change an item's source, but only like for like: a

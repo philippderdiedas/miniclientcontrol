@@ -79,6 +79,76 @@
     </div>
   </div>
 
+  <div class="card" id="overlayCard">
+    <p class="status">Overlay</p>
+    <p class="muted">
+      Wird über allem eingeblendet, was gerade läuft — Playlist, PDF, Übertragung.
+    </p>
+    <p>
+      <label><input type="checkbox" id="ovEnabled" /> Overlay einblenden</label>
+    </p>
+    <div id="ovFields">
+      <p>
+        <label for="ovText">Text:</label><br />
+        <textarea id="ovText" rows="2" style="width: 100%; font: inherit;"></textarea>
+      </p>
+      <p>
+        <label for="ovImage">Bild:</label>
+        <select id="ovImage"><option value="">— keins —</option></select>
+      </p>
+      <p>
+        <label><input type="checkbox" id="ovClock" /> Uhr</label>
+        <label><input type="checkbox" id="ovSeconds" /> mit Sekunden</label>
+        <label><input type="checkbox" id="ovDate" /> Datum</label>
+      </p>
+      <p>
+        <label for="ovQrText">QR-Code für:</label>
+        <input id="ovQrText" size="34" placeholder="URL oder Text" />
+        <label for="ovQrLabel">Beschriftung:</label>
+        <input id="ovQrLabel" size="14" />
+      </p>
+      <p>
+        <label for="ovPosition">Ecke:</label>
+        <select id="ovPosition">
+          <option value="bottom-right">unten rechts</option>
+          <option value="bottom-left">unten links</option>
+          <option value="bottom-center">unten mittig</option>
+          <option value="top-right">oben rechts</option>
+          <option value="top-left">oben links</option>
+          <option value="top-center">oben mittig</option>
+        </select>
+      </p>
+      <p>
+        <label for="ovSize">Schriftgröße:</label>
+        <input type="number" id="ovSize" step="0.1" min="0.5" max="20" size="4" /> vmin
+        <label for="ovMargin">Abstand zum Rand:</label>
+        <input type="number" id="ovMargin" step="0.5" min="0" max="40" size="4" /> vmin
+        <label for="ovMaxWidth">max. Breite:</label>
+        <input type="number" id="ovMaxWidth" step="1" min="5" max="100" size="4" /> vw
+      </p>
+      <p>
+        <label for="ovQrSize">QR-Größe:</label>
+        <input type="number" id="ovQrSize" step="1" min="4" max="60" size="4" /> vmin
+        <label for="ovOpacity">Deckkraft:</label>
+        <input type="number" id="ovOpacity" step="0.05" min="0.05" max="1" size="4" />
+      </p>
+      <p>
+        <label for="ovBackground">Hintergrund:</label>
+        <input id="ovBackground" size="18" placeholder="rgba(0,0,0,0.65)" />
+        <label for="ovColor">Textfarbe:</label>
+        <input type="color" id="ovColor" />
+      </p>
+      <p class="muted">
+        Größen in <code>vmin</code> bzw. <code>vw</code>, damit eine Einstellung auf
+        jedem Panel gleich groß aussieht. <code>transparent</code> als Hintergrund
+        lässt die Box weg.
+      </p>
+      <button id="ovSave">Overlay speichern</button>
+      <button id="ovPreview" type="button">Vorschau hier zeigen</button>
+      <span class="muted" id="ovFeedback"></span>
+    </div>
+  </div>
+
   <div class="card" id="authCard">
     <p class="status">Zugang zur Verwaltung</p>
     <p class="muted" id="lockAuthBasic" hidden>
@@ -226,6 +296,7 @@
 
       syncCodeRow();
       syncAuthFields();
+      if (settings.overlay) applyOverlay(settings.overlay);
     }
 
     async function loadSettings() {
@@ -275,6 +346,120 @@
         feedback('Controller nicht erreichbar.', false);
       }
     });
+
+
+    // --- overlay ---------------------------------------------------------
+    //
+    // Saved separately from the cast and auth settings: it is edited far more
+    // often, and the "save everything" button would otherwise make an overlay
+    // tweak look like it might also change who can log in.
+    const ov = {
+      enabled: 'ovEnabled', text: 'ovText', show_clock: 'ovClock',
+      show_seconds: 'ovSeconds', show_date: 'ovDate', qr_text: 'ovQrText',
+      qr_label: 'ovQrLabel', position: 'ovPosition', size: 'ovSize',
+      margin: 'ovMargin', max_width: 'ovMaxWidth', qr_size: 'ovQrSize',
+      opacity: 'ovOpacity', background: 'ovBackground', color: 'ovColor',
+    };
+
+    function applyOverlay(overlay) {
+      for (const [key, id] of Object.entries(ov)) {
+        const node = document.getElementById(id);
+        if (node.type === 'checkbox') node.checked = !!overlay[key];
+        else node.value = overlay[key] === null || overlay[key] === undefined ? '' : overlay[key];
+      }
+      document.getElementById('ovImage').value =
+        overlay.image_asset_id === null || overlay.image_asset_id === undefined
+          ? '' : String(overlay.image_asset_id);
+    }
+
+    // Only images: offering a PDF here would produce a broken image on a screen
+    // nobody is standing in front of.
+    async function loadOverlayImages() {
+      const select = document.getElementById('ovImage');
+      try {
+        const res = await fetch('/api/assets');
+        if (!res.ok) return;
+        for (const asset of await res.json()) {
+          if (!(asset.mimetype || '').startsWith('image/')) continue;
+          const option = document.createElement('option');
+          option.value = String(asset.id);
+          option.textContent = asset.filename;
+          select.appendChild(option);
+        }
+      } catch (_) { /* the status poll reports unreachability */ }
+    }
+
+    function overlayFromForm() {
+      const body = {};
+      for (const [key, id] of Object.entries(ov)) {
+        const node = document.getElementById(id);
+        if (node.type === 'checkbox') body[key] = node.checked;
+        else if (node.type === 'number') body[key] = parseFloat(node.value);
+        else body[key] = node.value;
+      }
+      const image = document.getElementById('ovImage').value;
+      body.image_asset_id = image ? parseInt(image, 10) : null;
+      return body;
+    }
+
+    function ovFeedback(message, ok) {
+      const node = document.getElementById('ovFeedback');
+      node.textContent = message;
+      node.className = ok ? 'ok' : 'bad';
+    }
+
+    document.getElementById('ovSave').addEventListener('click', async () => {
+      ovFeedback('', true);
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ overlay: overlayFromForm() }),
+        });
+        const answer = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          ovFeedback(answer.error || 'Speichern fehlgeschlagen.', false);
+          return;
+        }
+        applyOverlay(answer.overlay);
+        ovFeedback('Gespeichert — steht sofort auf dem Display.', true);
+      } catch (_) {
+        ovFeedback('Controller nicht erreichbar.', false);
+      }
+    });
+
+    // The preview runs the *display's* runtime against the *server's* resolved
+    // configuration, so what appears here is what the screen shows -- a preview
+    // rebuilt in this page would drift and send someone hunting a display bug
+    // that is really a UI bug. It therefore shows the saved state, not the form.
+    document.getElementById('ovPreview').addEventListener('click', async () => {
+      try {
+        if (!globalThis.__ov) {
+          await new Promise((resolve, reject) => {
+            const tag = document.createElement('script');
+            tag.src = '/overlay.js';
+            tag.onload = resolve;
+            tag.onerror = reject;
+            document.head.appendChild(tag);
+          });
+        }
+        const res = await fetch('/api/overlay');
+        if (!res.ok) { ovFeedback('Vorschau nicht möglich.', false); return; }
+        const config = await res.json();
+        // Same runtime, same configuration -- only the base swapped, because the
+        // display reaches the controller over loopback and this page does not.
+        if (!globalThis.__ov.apply({ ...config, base: location.origin, enabled: true })) {
+          ovFeedback('Das Overlay zeigt nichts an.', false);
+          return;
+        }
+        ovFeedback('Vorschau — verschwindet nach 8 Sekunden.', true);
+        setTimeout(() => globalThis.__ov.clear(), 8000);
+      } catch (_) {
+        ovFeedback('Vorschau nicht möglich.', false);
+      }
+    });
+
+    loadOverlayImages();
 
     refresh();
     refreshCast();

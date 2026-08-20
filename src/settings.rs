@@ -22,7 +22,7 @@ use std::num::NonZeroU32;
 use base64::Engine;
 use rand::Rng;
 use ring::pbkdf2;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{Args, CastAuth};
 
@@ -32,6 +32,7 @@ const PBKDF2_ITERATIONS: u32 = 120_000;
 const KEY_CAST_ENABLED: &str = "cast_enabled";
 const KEY_CAST_AUTH: &str = "cast_auth";
 const KEY_CAST_CODE: &str = "cast_code";
+const KEY_OVERLAY: &str = "overlay_config";
 const KEY_AUTH_USER: &str = "basic_auth_user";
 const KEY_AUTH_HASH: &str = "basic_auth_hash";
 
@@ -44,6 +45,97 @@ pub struct AppSettings {
     pub auth_user: Option<String>,
     /// PBKDF2 hash, or the marker for a plaintext password supplied on the CLI.
     pub auth_secret: Option<Secret>,
+    /// The badge drawn on top of whatever is playing.
+    pub overlay: Overlay,
+}
+
+/// What the overlay shows and where.
+///
+/// Stored as one JSON blob rather than a column per field: it is a handful of
+/// presentation knobs that only ever travel together, and the display runtime is
+/// the only thing that interprets them. The server validates the ranges it can
+/// (a nonsense size or an unknown corner would be visible on the screen and
+/// awkward to undo from a page nobody can read) and otherwise passes it through.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Overlay {
+    pub enabled: bool,
+    pub text: String,
+    /// An uploaded asset, referenced the way the playlist references one.
+    pub image_asset_id: Option<i64>,
+    pub show_clock: bool,
+    pub show_seconds: bool,
+    pub show_date: bool,
+    pub qr_text: String,
+    pub qr_label: String,
+    pub position: String,
+    /// vmin, so one setting reads the same on a 1080p panel and a portrait 4K one.
+    pub size: f32,
+    pub margin: f32,
+    pub max_width: f32,
+    pub qr_size: f32,
+    pub opacity: f32,
+    pub background: String,
+    pub color: String,
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            text: String::new(),
+            image_asset_id: None,
+            show_clock: false,
+            show_seconds: false,
+            show_date: false,
+            qr_text: String::new(),
+            qr_label: String::new(),
+            position: "bottom-right".to_string(),
+            size: 2.4,
+            margin: 3.0,
+            max_width: 40.0,
+            qr_size: 14.0,
+            opacity: 1.0,
+            background: "rgba(0,0,0,0.65)".to_string(),
+            color: "#ffffff".to_string(),
+        }
+    }
+}
+
+pub const OVERLAY_POSITIONS: &[&str] = &[
+    "top-left", "top-right", "bottom-left", "bottom-right", "top-center", "bottom-center",
+];
+
+impl Overlay {
+    /// Clamp what would otherwise be visible nonsense on a screen nobody is
+    /// standing in front of. Deliberately forgiving: out-of-range numbers are
+    /// pulled into range rather than rejected, because an overlay that is a bit
+    /// too big still beats a 400 the operator has to decode.
+    pub fn sanitized(mut self) -> Self {
+        if !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
+            self.position = "bottom-right".to_string();
+        }
+        self.size = self.size.clamp(0.5, 20.0);
+        self.margin = self.margin.clamp(0.0, 40.0);
+        self.max_width = self.max_width.clamp(5.0, 100.0);
+        self.qr_size = self.qr_size.clamp(4.0, 60.0);
+        self.opacity = self.opacity.clamp(0.05, 1.0);
+        self.text = self.text.chars().take(500).collect();
+        self.qr_text = self.qr_text.chars().take(500).collect();
+        self.qr_label = self.qr_label.chars().take(100).collect();
+        self
+    }
+
+    /// True when the overlay would draw nothing at all. An enabled overlay with
+    /// no content is a switch that looks on and does nothing, which is worth
+    /// telling the operator about rather than shipping to the display.
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty()
+            && self.image_asset_id.is_none()
+            && !self.show_clock
+            && !self.show_date
+            && self.qr_text.trim().is_empty()
+    }
 }
 
 /// Either a hash read from the database, or a password handed over on the
@@ -167,6 +259,11 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         .await
         .and_then(|raw| parse_cast_auth(&raw));
     let stored_code = crate::db::load_setting(pool, KEY_CAST_CODE).await;
+    let stored_overlay = crate::db::load_setting(pool, KEY_OVERLAY)
+        .await
+        .and_then(|raw| serde_json::from_str::<Overlay>(&raw).ok())
+        .unwrap_or_default()
+        .sanitized();
     let stored_user = crate::db::load_setting(pool, KEY_AUTH_USER).await;
     let stored_hash = crate::db::load_setting(pool, KEY_AUTH_HASH).await;
 
@@ -189,6 +286,7 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
             .unwrap_or_default(),
         auth_user,
         auth_secret,
+        overlay: stored_overlay,
     }
 }
 
@@ -202,6 +300,10 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
         (
             KEY_AUTH_USER,
             settings.auth_user.clone().unwrap_or_default(),
+        ),
+        (
+            KEY_OVERLAY,
+            serde_json::to_string(&settings.overlay).unwrap_or_default(),
         ),
     ];
     // Only a hash is ever written; a CLI password stays out of the database.
@@ -222,18 +324,79 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
 
 // -------------------------------------------------------------------- http
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
 use serde_json::json;
 
 use crate::models::AppState;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/settings", get(read_settings).put(update_settings))
+    Router::new()
+        .route("/api/settings", get(read_settings).put(update_settings))
+        .route("/api/qr.svg", get(qr))
+        .route("/api/overlay", get(read_overlay))
+}
+
+#[derive(Deserialize)]
+pub struct QrQuery {
+    text: String,
+}
+
+/// A QR code for arbitrary text, rendered server-side and fetched by the display
+/// browser over loopback -- so it needs no credentials and no vendored library.
+pub async fn qr(Query(query): Query<QrQuery>) -> Response {
+    if query.text.is_empty() || query.text.chars().count() > 900 {
+        return (StatusCode::BAD_REQUEST, "text out of range").into_response();
+    }
+    crate::cast::qr_svg(&query.text)
+}
+
+/// The overlay as the display runtime wants it: asset ids already resolved to
+/// URLs, because the page has no way to look one up.
+pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
+    Json(overlay_payload(&state).await)
+}
+
+/// The configuration handed to `__ov.apply()`, on the display and in the preview.
+///
+/// Built in one place so the operator's preview and the screen cannot disagree:
+/// two renderings of the same settings that drift apart would send someone
+/// hunting a display bug that is really a UI bug.
+pub async fn overlay_payload(state: &AppState) -> serde_json::Value {
+    let overlay = state.settings.read().await.overlay.clone();
+    let image_path = match overlay.image_asset_id {
+        Some(id) => sqlx::query_scalar::<_, String>("SELECT local_path FROM assets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to resolve overlay asset {}: {}", id, e);
+                None
+            })
+            .map(|path| format!("/uploads/{}", path)),
+        None => None,
+    };
+
+    let mut payload = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("image_path".to_string(), json!(image_path));
+        // Absolute, and this is not a detail: the overlay lives in *someone
+        // else's* document, so a relative `/uploads/...` would resolve against
+        // the dashboard being displayed and 404 there. The runtime joins every
+        // URL onto this base, and the admin preview substitutes its own origin.
+        object.insert(
+            "base".to_string(),
+            json!(format!("http://127.0.0.1:{}", state.args.port)),
+        );
+        // The runtime formats the clock and the date, and the display browser's
+        // own locale is whatever `--browser-language` made it. Naming it here
+        // keeps a German kiosk German even if that ever changes.
+        object.insert("locale".to_string(), json!("de-DE"));
+    }
+    payload
 }
 
 #[derive(Serialize)]
@@ -244,6 +407,7 @@ struct SettingsResponse {
     /// Whether the operator UI currently demands credentials.
     auth_enabled: bool,
     auth_user: Option<String>,
+    overlay: Overlay,
     locks: Locks,
 }
 
@@ -256,6 +420,7 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
         cast_code: settings.cast_code.clone(),
         auth_enabled: settings.auth_user.is_some(),
         auth_user: settings.auth_user.clone(),
+        overlay: settings.overlay.clone(),
         locks: state.locks,
     })
 }
@@ -268,6 +433,7 @@ pub struct UpdateRequest {
     auth_enabled: Option<bool>,
     auth_user: Option<String>,
     auth_password: Option<String>,
+    overlay: Option<Overlay>,
 }
 
 pub async fn update_settings(
@@ -384,6 +550,33 @@ pub async fn update_settings(
         }
     }
 
+    let mut overlay_changed = false;
+    if let Some(overlay) = payload.overlay {
+        let overlay = overlay.sanitized();
+        if overlay.enabled && overlay.is_empty() {
+            return bad("Das Overlay ist eingeschaltet, zeigt aber nichts an.".to_string());
+        }
+        if let Some(id) = overlay.image_asset_id {
+            // A dangling id would render as a broken image on the display, where
+            // nobody is around to notice the little placeholder icon.
+            let known = sqlx::query_scalar::<_, i64>("SELECT id FROM assets WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&state.pool)
+                .await;
+            match known {
+                Ok(Some(_)) => {}
+                Ok(None) => return bad("Das gewählte Bild gibt es nicht.".to_string()),
+                Err(e) => {
+                    tracing::error!("Failed to check overlay asset {}: {}", id, e);
+                    return bad("Das Bild konnte nicht geprüft werden.".to_string());
+                }
+            }
+        }
+        overlay_changed = serde_json::to_string(&overlay).ok()
+            != serde_json::to_string(&next.overlay).ok();
+        next.overlay = overlay;
+    }
+
     let cast_turned_off = {
         let mut settings = state.settings.write().await;
         let was_enabled = settings.cast_enabled;
@@ -397,6 +590,13 @@ pub async fn update_settings(
     }
 
     persist(&state.pool, &next).await;
+
+    // notify_one(), never notify_waiters(): the loop is only parked on this for
+    // part of its cycle, and a dropped notification here means an overlay edit
+    // that silently never reaches the screen.
+    if overlay_changed {
+        state.overlay_signal.notify_one();
+    }
 
     // Turning casting off has to interrupt whatever is running, or the switch
     // would only apply to the next person.

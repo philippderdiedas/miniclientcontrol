@@ -232,11 +232,19 @@ fn sender_url(state: &AppState) -> String {
 /// client-side library would have to be vendored, and an SVG the display can
 /// scale is a few hundred bytes.
 pub async fn cast_qr(State(state): State<AppState>) -> Response {
-    let url = sender_url(&state);
-    let code = match qrcode::QrCode::new(url.as_bytes()) {
+    qr_svg(&sender_url(&state))
+}
+
+/// Render any text as a QR code SVG.
+///
+/// Server-side because the device is often offline, so a client-side library
+/// would have to be vendored, and because an SVG scales to whatever the panel
+/// is. Shared with the overlay, which needs the same thing for arbitrary text.
+pub fn qr_svg(text: &str) -> Response {
+    let code = match qrcode::QrCode::new(text.as_bytes()) {
         Ok(code) => code,
         Err(e) => {
-            warn!("Could not encode '{}' as a QR code: {}", url, e);
+            warn!("Could not encode '{}' as a QR code: {}", text, e);
             return (StatusCode::INTERNAL_SERVER_ERROR, "qr encoding failed").into_response();
         }
     };

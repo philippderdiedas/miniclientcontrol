@@ -88,6 +88,10 @@ pub async fn browser_loop(state: AppState) {
             }
         };
 
+        if let Err(e) = register_overlay_runtime_script(&page).await {
+            debug!("Failed to register overlay runtime script: {}", e);
+        }
+
         if let Err(e) = register_scroll_runtime_script(&page).await {
             error!("Failed to register scroll runtime script: {}", e);
             if is_connection_lost(&e) {
@@ -204,6 +208,12 @@ pub async fn browser_loop(state: AppState) {
                     *lock = None;
                 }
 
+                // The idle screen is a page like any other. It is also the one
+                // most likely to be up when somebody sets a notice.
+                if let Err(e) = apply_overlay(&state, &page).await {
+                    debug!("Failed to apply overlay on the idle page: {}", e);
+                }
+
                 // Wait a bit before checking DB again
                 tokio::select! {
                     _ = sleep(Duration::from_secs(5)) => {},
@@ -215,6 +225,9 @@ pub async fn browser_loop(state: AppState) {
                     }
                     _ = state.override_signal.notified() => {
                         info!("Override signal received while empty.");
+                    }
+                    _ = state.overlay_signal.notified() => {
+                        info!("Overlay settings changed while empty.");
                     }
                 }
                 continue;
@@ -330,6 +343,14 @@ pub async fn browser_loop(state: AppState) {
                     }
                 }
 
+                if let Err(e) = apply_overlay(&state, &active_page).await {
+                    error!("Failed to apply overlay: {}", e);
+                    if is_connection_lost(e.as_ref()) {
+                        reconnect_needed = true;
+                        break;
+                    }
+                }
+
                 tokio::time::sleep(Duration::from_millis(1200)).await;
                 if let Err(e) = log_scroll_runtime_snapshot(&active_page, "after-start").await {
                     debug!("Failed to fetch scroll runtime snapshot: {}", e);
@@ -357,6 +378,23 @@ pub async fn browser_loop(state: AppState) {
                         _ = state.override_signal.notified() => {
                             info!("Override signal received, interrupting item.");
                             break;
+                        },
+                        _ = state.overlay_signal.notified() => {
+                            // Applied to the page already on screen, and the
+                            // remaining time is recomputed rather than restarted
+                            // -- an overlay edit must not silently extend the
+                            // item it lands on.
+                            info!("Overlay settings changed, re-applying.");
+                            if let Err(e) = apply_overlay(&state, &active_page).await {
+                                error!("Failed to re-apply overlay: {}", e);
+                                if is_connection_lost(e.as_ref()) {
+                                    reconnect_needed = true;
+                                    break;
+                                }
+                            }
+                            remaining = intended_duration
+                                .checked_sub(item_started_at.elapsed())
+                                .unwrap_or(Duration::from_secs(0));
                         },
                         _ = state.playlist_signal.notified() => {
                             let still_active = is_playlist_item_active_now(&state, item.id).await;
@@ -493,11 +531,27 @@ async fn run_override_loop(
         if !uses_internal_viewer {
             start_scrolling(page, &override_item.scroll_config).await?;
         }
+        if let Err(e) = apply_overlay(state, page).await {
+            error!("Failed to apply overlay on the override page: {}", e);
+        }
 
         tokio::time::sleep(Duration::from_millis(1200)).await;
 
         loop {
-            state.override_signal.notified().await;
+            // An overlay edit must reach an override too -- a cast or a pinned
+            // page can be on screen for hours, which is exactly when a notice
+            // matters. Re-applying does not touch the page otherwise, so a live
+            // RTCPeerConnection survives it.
+            tokio::select! {
+                _ = state.override_signal.notified() => {},
+                _ = state.overlay_signal.notified() => {
+                    info!("Overlay settings changed while an override is up, re-applying.");
+                    if let Err(e) = apply_overlay(state, page).await {
+                        error!("Failed to re-apply overlay: {}", e);
+                    }
+                    continue;
+                }
+            }
 
             let current_override = {
                 let lock = state.override_item.lock().await;
@@ -565,6 +619,7 @@ async fn reconcile_keep_loaded_tabs(
         }
 
         let tab = browser.new_page("about:blank").await?;
+        let _ = register_overlay_runtime_script(&tab).await;
         let _ = register_scroll_runtime_script(&tab).await;
         let _ = ensure_scroll_runtime(&tab).await;
         navigate_page(&tab, &target_url).await?;
@@ -1168,4 +1223,47 @@ async fn wait_for_scroll_readiness(
 
 fn scroll_runtime_script() -> &'static str {
     include_str!("../web/autoscroll.js")
+}
+
+/// Served over HTTP *and* compiled in, exactly like the scroll runtime and for
+/// the same reason: a page with a strict CSP can stop the pre-navigation
+/// injection from running, so it has to be evaluable again afterwards.
+fn overlay_runtime_script() -> &'static str {
+    include_str!("../web/overlay.js")
+}
+
+async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
+    let _ = page
+        .execute(AddScriptToEvaluateOnNewDocumentParams::new(overlay_runtime_script()))
+        .await?;
+    Ok(())
+}
+
+/// Put the operator's badge on the page, or take it off again.
+///
+/// No-ops when the runtime is missing, the same way `apply_scroll_settings`
+/// does: a page that blocked the injection must not stall the playlist. The
+/// configuration is resolved by `settings::overlay_payload`, so the display and
+/// the operator's preview cannot render different things.
+async fn apply_overlay(state: &AppState, page: &Page) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = crate::settings::overlay_payload(state).await;
+
+    let _ = page.evaluate(overlay_runtime_script()).await;
+    let has_api: bool = page
+        .evaluate("(() => !!globalThis.__ov)()")
+        .await?
+        .into_value()
+        .unwrap_or(false);
+    if !has_api {
+        debug!("Overlay runtime missing on this page (CSP?), leaving it alone");
+        return Ok(());
+    }
+
+    let script = format!(
+        "(() => globalThis.__ov.apply({}))()",
+        serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
+    );
+    let shown: bool = page.evaluate(script).await?.into_value().unwrap_or(false);
+    debug!("Overlay applied (visible: {})", shown);
+    Ok(())
 }

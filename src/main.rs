@@ -204,6 +204,7 @@ async fn main() -> Result<()> {
         skip_signal: Arc::new(Notify::new()),
         playlist_signal: Arc::new(Notify::new()),
         override_signal: Arc::new(Notify::new()),
+        overlay_signal: Arc::new(Notify::new()),
         current_item_id: Arc::new(Mutex::new(None)),
         pending_jump: Arc::new(Mutex::new(None)),
         override_item: Arc::new(Mutex::new(None)),

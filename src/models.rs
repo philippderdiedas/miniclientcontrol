@@ -253,6 +253,9 @@ pub struct AppState {
     pub skip_signal: Arc<Notify>,
     pub playlist_signal: Arc<Notify>,
     pub override_signal: Arc<Notify>,
+    /// Poked when the overlay configuration changes, so the badge appears on the
+    /// item that is already on screen instead of at the next navigation.
+    pub overlay_signal: Arc<Notify>,
     /// What the browser loop is currently showing. Owned by the loop; the API only reads it.
     pub current_item_id: Arc<Mutex<Option<i64>>>,
     /// "Play now" request. Written by the API; cleared by the loop only once the target
