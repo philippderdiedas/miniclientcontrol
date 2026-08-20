@@ -152,8 +152,18 @@
     return rgba(style.background_color, style.background_alpha);
   }
 
+  // Which way the content lines up, taken from the corner it sits in: a box
+  // pinned centre-bottom with left-aligned text looks like a mistake, and a
+  // separate control would be one more thing to get wrong.
+  function alignmentFor(position) {
+    if (position.endsWith('center')) return ['center', 'center'];
+    if (position.endsWith('right')) return ['right', 'flex-end'];
+    return ['left', 'flex-start'];
+  }
+
   function styles(style, position) {
     const corner = CORNERS[position] || CORNERS['bottom-right'];
+    const [textAlign, flexAlign] = alignmentFor(position);
     // Sizes are in vmin so one configuration looks the same on a 1080p panel and
     // on a portrait 4K one -- signage is looked at from across a room, and a
     // pixel size that reads well on one screen is invisible on the other.
@@ -176,7 +186,7 @@
         font-size: ${style.size}vmin;
         line-height: 1.25;
         font-weight: 600;
-        text-align: ${position.endsWith('right') ? 'right' : 'left'};
+        text-align: ${textAlign};
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
@@ -187,7 +197,9 @@
       img.logo { max-width: 100%; max-height: 6em; object-fit: contain; }
       .qr { width: ${style.qr_size}vmin; height: ${style.qr_size}vmin; display: block;
              background: #fff; border-radius: 0.3em; }
-      .qrwrap { display: flex; align-items: center; gap: 0.6em; }
+      /* The QR row is flex, so text-align does not reach it -- it needs the same
+         alignment spelled out. */
+      .qrwrap { display: flex; align-items: center; gap: 0.6em; justify-content: ${flexAlign}; }
       .qrlabel { font-size: 0.8em; font-weight: 500; }
     `;
   }

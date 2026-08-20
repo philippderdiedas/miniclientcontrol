@@ -342,6 +342,13 @@ Sizes are in `vmin`/`vw`, not pixels, so one configuration reads the same on a
 1080p landscape panel and a portrait 4K one — signage is looked at from across a
 room.
 
+Content lines up with the corner it sits in (`alignmentFor` in `overlay.js`): a
+`-center` position centres its text, `-right` right-aligns it, everything else
+stays left. The QR row is flex, so `text-align` does not reach it and it gets the
+same alignment spelled out as `justify-content`. Deliberately no separate
+alignment control — a box pinned centre-bottom with left-aligned text is a
+mistake, not a choice worth offering.
+
 **The box style is stored structured, not as CSS.** `background_color` plus
 `background_alpha`, `color` plus `color_alpha`, and a `plain` flag for "no box at
 all" (its own flag rather than alpha 0, because it also drops the padding and the
@@ -710,3 +717,10 @@ outer `None` and the field can never be cleared.
 - `duration` is in seconds and comes from the DB as `i64`; clamp before casting to
   `u64` (a negative value became ~584 billion years of `Duration` and froze the
   playlist on one item).
+- **`assets.duration` is the asset's own default, not the playlist entry's.**
+  `browser.rs` resolves `item.duration.or(item.asset_duration).unwrap_or(10)`: the
+  entry wins, the asset is the fallback, ten seconds is the last resort. It exists
+  so a PDF carries its natural dwell time and nobody retypes it every time that
+  asset is scheduled. Mostly dormant in practice — `playlist.html` always sends a
+  duration with the item, so it only decides for items created through the API
+  without one.

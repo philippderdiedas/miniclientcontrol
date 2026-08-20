@@ -355,6 +355,34 @@ async def browser_flow():
         check("\"no box\" drops the background and the padding with it",
               plain.get("bg") == "rgba(0, 0, 0, 0)" and plain.get("pad") == "0px", plain)
 
+        print("\n[44b] the content lines up with the corner it sits in")
+        ALIGN = """(() => {
+          const h = document.querySelector('[id^="__mcc_overlay"]');
+          const box = h && h.shadowRoot && h.shadowRoot.querySelector('.box');
+          const qr = h && h.shadowRoot && h.shadowRoot.querySelector('.qrwrap');
+          if (!box) return 'null';
+          return JSON.stringify({align: getComputedStyle(box).textAlign,
+                                 qr: qr ? getComputedStyle(qr).justifyContent : null});
+        })()"""
+
+        for position, want, want_flex in [("bottom-center", "center", "center"),
+                                          ("bottom-right", "right", "flex-end"),
+                                          ("top-left", "left", "flex-start")]:
+            put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
+                 "qr_source": "text", "qr_text": "https://example.invalid/x",
+                 "position": position}, port=HTTP)
+            got = None
+            for _ in range(40):
+                got = json.loads(await page.eval(ALIGN))
+                # Both, not just the alignment: the previous position may already
+                # have matched, and then this would read the box from before the
+                # edit and pass without proving anything.
+                if got.get("align") == want and got.get("qr") is not None:
+                    break
+                await asyncio.sleep(0.5)
+            check(f"{position} aligns its text {want}", got.get("align") == want, got)
+            check(f"and its QR row follows ({want_flex})", got.get("qr") == want_flex, got)
+
         # Back to a box, so the checks below read what they expect.
         put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
              "position": "top-center"}, port=HTTP)
