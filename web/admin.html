@@ -9,6 +9,8 @@
     body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.45; }
     h1 { margin-bottom: .2rem; }
     .card { border: 1px solid #d8d8d8; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    /* Deliberately not a .card: this row saves across two of them. */
+    .row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; margin-bottom: 1rem; }
     a.button {
       display: inline-block; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px;
       text-decoration: none; color: #111; margin-right: .5rem;
@@ -18,6 +20,10 @@
       font: inherit; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px;
       background: #fff; cursor: pointer;
     }
+    /* Same green as the guest page's share button, so "this is the action" reads
+       the same across the UI. */
+    button.primary { background: #0b6b3a; border-color: #0b6b3a; color: #fff; }
+    button.primary:hover:enabled { background: #0d7d44; }
     button:hover { background: #f0f0f0; }
     [hidden] { display: none !important; }
     hr { border: none; border-top: 1px solid #e5e5e5; margin: 1rem 0; }
@@ -77,6 +83,46 @@
         <span class="lock" id="lockCode" hidden>per Kommandozeile festgelegt</span>
       </p>
     </div>
+  </div>
+
+  <div class="card" id="authCard">
+    <p class="status">Zugang zur Verwaltung</p>
+    <p class="muted" id="lockAuthBasic" hidden>
+      Per <code>--basic-auth-user</code> / <code>--basic-auth-password</code>
+      festgelegt und hier nicht änderbar.
+    </p>
+    <div id="authSettings">
+      <p>
+        <label><input type="checkbox" id="authEnabled" /> Anmeldung verlangen</label>
+      </p>
+      <div id="authFields" hidden>
+        <p>
+          <label for="authUser">Benutzer:</label>
+          <input id="authUser" autocomplete="username" />
+        </p>
+        <p>
+          <label for="authPassword">Passwort:</label>
+          <input id="authPassword" type="password" autocomplete="new-password"
+                 placeholder="unverändert lassen" />
+        </p>
+      </div>
+      <p class="muted">
+        Gilt für Verwaltung, Playlist und Assets. Die Gästeseite bleibt offen —
+        wer überträgt, wird über den Zugang oben geregelt.
+      </p>
+    </div>
+  </div>
+
+  <!-- Outside the cards on purpose: this button covers the cast settings *and*
+       the operator access, so sitting inside either box would claim a scope it
+       does not have. It sits directly below both of them, with the overlay card
+       moved underneath: a card wedged in between would make the scope look like
+       it skips one. The overlay keeps its own buttons because it is edited far
+       more often, and mixing the two would make a text tweak look like it might
+       also change who can log in. -->
+  <div class="row" id="saveBar">
+    <button id="setSave" class="primary">Übertragung und Zugang speichern</button>
+    <span class="muted" id="setFeedback"></span>
   </div>
 
   <div class="card" id="overlayCard">
@@ -173,35 +219,6 @@
     </div>
   </div>
 
-  <div class="card" id="authCard">
-    <p class="status">Zugang zur Verwaltung</p>
-    <p class="muted" id="lockAuthBasic" hidden>
-      Per <code>--basic-auth-user</code> / <code>--basic-auth-password</code>
-      festgelegt und hier nicht änderbar.
-    </p>
-    <div id="authSettings">
-      <p>
-        <label><input type="checkbox" id="authEnabled" /> Anmeldung verlangen</label>
-      </p>
-      <div id="authFields" hidden>
-        <p>
-          <label for="authUser">Benutzer:</label>
-          <input id="authUser" autocomplete="username" />
-        </p>
-        <p>
-          <label for="authPassword">Passwort:</label>
-          <input id="authPassword" type="password" autocomplete="new-password"
-                 placeholder="unverändert lassen" />
-        </p>
-      </div>
-      <p class="muted">
-        Gilt für Verwaltung, Playlist und Assets. Die Gästeseite bleibt offen —
-        wer überträgt, wird über den Zugang oben geregelt.
-      </p>
-    </div>
-    <button id="setSave">Alle Einstellungen speichern</button>
-    <span class="muted" id="setFeedback"></span>
-  </div>
 
   <script>
     // Same polling contract as the playlist page: report what is on screen right now,
