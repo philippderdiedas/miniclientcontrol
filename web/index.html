@@ -142,6 +142,41 @@
     let stream = null;
     let iceServers = [];
 
+    // The largest frame the display can show, as measured and announced by the
+    // display page itself. Null until something told us, in which case we send
+    // whatever the screen produces -- which is what every display before the
+    // kiosk Pi could take.
+    let maxEdge = null;
+
+    // Capture constraints, not a policy: the number comes from the display.
+    // Applied at capture time because on the second and later casts the limit is
+    // already known from /api/cast/info, so the very first frame is the right
+    // size instead of a black rectangle that fixes itself a second later.
+    function captureVideoConstraints() {
+      if (!maxEdge) return true;
+      return { width: { max: maxEdge }, height: { max: maxEdge } };
+    }
+
+    // Belt and braces for the first-ever cast, where the limit only arrives once
+    // the display connects -- after the picker has already handed us a stream.
+    // Also covers a browser that ignored the max at capture time.
+    function constrainToDisplay() {
+      if (!stream || !maxEdge) return;
+      for (const track of stream.getVideoTracks()) {
+        const current = track.getSettings();
+        if ((current.width || 0) <= maxEdge && (current.height || 0) <= maxEdge) continue;
+        track
+          .applyConstraints({ width: { max: maxEdge }, height: { max: maxEdge } })
+          .catch((e) => console.warn('could not constrain the capture', e));
+      }
+    }
+
+    function noteDisplayLimits(limits) {
+      if (!limits || !limits.max_edge) return;
+      maxEdge = limits.max_edge;
+      constrainToDisplay();
+    }
+
     // The claim ticket. Held from the moment the code checks out until the
     // stream starts, and it is what makes the session ours in between.
     let ticket = null;
@@ -344,9 +379,12 @@
       socket = Cast.openSocket('sender', ticket, {
         welcome: (frame) => {
           iceServers = frame.ice_servers || [];
+          noteDisplayLimits(frame.display_limits);
           if (frame.peer) startOffer().catch((e) => teardown(e.message, true));
           else setStatus('Warte auf das Display…');
         },
+        // The display measured itself after we had already started capturing.
+        limits: (frame) => noteDisplayLimits(frame),
         peer: (connected) => {
           if (connected) startOffer().catch((e) => teardown(e.message, true));
           else teardown('Das Display hat die Verbindung beendet.');
@@ -375,14 +413,19 @@
       try {
         // Must run inside the click handler: both APIs require a user gesture.
         stream = kind === 'camera'
-          ? await navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+          ? await navigator.mediaDevices.getUserMedia(
+              { video: captureVideoConstraints(), audio: false })
+          : await navigator.mediaDevices.getDisplayMedia(
+              { video: captureVideoConstraints(), audio: true });
       } catch (error) {
         // The reservation is kept: cancelling the picker usually means another
         // attempt in a moment, and re-typing the code for that would be rude.
         setStatus('Zugriff nicht möglich: ' + error.message, true);
         return;
       }
+
+      // In case the picker handed back something larger than asked for.
+      constrainToDisplay();
 
       if (kind !== 'camera' && stream.getAudioTracks().length === 0)
         el('audioWarning').hidden = false;
@@ -566,6 +609,7 @@
           return;
         }
 
+        noteDisplayLimits(info.display_limits);
         authMode = info.auth || 'none';
         showLive(false);
 

@@ -164,10 +164,42 @@
       }
     }
 
+    // The largest frame this display can actually put on screen. Two separate
+    // ceilings, and the lower one wins:
+    //
+    //  * The GPU's texture limit. A frame wider than this decodes perfectly and
+    //    then composites as nothing at all -- the kiosk Pi's Broadcom VC4 reports
+    //    2048, and a 2880-wide share was a black rectangle with healthy WebRTC
+    //    stats behind it. This is the ceiling that matters.
+    //  * The panel. Anything above it is scaled down before a human sees it, so
+    //    those pixels cost bandwidth and decode time for nothing, and a Pi has
+    //    neither to spare.
+    function frameLimit() {
+      const dpr = window.devicePixelRatio || 1;
+      const panel = Math.round(Math.max(screen.width, screen.height) * dpr);
+      let texture = 0;
+      try {
+        const gl = document.createElement('canvas').getContext('webgl');
+        if (gl) {
+          texture = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+          // This page stays open for the whole cast, and a spare GL context on a
+          // VC4 is not free.
+          const lose = gl.getExtension('WEBGL_lose_context');
+          if (lose) lose.loseContext();
+        }
+      } catch (_) {
+        // No WebGL: the panel is the only ceiling we can name.
+      }
+      return texture ? Math.min(texture, panel) : panel;
+    }
+
     function connect() {
       socket = Cast.openSocket('display', null, {
         welcome: (frame) => {
           window.__iceServers = frame.ice_servers;
+          // Announced on every connect rather than once: the controller may have
+          // restarted, and this display may not be the one it saw last.
+          socket.limits(frameLimit());
           if (frame.pairing) showCode(frame.pairing.code);
           else setHint(frame.peer ? 'Verbindung wird aufgebaut…' : '');
         },

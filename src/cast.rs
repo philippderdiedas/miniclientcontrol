@@ -108,6 +108,35 @@ struct Attempts {
     last_seen: Instant,
 }
 
+/// The largest frame the display can actually put on screen, announced by the
+/// display page itself.
+///
+/// This exists because a frame can decode perfectly and still show as a black
+/// rectangle: the kiosk Pi's Broadcom VC4 has `MAX_TEXTURE_SIZE` 2048, and a
+/// 2880-wide share never reaches the compositor. Only the display knows its own
+/// GPU and panel, so it does the measuring; the server just carries the number
+/// to the sender, which is the side that can do something about it.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+pub struct DisplayLimits {
+    /// Longest edge, in device pixels.
+    max_edge: u32,
+}
+
+impl DisplayLimits {
+    /// Below this a "limit" is more likely a bug on the display side than a real
+    /// constraint, and honouring it would shrink the cast to something useless.
+    const MIN_EDGE: u32 = 320;
+    /// Above this there is nothing to constrain, and a number this large is
+    /// noise. Every GPU that reports more can take whatever a screen produces.
+    const MAX_EDGE: u32 = 16384;
+
+    fn sane(self) -> Option<Self> {
+        (Self::MIN_EDGE..=Self::MAX_EDGE)
+            .contains(&self.max_edge)
+            .then_some(self)
+    }
+}
+
 #[derive(Default)]
 pub struct CastSession {
     sender: Option<Peer>,
@@ -121,6 +150,11 @@ pub struct CastSession {
     pairing: Option<Pairing>,
     reservation: Option<Reservation>,
     attempts: HashMap<IpAddr, Attempts>,
+    /// Last limit a display announced. Deliberately kept when a session ends: it
+    /// is a property of the hardware, not of the cast, and remembering it is what
+    /// lets the *next* sender constrain its capture before the first frame
+    /// instead of showing a black rectangle until the display checks in.
+    display_limits: Option<DisplayLimits>,
     /// Bumped on every activate/deactivate so a delayed watchdog task can tell
     /// whether the session it was launched for is still the current one.
     epoch: u64,
@@ -651,6 +685,33 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             }
             true
         }
+        // Only the display may say this: it is a statement about the hardware in
+        // front of the guest, and a sender that could set it would be capping (or
+        // uncapping) its own stream on the display's behalf.
+        Some("limits") if role == Role::Display => {
+            let Some(limits) = serde_json::from_value::<DisplayLimits>(value.clone())
+                .ok()
+                .and_then(DisplayLimits::sane)
+            else {
+                debug!("Cast: ignoring implausible display limits {}", text);
+                return true;
+            };
+
+            let sender = {
+                let mut session = state.cast.lock().await;
+                session.display_limits = Some(limits);
+                session.sender.as_ref().map(|peer| peer.tx.clone())
+            };
+            info!("Cast: display can show frames up to {}px", limits.max_edge);
+            if let Some(sender) = sender {
+                let _ = sender.send(Message::Text(
+                    json!({"type": "display_limits", "max_edge": limits.max_edge})
+                        .to_string()
+                        .into(),
+                ));
+            }
+            true
+        }
         Some("stop") => {
             info!("Cast: {:?} asked to stop", role);
             let state = state.clone();
@@ -736,6 +797,13 @@ async fn register_peer(
             "peer": counterpart.is_some(),
             "ice_servers": ice_servers(state),
             "pairing": pairing,
+            // Only useful to the sender, and only if a display has ever said so.
+            // The sender captures before its socket exists, so this is what makes
+            // the *first* frame the right size on every cast after the first.
+            "display_limits": match role {
+                Role::Sender => session.display_limits,
+                Role::Display => None,
+            },
         });
 
         (counterpart, welcome)
@@ -807,6 +875,9 @@ pub struct CastStateResponse {
     started_at: Option<String>,
     tls_port: u16,
     sender_url: String,
+    /// What the display said it can show. Visible here because "the cast is
+    /// black" is otherwise very hard to tell from "the cast is not running".
+    display_limits: Option<DisplayLimits>,
 }
 
 pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
@@ -825,6 +896,7 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
         started_at: session.started_at.map(|at| at.to_rfc3339()),
         tls_port: state.cast_tls_port,
         sender_url,
+        display_limits: session.display_limits,
     })
 }
 
@@ -841,6 +913,9 @@ pub async fn cast_info(State(state): State<AppState>) -> impl IntoResponse {
         "enabled": settings.cast_enabled,
         "auth": settings.cast_auth,
         "busy": session.is_taken(),
+        // What the display can show. The sender needs this *before* it calls
+        // getDisplayMedia, and at that moment it has no socket yet.
+        "display_limits": session.display_limits,
         // so a page reached over plain HTTP can send itself to the TLS origin,
         // where getDisplayMedia actually exists
         "sender_url": sender_url,

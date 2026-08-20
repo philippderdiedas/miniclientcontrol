@@ -36,6 +36,7 @@
       else if (frame.type === 'peer') handlers.peer && handlers.peer(frame.connected);
       else if (frame.type === 'signal') handlers.signal && handlers.signal(frame.data);
       else if (frame.type === 'pairing') handlers.pairing && handlers.pairing(frame);
+      else if (frame.type === 'display_limits') handlers.limits && handlers.limits(frame);
       else if (frame.type === 'error') handlers.error && handlers.error(frame);
     };
 
@@ -51,6 +52,12 @@
       stop() {
         if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'stop' }));
+      },
+      // Display only: the largest frame this screen can show. The server refuses
+      // this from a sender, which would otherwise be capping its own stream.
+      limits(maxEdge) {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: 'limits', max_edge: maxEdge }));
       },
       close() {
         closedByUs = true;

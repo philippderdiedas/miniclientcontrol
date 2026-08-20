@@ -119,6 +119,21 @@ async def main():
             check("state shows sender and display connected",
                   st["active"] and st["display_connected"], st)
 
+            # The whole round trip: the display page measures its own GPU and
+            # panel, the relay carries the number, and the sender holds it. This
+            # is what stops a frame wider than the display's texture limit from
+            # arriving and compositing as a black rectangle.
+            limits = st.get("display_limits") or {}
+            check("the display announced the largest frame it can show",
+                  isinstance(limits.get("max_edge"), int) and limits["max_edge"] >= 320, st)
+            sender_edge = await sender.eval("maxEdge")
+            print(f"        display limit: {limits.get('max_edge')}, sender holds: {sender_edge}")
+            check("the sender learned that limit", sender_edge == limits.get("max_edge"),
+                  (sender_edge, limits))
+            check("the capture is inside it", await display.eval(
+                "(() => { const v = document.getElementById('video');"
+                " return Math.max(v.videoWidth, v.videoHeight); })()") <= limits.get("max_edge", 0))
+
             print("\n[11] stopping the cast returns the display to the playlist")
             await sender.eval("document.getElementById('stopShare').click()")
             back = wait_for(lambda: http("GET", "/api/override", port=HTTP)[1]["active"] is False, 20)

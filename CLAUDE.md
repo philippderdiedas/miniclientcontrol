@@ -42,6 +42,17 @@ stable across restarts.
 A unit that lets the controller start the browser needs `DISPLAY` (and
 `XAUTHORITY`) in its environment, which a unit that only talked CDP did not.
 
+On a **Wayland** kiosk (sway) it is `WAYLAND_DISPLAY=wayland-1` plus
+`--chromium-arg=--ozone-platform=wayland` instead, and a systemd *user* service
+does not inherit either from the compositor even when sway's own config is what
+starts it (`exec systemctl --user start ...`). Without them Chromium launches,
+finds no display server, exits before it opens the debugging port, and the
+supervisor relaunches it every ten seconds forever: no `DevToolsActivePort` file,
+nothing listening on the CDP port, and — because journald on the Pi image stores
+nothing — no log to say so. Give the unit
+`StandardOutput=append:<path>` if the journal is empty; the diagnosis is
+otherwise invisible.
+
 It deliberately does **not** kill the browser when the controller stops: a deploy
 or a crash should not blank the screen, and the next start simply reattaches.
 
@@ -433,6 +444,36 @@ lives in-process).
 For unattended audio, launch the display Chromium with
 `--autoplay-policy=no-user-gesture-required`; otherwise the receiver falls back
 to muted playback because nobody is there to click.
+
+**The display announces how large a frame it can show, and the sender obeys.**
+A frame wider than the GPU's `MAX_TEXTURE_SIZE` decodes perfectly and then
+composites as *nothing*: the receiving page is a black rectangle while
+`getStats()` reports frames decoded, zero dropped, and a canvas `drawImage()` of
+the same video element returns real pixels. Measured on the Raspberry Pi 3 kiosk
+(Broadcom VC4, GLES 2.0, `MAX_TEXTURE_SIZE` 2048) against a 2880x1414 share.
+
+So `cast_display.html` measures itself — `min(MAX_TEXTURE_SIZE, longest panel
+edge x devicePixelRatio)` — and sends `{"type":"limits","max_edge":N}` on every
+socket connect. `cast.rs` stores it, hands it to the sender in `welcome`, pushes
+`display_limits` if the sender was already connected, and exposes it on
+`/api/cast/info` (public) and `/api/cast/state` (operator). The sender constrains
+`getDisplayMedia` up front and calls `applyConstraints` when a limit arrives
+later.
+
+Three details are deliberate:
+
+- **The display measures, the server only relays.** Only the display knows its
+  GPU and its panel. The server clamps the number to a sane range and refuses a
+  `limits` frame from a *sender*, which would otherwise be uncapping its own
+  stream.
+- **The last known limit outlives the session** (`CastSession::display_limits`
+  is not cleared on teardown). It is a property of the hardware, so remembering
+  it is what lets the next sender pick the right size *before* its first frame —
+  the sender captures before its socket exists, so on a first-ever cast the limit
+  can only arrive after the picker has already handed over a stream.
+- **The panel edge is in there too**, not just the texture limit. Pixels above
+  the panel size are scaled away before anyone sees them, and on a Pi the
+  bandwidth and decode time are worth more than the detail nobody can see.
 
 ### Invalid TLS certificates are accepted, on purpose
 
