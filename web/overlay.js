@@ -20,6 +20,12 @@
 //  * **Pages that rebuild themselves.** SPAs replace whole subtrees, taking the
 //    overlay with them. A MutationObserver puts it back rather than leaving a
 //    display that silently lost its notice.
+//  * **The network, which is not ours.** Nothing here fetches anything. Chromium's
+//    Local Network Access refuses a request from a public origin to 127.0.0.1
+//    without a permission click, and a kiosk has nobody to click it (measured on
+//    Chrome 151 with a fresh profile: `fetch` and `<img>` both fail). So the QR
+//    arrives as a module matrix and is drawn as inline SVG -- which an `img-src`
+//    CSP cannot refuse either -- and an image arrives as a `data:` URI.
 //
 // Like `autoscroll.js` this file is both served over HTTP and `include_str!`-ed
 // into the binary, and it must stay idempotent: it is evaluated again after
@@ -102,17 +108,6 @@
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
-  // Every URL the overlay fetches goes through here.
-  function url(path) {
-    const base = payload && payload.base ? payload.base : '';
-    if (!base) return path;
-    try {
-      return new URL(path, base).href;
-    } catch (_) {
-      return base.replace(/\/$/, '') + path;
-    }
-  }
-
   function formatTime(now, withSeconds) {
     const parts = { hour: '2-digit', minute: '2-digit' };
     if (withSeconds) parts.second = '2-digit';
@@ -129,8 +124,8 @@
   }
 
   function hasContent(layer) {
-    return !!(layer.text || layer.image_path || layer.show_clock || layer.show_date
-              || layer.qr_text);
+    return !!(layer.text || layer.image_data || layer.show_clock || layer.show_date
+              || (layer.qr_modules && layer.qr_modules.length));
   }
 
   // The box style comes from its *first* layer: when a global overlay and an
@@ -170,10 +165,59 @@
       .clock { font-variant-numeric: tabular-nums; font-size: 1.6em; font-weight: 700; }
       .date { opacity: 0.85; font-size: 0.85em; font-weight: 500; }
       img.logo { max-width: 100%; max-height: 6em; object-fit: contain; }
-      img.qr { width: ${style.qr_size}vmin; height: ${style.qr_size}vmin; background: #fff; padding: 0.3em; border-radius: 0.3em; }
+      .qr { width: ${style.qr_size}vmin; height: ${style.qr_size}vmin; display: block;
+             background: #fff; border-radius: 0.3em; }
       .qrwrap { display: flex; align-items: center; gap: 0.6em; }
       .qrlabel { font-size: 0.8em; font-weight: 500; }
     `;
+  }
+
+  // The QR code, drawn from the modules the controller sent.
+  //
+  // Inline SVG rather than an image: nothing is fetched (see the top of the file),
+  // and inline DOM is not governed by `img-src`, so this survives a page whose CSP
+  // would refuse even a `data:` URI. Runs of dark modules become one rect each,
+  // which keeps a version-6 code at a few dozen nodes instead of a thousand.
+  const QUIET = 2;
+
+  function qrSvg(rows) {
+    const size = rows.length;
+    if (!size) return null;
+    const span = size + QUIET * 2;
+    const NS = 'http://www.w3.org/2000/svg';
+
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'qr');
+    svg.setAttribute('viewBox', `0 0 ${span} ${span}`);
+    // The quiet zone has to be light or a scanner may not find the code, and the
+    // box behind it is usually dark.
+    svg.setAttribute('shape-rendering', 'crispEdges');
+
+    const paper = document.createElementNS(NS, 'rect');
+    paper.setAttribute('width', String(span));
+    paper.setAttribute('height', String(span));
+    paper.setAttribute('fill', '#fff');
+    svg.appendChild(paper);
+
+    rows.forEach((row, y) => {
+      let runStart = -1;
+      for (let x = 0; x <= row.length; x++) {
+        const dark = row[x] === '1';
+        if (dark && runStart < 0) runStart = x;
+        if (!dark && runStart >= 0) {
+          const rect = document.createElementNS(NS, 'rect');
+          rect.setAttribute('x', String(runStart + QUIET));
+          rect.setAttribute('y', String(y + QUIET));
+          rect.setAttribute('width', String(x - runStart));
+          rect.setAttribute('height', '1');
+          rect.setAttribute('fill', '#000');
+          svg.appendChild(rect);
+          runStart = -1;
+        }
+      }
+    });
+
+    return svg;
   }
 
   // One layer's content, without any of the box's own styling.
@@ -181,13 +225,12 @@
     const group = document.createElement('div');
     group.className = 'layer';
 
-    if (layer.image_path) {
+    if (layer.image_data) {
       const img = document.createElement('img');
       img.className = 'logo';
-      // Joined onto the controller's own origin, never left relative: this DOM
-      // lives in the displayed page's document, so a relative path would be
-      // fetched from that dashboard's host and 404.
-      img.src = url(layer.image_path);
+      // A `data:` URI, not a URL: see the note at the top about Local Network
+      // Access. This is the one element the overlay cannot draw itself.
+      img.src = layer.image_data;
       img.alt = '';
       group.appendChild(img);
     }
@@ -214,22 +257,17 @@
       group.appendChild(date);
     }
 
-    if (layer.qr_text) {
+    const qr = layer.qr_modules && layer.qr_modules.length ? qrSvg(layer.qr_modules) : null;
+    if (qr) {
       const wrap = document.createElement('div');
       wrap.className = 'qrwrap';
-      const img = document.createElement('img');
-      img.className = 'qr';
-      // Served by the controller: an offline device cannot fetch a QR library,
-      // and an SVG scales to whatever the panel is.
-      img.src = url('/api/qr.svg?text=' + encodeURIComponent(layer.qr_text));
-      img.alt = '';
       if (layer.qr_label) {
         const label = document.createElement('div');
         label.className = 'qrlabel';
         label.textContent = layer.qr_label;
         wrap.appendChild(label);
       }
-      wrap.appendChild(img);
+      wrap.appendChild(qr);
       group.appendChild(wrap);
     }
 
@@ -334,7 +372,6 @@
     apply(next) {
       const given = next && typeof next === 'object' ? next : {};
       payload = {
-        base: given.base || '',
         locale: given.locale || undefined,
         layers: (Array.isArray(given.layers) ? given.layers : []).map(normalize),
       };

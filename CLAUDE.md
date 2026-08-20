@@ -290,7 +290,7 @@ It is injected the same way as the scroll runtime, via
 `Page.addScriptToEvaluateOnNewDocument` plus a re-evaluation afterwards, and
 `apply_overlay` probes `!!globalThis.__ov` and no-ops when a strict CSP kept the
 injection out. There is **no CDP command that draws over a page**: an overlay is
-always DOM in the target document, which is what the three defences in
+always DOM in the target document, which is what the four defences in
 `overlay.js` are about.
 
 - **Shadow DOM plus `all: initial`.** Otherwise the target page's CSS decides how
@@ -303,6 +303,27 @@ always DOM in the target document, which is what the three defences in
   without popover support.
 - **A `MutationObserver` that re-attaches it.** SPAs replace whole subtrees and
   take the overlay with them.
+- **Nothing is fetched.** Chromium's Local Network Access refuses a request to
+  `127.0.0.1` from any origin that is not itself loopback, and a kiosk has nobody
+  to click the permission prompt. Measured on Chrome 151 with a fresh profile,
+  from a page on `https://example.com`: `fetch` fails with `TypeError` and an
+  `<img>` with `EncodingError`. Since `--chromium-user-data-dir` is wiped on boot,
+  a granted permission would not survive anyway.
+
+  So the QR arrives in the payload as a **module matrix** (`qr_modules`, one
+  `0`/`1` string per row, `cast::qr_matrix`) and `overlay.js` draws it as inline
+  SVG, merging runs of dark modules into one rect each. That also survives an
+  `img-src` CSP, which would refuse even a `data:` URI. An image is the one thing
+  the overlay cannot draw itself, so it travels as a `data:` URI capped at
+  `OVERLAY_IMAGE_MAX_BYTES` (512 KB) — every apply carries that string over CDP,
+  and the display re-applies on every item. `check_overlay_image` refuses an
+  oversized or non-image asset when it is *picked*, so the API and the payload
+  builder cannot disagree.
+
+  The test for this serves its foreign page from the machine's **LAN address**,
+  not `127.0.0.1`: loopback-to-loopback is not gated, so a foreign page on
+  `127.0.0.1` passes while a real display fails. That blind spot is exactly how
+  the first version shipped a QR that only worked after a permission click.
 
 Sizes are in `vmin`/`vw`, not pixels, so one configuration reads the same on a
 1080p landscape panel and a portrait 4K one — signage is looked at from across a
@@ -322,19 +343,11 @@ so an overlay edit cannot extend an item), the idle-screen wait, and
 exactly when a notice matters, and re-applying touches nothing else so a live
 `RTCPeerConnection` survives it.
 
-The payload carries a `base` (`http://127.0.0.1:<port>`) and the runtime joins
-every URL it fetches onto it. This is load-bearing rather than tidy: the overlay's
-DOM lives in the *displayed page's* document, so a relative `/api/qr.svg` or
-`/uploads/…` would be fetched from whatever dashboard is on screen and 404 there.
-`tests/cast/test_overlay.py` serves an item from a second port for exactly this
-reason and asserts the QR image really loaded.
-
-`settings::overlay_payload` resolves `image_asset_id` to an `/uploads/…` path and
-is the *only* place that builds the runtime's configuration. The admin preview
-fetches `/api/overlay` and runs the display's own runtime against it — with only
-`base` swapped for its own origin — rather than rebuilding the badge in the page:
-two renderings of the same settings drift, and then somebody hunts a display bug
-that is really a UI bug.
+`settings::overlay_payload` inlines everything a layer needs and is the *only*
+place that builds the runtime's configuration. The admin preview
+fetches `/api/overlay` and runs the display's own runtime against the identical
+payload rather than rebuilding the badge in the page: two renderings of the same
+settings drift, and then somebody hunts a display bug that is really a UI bug.
 
 An enabled overlay with nothing in it is a `400`, not a silently invisible
 switch. Out-of-range numbers are clamped instead of rejected, and an unknown
@@ -617,7 +630,6 @@ playlist, so one bad row would blank the screen.
 | POST | `/api/cast/pair` | `--cast-auth=pairing` only; shows a code on the display |
 | GET/PUT | `/api/settings` | Operator: runtime settings + which flags pinned them |
 | GET | `/api/overlay` | The layers the display runtime wants: global + the item on screen |
-| GET | `/api/qr.svg` | `?text=` — QR for anything, used by the overlay |
 | POST/DELETE | `/api/cast/claim` | Guest: reserve the session before sharing |
 
 `PUT /api/playlist/{id}` also takes an `overlay` object (see the overlay section):

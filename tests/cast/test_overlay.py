@@ -14,6 +14,10 @@ SP = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(SP, "..", "..", "target", "debug", "miniclientcontrol")
 CHROME = "/usr/bin/google-chrome-stable"
 HTTP, TLS = 3041, 3484
+LAN = subprocess.run(["python3", "-c",
+    "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+    "s.connect(('10.254.254.254',1));print(s.getsockname()[0])"],
+    capture_output=True, text=True).stdout.strip()
 
 procs = []
 
@@ -51,8 +55,10 @@ BOXES = """(() => {
     ids: hosts.map((h) => h.id),
     text: hosts.map((h) => (h.shadowRoot ? h.shadowRoot.textContent : '')).join(' | '),
     qr: hosts.flatMap((h) => [...(h.shadowRoot
-      ? h.shadowRoot.querySelectorAll('img.qr') : [])]
-      .map((i) => ({src: i.src, loaded: i.naturalWidth > 0}))),
+      ? h.shadowRoot.querySelectorAll('.qr') : [])]
+      .map((n) => ({tag: n.tagName.toLowerCase(),
+                    rects: n.querySelectorAll ? n.querySelectorAll('rect').length : 0,
+                    box: n.getBoundingClientRect().width}))),
     host: location.host,
   });
 })()"""
@@ -63,8 +69,7 @@ def put(overlay, port=None):
 
 
 def qr(text, port=None):
-    url = (f"http://127.0.0.1:{port or CAST_HTTP}/api/qr.svg"
-           f"?text={urllib.parse.quote(text)}")
+    url = f"http://127.0.0.1:{port or CAST_HTTP}/api/cast/qr.svg"
     try:
         with urllib.request.urlopen(url, timeout=5) as res:
             return res.status, res.read().decode()
@@ -111,9 +116,16 @@ async def settings_flow():
               and len(layers) == 1 and layers[0]["text"] == "Kaffee 1 Euro", payload)
         check("and a locale, so the clock is not formatted by chance",
               payload.get("locale") == "de-DE", payload)
-        check("with no image chosen the path is null", layers[0]["image_path"] is None, layers)
-        check("and the payload names the controller's own origin as the base",
-              payload.get("base", "").startswith("http://127.0.0.1:"), payload)
+        check("with no image chosen there is no image data", layers[0]["image_data"] is None,
+              layers)
+        check("the QR travels as a module matrix, not a URL",
+              isinstance(layers[0].get("qr_modules"), list)
+              and len(layers[0]["qr_modules"]) >= 21
+              and set("".join(layers[0]["qr_modules"])) <= {"0", "1"},
+              str(layers[0].get("qr_modules"))[:120])
+        check("and the payload holds no URL pointing back at the controller",
+              "base" not in payload
+              and f"127.0.0.1:{CAST_HTTP}" not in json.dumps(payload), payload)
 
         print("\n[41b] a playlist item can add a layer of its own")
         http("POST", "/api/playlist", {"url": "http://127.0.0.1:1/x", "duration": 60})
@@ -146,11 +158,10 @@ async def settings_flow():
               http("GET", "/api/playlist")[1][-1]["overlay_config"] is None,
               http("GET", "/api/playlist")[1][-1].get("overlay_config"))
 
+        # The cast QR endpoint stays: our own pages are same-origin over loopback.
         status, svg = qr("https://example.invalid/menu")
-        check("the QR endpoint renders an SVG", status == 200 and svg.startswith("<?xml")
-              and "svg" in svg, (status, svg[:60]))
-        status, _ = qr("")
-        check("empty text is refused", status == 400, status)
+        check("the cast QR endpoint still renders an SVG for our own pages",
+              status == 200 and "svg" in svg, (status, svg[:60]))
 
         print("\n[42] the settings survive a restart")
     with Server(fresh=False):
@@ -289,32 +300,42 @@ async def browser_flow():
         check("an edit reaches a standing override without re-navigating", updated is True)
         http("DELETE", "/api/override", port=HTTP)
 
-        print("\n[46] on a page from a *different* origin the fetches still resolve")
-        # The overlay's DOM lives in the displayed page's document. A relative
-        # /api/qr.svg would be fetched from that page's host -- which is not us --
-        # so this serves the item from a second port to make the mistake visible.
+        print("\n[46] on a page from a genuinely foreign origin nothing is fetched")
+        # Reached by the LAN address on purpose. Chromium's Local Network Access
+        # refuses requests to 127.0.0.1 from any origin that is not itself
+        # loopback -- measured on Chrome 151 with a fresh profile, where both
+        # `fetch` and `<img src="http://127.0.0.1/...">` fail outright. A foreign
+        # page served from 127.0.0.1 would pass while a real display failed.
         foreign = subprocess.Popen([sys.executable, f"{SP}/foreign_page.py", "3061"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(foreign)
+        foreign_url = f"http://{LAN}:3061/"
         check("the foreign origin is serving", wait_for(
-            lambda: urllib.request.urlopen("http://127.0.0.1:3061/", timeout=2).status == 200,
-            15) is not None)
+            lambda: urllib.request.urlopen(foreign_url, timeout=2).status == 200, 15) is not None)
 
         put({"enabled": True, "text": "Mit QR", "qr_text": "https://example.invalid/x"}, port=HTTP)
-        http("POST", "/api/override", {"url": "http://127.0.0.1:3061/"}, port=HTTP)
+        http("POST", "/api/override", {"url": foreign_url}, port=HTTP)
 
         info = {}
         for _ in range(60):
             info = json.loads(await page.eval(BOXES))
-            if info["qr"] and info["qr"][0]["loaded"]:
+            if info["qr"]:
                 break
             await asyncio.sleep(0.5)
-        check("the page really is the foreign one", info.get("host") == "127.0.0.1:3061", info)
-        qr_src = info["qr"][0]["src"] if info.get("qr") else ""
-        check("the QR src points at the controller, not at the displayed page",
-              qr_src.startswith(f"http://127.0.0.1:{HTTP}/api/qr.svg"), info)
-        check("and the image actually loaded",
-              bool(info.get("qr")) and info["qr"][0]["loaded"], info)
+        check("the page really is a non-loopback origin",
+              info.get("host") == f"{LAN}:3061", info)
+        check("the QR is inline SVG, so no request and no img-src to satisfy",
+              bool(info["qr"]) and info["qr"][0]["tag"] == "svg", info)
+        check("and it drew actual modules at a visible size",
+              bool(info["qr"]) and info["qr"][0]["rects"] > 10
+              and info["qr"][0]["box"] > 20, info)
+
+        # Deliberately not asserted here: whether a loopback *fetch* from this
+        # page is refused. Headless Chrome with --no-sandbox lets it through,
+        # while a real profile does not (Chrome 151, fresh profile: `fetch` and
+        # `<img>` both fail), so pinning it would make the suite depend on the
+        # permission UI rather than on our code. What is asserted is the part we
+        # control: the payload names no controller URL, and the QR needs none.
         http("DELETE", "/api/override", port=HTTP)
 
         print("\n[47] switching it off takes it away again")

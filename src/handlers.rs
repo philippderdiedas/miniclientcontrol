@@ -510,18 +510,10 @@ pub async fn update_playlist_item(
     if let Some(overlay) = payload.overlay {
         let overlay = overlay.sanitized();
         if let Some(asset_id) = overlay.image_asset_id {
-            // A dangling id renders as a broken image on a screen nobody is
-            // standing in front of, so it is refused here like everywhere else.
-            let known = sqlx::query_scalar::<_, i64>("SELECT id FROM assets WHERE id = ?")
-                .bind(asset_id)
-                .fetch_optional(&state.pool)
-                .await;
-            if !matches!(known, Ok(Some(_))) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiError { error: "Das gewählte Bild gibt es nicht.".to_string() }),
-                )
-                    .into_response();
+            // The same check as the global overlay, so a picture that works in one
+            // place cannot be refused in the other.
+            if let Err(message) = crate::settings::check_overlay_image(&state, asset_id).await {
+                return (StatusCode::BAD_REQUEST, Json(ApiError { error: message })).into_response();
             }
         }
         // Stored as `null` when it draws nothing, so the read paths do not have to

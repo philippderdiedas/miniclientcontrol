@@ -446,11 +446,12 @@
         const res = await fetch('/api/overlay');
         if (!res.ok) { ovFeedback('Vorschau nicht möglich.', false); return; }
         const config = await res.json();
-        // Same runtime, same layers -- only the base swapped, because the display
-        // reaches the controller over loopback and this page does not. The layers
-        // include the item currently on screen, so the preview is what is really
-        // out there and not just the global half of it.
-        if (!globalThis.__ov.apply({ ...config, base: location.origin })) {
+        // Same runtime, same layers, nothing swapped: the payload carries no URLs
+        // at all -- the QR is a module matrix and an image is a data: URI -- so
+        // the preview and the display draw from the identical input. The layers
+        // include the item currently on screen, so this is what is really out
+        // there and not just the global half of it.
+        if (!globalThis.__ov.apply(config)) {
           ovFeedback('Zurzeit zeigt das Overlay nichts an.', false);
           return;
         }

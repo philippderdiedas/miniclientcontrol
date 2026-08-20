@@ -33,6 +33,10 @@ const KEY_CAST_ENABLED: &str = "cast_enabled";
 const KEY_CAST_AUTH: &str = "cast_auth";
 const KEY_CAST_CODE: &str = "cast_code";
 const KEY_OVERLAY: &str = "overlay_config";
+
+/// Overlay images travel base64-encoded inside every apply, so this caps what one
+/// costs. Generous for a logo, small enough that a re-apply stays cheap on a Pi.
+pub const OVERLAY_IMAGE_MAX_BYTES: usize = 512 * 1024;
 const KEY_AUTH_USER: &str = "basic_auth_user";
 const KEY_AUTH_HASH: &str = "basic_auth_hash";
 
@@ -363,7 +367,7 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
 
 // -------------------------------------------------------------------- http
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -375,22 +379,7 @@ use crate::models::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/settings", get(read_settings).put(update_settings))
-        .route("/api/qr.svg", get(qr))
         .route("/api/overlay", get(read_overlay))
-}
-
-#[derive(Deserialize)]
-pub struct QrQuery {
-    text: String,
-}
-
-/// A QR code for arbitrary text, rendered server-side and fetched by the display
-/// browser over loopback -- so it needs no credentials and no vendored library.
-pub async fn qr(Query(query): Query<QrQuery>) -> Response {
-    if query.text.is_empty() || query.text.chars().count() > 900 {
-        return (StatusCode::BAD_REQUEST, "text out of range").into_response();
-    }
-    crate::cast::qr_svg(&query.text)
 }
 
 /// The overlay as the display runtime wants it: asset ids already resolved to
@@ -424,9 +413,10 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
         let mut layer = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
         if let Some(object) = layer.as_object_mut() {
             object.insert(
-                "image_path".to_string(),
-                json!(asset_path(state, overlay.image_asset_id).await),
+                "image_data".to_string(),
+                json!(image_data_uri(state, overlay.image_asset_id).await),
             );
+            object.insert("qr_modules".to_string(), json!(qr_modules(&overlay.qr_text)));
         }
         layers.push(layer);
     }
@@ -442,8 +432,8 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
         layers.push(json!({
             "position": position,
             "text": item.text,
-            "image_path": asset_path(state, item.image_asset_id).await,
-            "qr_text": item.qr_text,
+            "image_data": image_data_uri(state, item.image_asset_id).await,
+            "qr_modules": qr_modules(&item.qr_text),
             "qr_label": item.qr_label,
             // Style follows the global overlay, so a shared box is uniform and a
             // separate one still looks like it belongs to the same display.
@@ -458,30 +448,105 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
     }
 
     json!({
-        // Absolute, and this is not a detail: the overlay lives in *someone
-        // else's* document, so a relative `/uploads/...` would resolve against
-        // the dashboard being displayed and 404 there. The runtime joins every
-        // URL onto this base, and the admin preview substitutes its own origin.
-        "base": format!("http://127.0.0.1:{}", state.args.port),
-        // The runtime formats the clock and the date, and the display browser's
-        // own locale is whatever `--browser-language` made it. Naming it here
-        // keeps a German kiosk German even if that ever changes.
+        // Nothing in here is a URL, and that is the point: the overlay's DOM
+        // lives in the displayed page's document, where Chromium's Local Network
+        // Access refuses any request to 127.0.0.1 without a permission click that
+        // a kiosk has nobody to make. Measured on Chrome 151 with a fresh
+        // profile: both `fetch` and `<img>` fail outright.
         "locale": "de-DE",
         "layers": layers,
     })
 }
 
-async fn asset_path(state: &AppState, asset_id: Option<i64>) -> Option<String> {
-    let id = asset_id?;
-    sqlx::query_scalar::<_, String>("SELECT local_path FROM assets WHERE id = ?")
-        .bind(id)
-        .fetch_optional(&state.pool)
+/// Is this asset usable as an overlay image?
+///
+/// A dangling id would render as a broken image on a screen nobody is standing in
+/// front of, and an image too large to inline would silently not draw -- both are
+/// worth saying at the moment somebody picks it.
+pub async fn check_overlay_image(state: &AppState, asset_id: i64) -> Result<(), String> {
+    let row = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT local_path, mimetype FROM assets WHERE id = ?",
+    )
+    .bind(asset_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check overlay asset {}: {}", asset_id, e);
+        "Das Bild konnte nicht geprüft werden.".to_string()
+    })?
+    .ok_or_else(|| "Das gewählte Bild gibt es nicht.".to_string())?;
+
+    let (local_path, mimetype) = row;
+    if !mimetype.unwrap_or_default().starts_with("image/") {
+        return Err("Das gewählte Asset ist kein Bild.".to_string());
+    }
+
+    let path = state.args.assets_dir.join(&local_path);
+    let size = tokio::fs::metadata(&path)
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to resolve overlay asset {}: {}", id, e);
-            None
-        })
-        .map(|path| format!("/uploads/{}", path))
+        .map(|meta| meta.len() as usize)
+        .map_err(|_| "Die Bilddatei fehlt auf der Platte.".to_string())?;
+    if size > OVERLAY_IMAGE_MAX_BYTES {
+        return Err(format!(
+            "Das Bild ist zu groß für ein Overlay ({} KB, erlaubt sind {} KB).",
+            size / 1024,
+            OVERLAY_IMAGE_MAX_BYTES / 1024
+        ));
+    }
+    Ok(())
+}
+
+fn qr_modules(text: &str) -> Option<Vec<String>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    crate::cast::qr_matrix(text)
+}
+
+/// The image inlined as a `data:` URI.
+///
+/// An `<img>` is the one thing the overlay cannot draw itself, so this is the
+/// only way to get a logo onto a foreign page without a request. A strict
+/// `img-src` CSP still refuses it -- best effort, like the injection itself.
+async fn image_data_uri(state: &AppState, asset_id: Option<i64>) -> Option<String> {
+    let id = asset_id?;
+    let row = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT local_path, mimetype FROM assets WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("Failed to resolve overlay asset {}: {}", id, e);
+        None
+    })?;
+
+    let (local_path, mimetype) = row;
+    let path = state.args.assets_dir.join(&local_path);
+    let bytes = tokio::fs::read(&path).await.ok().or_else(|| {
+        tracing::error!("Overlay image {} is missing on disk", path.display());
+        None
+    })?;
+    if bytes.len() > OVERLAY_IMAGE_MAX_BYTES {
+        // Every apply carries this string over CDP, and the display re-applies on
+        // every item. Refusing here matches the `413` the API answers when the
+        // image is picked, so the two cannot disagree.
+        tracing::error!(
+            "Overlay image {} is {} bytes, over the {} limit -- not drawing it",
+            path.display(),
+            bytes.len(),
+            OVERLAY_IMAGE_MAX_BYTES
+        );
+        return None;
+    }
+
+    let mime = mimetype.unwrap_or_else(|| "application/octet-stream".to_string());
+    Some(format!(
+        "data:{};base64,{}",
+        mime,
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    ))
 }
 
 #[derive(Serialize)]
@@ -642,19 +707,8 @@ pub async fn update_settings(
             return bad("Das Overlay ist eingeschaltet, zeigt aber nichts an.".to_string());
         }
         if let Some(id) = overlay.image_asset_id {
-            // A dangling id would render as a broken image on the display, where
-            // nobody is around to notice the little placeholder icon.
-            let known = sqlx::query_scalar::<_, i64>("SELECT id FROM assets WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await;
-            match known {
-                Ok(Some(_)) => {}
-                Ok(None) => return bad("Das gewählte Bild gibt es nicht.".to_string()),
-                Err(e) => {
-                    tracing::error!("Failed to check overlay asset {}: {}", id, e);
-                    return bad("Das Bild konnte nicht geprüft werden.".to_string());
-                }
+            if let Err(message) = check_overlay_image(&state, id).await {
+                return bad(message);
             }
         }
         overlay_changed = serde_json::to_string(&overlay).ok()

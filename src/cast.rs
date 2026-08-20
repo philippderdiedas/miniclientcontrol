@@ -235,6 +235,35 @@ pub async fn cast_qr(State(state): State<AppState>) -> Response {
     qr_svg(&sender_url(&state))
 }
 
+/// The QR code as a module matrix, one string of `0`/`1` per row.
+///
+/// This exists instead of a URL because the overlay lives in *someone else's*
+/// document: Chromium's Local Network Access blocks a page on a public origin
+/// from loading anything off `127.0.0.1` without a permission click, and a kiosk
+/// has nobody to click it. Handing over the modules and drawing them as inline
+/// SVG needs no request at all -- which also sidesteps an `img-src` CSP, where
+/// even a `data:` URL would be refused.
+pub fn qr_matrix(text: &str) -> Option<Vec<String>> {
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .inspect_err(|e| warn!("Could not encode '{}' as a QR code: {}", text, e))
+        .ok()?;
+    let width = code.width();
+    let modules = code.to_colors();
+    Some(
+        modules
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    .map(|color| match color {
+                        qrcode::Color::Dark => '1',
+                        qrcode::Color::Light => '0',
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
 /// Render any text as a QR code SVG.
 ///
 /// Server-side because the device is often offline, so a client-side library
