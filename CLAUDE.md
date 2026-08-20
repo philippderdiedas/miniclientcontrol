@@ -128,6 +128,11 @@ fails with `symbol getrandom, version GLIBC_2.25 not defined`.
 cross build --release --target armv7-unknown-linux-gnueabihf --target-dir target/cross-armv7
 ```
 
+The TLS and QR dependencies were the risk in that build and have been verified on
+a Raspberry Pi 2 (armv7l, Raspbian bookworm): `ring`, `rcgen` and `qrcode` compile
+and the binary generates its certificate on the device. The result links against
+nothing but glibc, libgcc and libm.
+
 There is no linting config, and `cargo build` is the gate for the Rust side.
 `tests/cast/` holds stdlib-only Python end-to-end tests for the cast feature
 (signaling, override coupling, auth modes, runtime settings, basic-auth

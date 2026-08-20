@@ -45,7 +45,6 @@ fn alias(args: &Args) -> Option<String> {
 
 fn spawn(name: &str) -> std::io::Result<Child> {
     let address = tls::primary_local_ipv4();
-    info!("Publishing {} as {} over mDNS", name, address);
     Command::new(AVAHI_PUBLISH)
         // -a: publish an address record; -R: without the reverse entry, which is
         // not ours to claim on a shared network.
@@ -64,17 +63,26 @@ pub async fn supervise(args: Arc<Args>) {
         return;
     };
 
+    // Retry quickly while it is working (a crash should be papered over), slowly
+    // once it is clearly not going to (the tool is missing). Without the second
+    // interval a device without avahi-utils writes a log line every five seconds
+    // for as long as it runs.
+    const RETRY_AFTER_EXIT: Duration = Duration::from_secs(5);
+    const RETRY_WHEN_MISSING: Duration = Duration::from_secs(300);
+
     let mut warned = false;
     loop {
-        match spawn(&name) {
+        let pause = match spawn(&name) {
             Ok(mut child) => {
+                // Logged here, not in spawn(): announcing a name we then failed to
+                // publish reads as success in the journal.
+                info!("Publishing {} over mDNS", name);
                 warned = false;
                 let status = child.wait().await;
                 warn!("avahi-publish for {} exited ({:?}), restarting", name, status);
+                RETRY_AFTER_EXIT
             }
             Err(e) => {
-                // Once, not every five seconds: on a box without Avahi this would
-                // otherwise fill the log forever.
                 if !warned {
                     error!(
                         "Cannot publish '{}': {} ({}). Guests will only reach this \
@@ -84,8 +92,9 @@ pub async fn supervise(args: Arc<Args>) {
                     );
                     warned = true;
                 }
+                RETRY_WHEN_MISSING
             }
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        };
+        tokio::time::sleep(pause).await;
     }
 }

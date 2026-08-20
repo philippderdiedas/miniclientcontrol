@@ -279,11 +279,11 @@ async fn main() -> Result<()> {
         match tls::load_cast_tls(&args.cast_cert_path, &cert_names).await {
             Ok(config) => {
                 let tls_app = app.clone();
-                tracing::info!(
-                    "Guests: https://{ip}:{port}/  |  Operator: https://{ip}:{port}/admin.html",
-                    ip = tls::primary_local_ipv4(),
-                    port = cast_tls_port
-                );
+                // Must go through the same resolution the API and the QR code
+                // use, or the first thing an operator reads on startup disagrees
+                // with the address guests are actually given.
+                let base = tls::public_base_url(&args.public_url, cast_tls_port);
+                tracing::info!("Guests: {base}  |  Operator: {base}admin.html");
                 let server = axum_server::from_tcp_rustls(listener, config)?;
                 tokio::spawn(async move {
                     // ConnectInfo here too: without it the loopback exemption in
