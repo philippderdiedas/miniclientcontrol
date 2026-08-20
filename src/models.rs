@@ -278,6 +278,11 @@ pub struct AppState {
     /// operator UI polls every two seconds, so verifying every request would
     /// burn real time on a Pi. Cleared whenever the credentials change.
     pub auth_cache: Arc<Mutex<Option<String>>>,
+    /// How the venue's audio is controlled, decided once at startup.
+    pub audio: Arc<crate::audio::Backend>,
+    /// PID of the browser we launched, when we launched it. Used to tell the
+    /// cast's own audio stream apart from everything else making sound.
+    pub browser_pid: Arc<Mutex<Option<u32>>>,
     /// Screen-cast session. A running cast owns `override_item`; see `cast.rs`.
     pub cast: crate::cast::SharedCastSession,
 }

@@ -8,6 +8,7 @@ mod cast;
 mod settings;
 mod chromium;
 mod mdns;
+mod audio;
 
 use anyhow::Result;
 use axum::{
@@ -211,6 +212,8 @@ async fn main() -> Result<()> {
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
+        audio: Arc::new(audio::Backend::detect().await),
+        browser_pid: Arc::new(Mutex::new(None)),
     };
 
     // A custom `.local` name has to be announced; Avahi only does the hostname.
@@ -222,7 +225,8 @@ async fn main() -> Result<()> {
     // the port already answering.
     if !args.no_launch_browser {
         let browser_args = state.args.clone();
-        tokio::spawn(async move { chromium::supervise(browser_args).await });
+        let pid_slot = state.browser_pid.clone();
+        tokio::spawn(async move { chromium::supervise(browser_args, pid_slot).await });
     }
 
     // 4. Spawn Browser Controller Task

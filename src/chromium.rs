@@ -33,6 +33,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::models::Args;
 
+/// Where the supervisor records the running browser's PID, so other parts of the
+/// controller can tell its processes apart from everything else on the machine.
+pub type PidSlot = std::sync::Arc<tokio::sync::Mutex<Option<u32>>>;
+
 /// Extra flags every launch gets.
 ///
 /// `--disable-features=Translate` is included even though it does not gate the
@@ -194,7 +198,7 @@ fn spawn(args: &Args) -> Result<Child> {
 }
 
 /// Keep a browser available on the CDP port for the control loop to drive.
-pub async fn supervise(args: std::sync::Arc<Args>) {
+pub async fn supervise(args: std::sync::Arc<Args>, pid_slot: PidSlot) {
     let mut child: Option<Child> = None;
 
     loop {
@@ -204,18 +208,23 @@ pub async fn supervise(args: std::sync::Arc<Args>) {
                 Ok(Some(status)) => {
                     warn!("Browser exited ({}), restarting", status);
                     child = None;
+                    *pid_slot.lock().await = None;
                 }
                 Ok(None) => {}
                 Err(e) => {
                     error!("Failed to poll the browser process: {}", e);
                     child = None;
+                    *pid_slot.lock().await = None;
                 }
             }
         }
 
         if child.is_none() && !cdp_reachable(&args.cdp_url).await {
             match spawn(&args) {
-                Ok(spawned) => child = Some(spawned),
+                Ok(spawned) => {
+                    *pid_slot.lock().await = spawned.id();
+                    child = Some(spawned);
+                }
                 // Keep retrying rather than giving up: on a slow boot the display
                 // server may simply not be ready yet.
                 Err(e) => error!("Could not start the browser: {:#}", e),

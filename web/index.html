@@ -46,6 +46,19 @@
     }
     .code-boxes input:focus { border-color: #0b6b3a; outline: none; }
     .status { font-weight: 600; margin-top: .5rem; }
+    hr { border: none; border-top: 1px solid #e5e5e5; margin: 1.2rem 0 .8rem; }
+    h2 { font-size: 1.1rem; margin: 0 0 .6rem; }
+    .audiorow {
+      display: flex; align-items: center; gap: .6rem; margin-bottom: .5rem; flex-wrap: wrap;
+    }
+    .audiorow label, .audiorow .name {
+      min-width: 8rem; font-size: .9rem; color: #444;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .audiorow .name.cast { font-weight: 700; color: #0b6b3a; }
+    .audiorow input[type=range] { flex: 1; min-width: 8rem; }
+    .audiorow select { flex: 1; min-width: 8rem; font: inherit; padding: .3rem; }
+    .audiorow button { padding: .35rem .6rem; margin: 0; }
     .codestatus { margin: .2rem 0 0; font-weight: 600; min-height: 1.4em; }
     .codestatus.ok { color: #0b6b3a; }
     .codestatus.bad { color: #a11; }
@@ -96,6 +109,19 @@
     </div>
 
     <p class="status" id="status"></p>
+    <div id="audioPanel" hidden>
+      <hr />
+      <h2>Ton im Raum</h2>
+      <div class="audiorow" id="sinkRow">
+        <label for="sinkSelect">Ausgang</label>
+        <select id="sinkSelect"></select>
+        <button id="sinkMute" type="button" title="Ausgang stumm schalten">🔊</button>
+        <input type="range" id="sinkVolume" min="0" max="100" />
+      </div>
+      <div id="streams"></div>
+      <p class="muted" id="audioHint"></p>
+    </div>
+
     <p class="warn" id="audioWarning" hidden>
       Kein Ton übertragen — Browser oder Betriebssystem haben keinen Audiokanal
       freigegeben. In Chrome beim Teilen „Systemaudio teilen“ ankreuzen.
@@ -284,6 +310,7 @@
       if (socket) { socket.close(); socket = null; }
       dropReservation();
       stopCountdown();
+      stopAudio();
       showLive(false);
       setShareEnabled(authMode === 'none');
       if (authMode !== 'none') {
@@ -370,6 +397,123 @@
 
       showLive(true);
       connect();
+      // The panel only exists for the connected sender, so it appears with the
+      // stream and goes away with it.
+      startAudio();
+    }
+
+    // --- venue audio ----------------------------------------------------
+
+    // Only reachable while this device is the connected sender; the server
+    // enforces that, and a 403 simply hides the panel again.
+    let audioTimer = null;
+    let audioBusy = false;
+
+    async function audioFetch(body) {
+      const res = await fetch('/api/cast/audio', body ? {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      } : {});
+      if (!res.ok) return null;
+      return res.json();
+    }
+
+    function renderAudio(state) {
+      const panel = el('audioPanel');
+      if (!state || !state.available) {
+        panel.hidden = true;
+        return;
+      }
+      panel.hidden = false;
+
+      // Skip redrawing while a slider is being dragged, or the poll yanks it back.
+      if (audioBusy) return;
+
+      const select = el('sinkSelect');
+      const current = state.sinks.find((s) => s.is_default);
+      select.replaceChildren();
+      for (const sink of state.sinks) {
+        const option = document.createElement('option');
+        option.value = sink.name;
+        option.textContent = sink.description;
+        select.appendChild(option);
+      }
+      if (current) {
+        select.value = current.name;
+        el('sinkVolume').value = current.volume;
+        el('sinkMute').textContent = current.muted ? '🔇' : '🔊';
+      }
+      el('sinkRow').hidden = state.sinks.length === 0;
+
+      const box = el('streams');
+      box.replaceChildren();
+      for (const stream of state.streams) {
+        const row = document.createElement('div');
+        row.className = 'audiorow';
+
+        const name = document.createElement('span');
+        name.className = 'name' + (stream.is_cast ? ' cast' : '');
+        name.textContent = stream.is_cast ? 'Deine Übertragung' : stream.label;
+        name.title = stream.label;
+
+        const mute = document.createElement('button');
+        mute.type = 'button';
+        mute.textContent = stream.muted ? '🔇' : '🔊';
+        mute.addEventListener('click', async () => {
+          renderAudio(await audioFetch({
+            target: 'stream', index: stream.index, action: 'mute', value: !stream.muted,
+          }));
+        });
+
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = 0; slider.max = 100; slider.value = stream.volume;
+        slider.addEventListener('pointerdown', () => { audioBusy = true; });
+        slider.addEventListener('pointerup', () => { audioBusy = false; });
+        slider.addEventListener('change', async () => {
+          audioBusy = false;
+          renderAudio(await audioFetch({
+            target: 'stream', index: stream.index, action: 'volume', value: Number(slider.value),
+          }));
+        });
+
+        row.append(name, mute, slider);
+        box.appendChild(row);
+      }
+
+      el('audioHint').textContent = state.streams.length
+        ? '' : 'Zurzeit gibt niemand Ton aus.';
+    }
+
+    el('sinkVolume').addEventListener('pointerdown', () => { audioBusy = true; });
+    el('sinkVolume').addEventListener('pointerup', () => { audioBusy = false; });
+    el('sinkVolume').addEventListener('change', async () => {
+      audioBusy = false;
+      renderAudio(await audioFetch({
+        target: 'sink', action: 'volume', value: Number(el('sinkVolume').value),
+      }));
+    });
+    el('sinkMute').addEventListener('click', async () => {
+      const muted = el('sinkMute').textContent === '🔇';
+      renderAudio(await audioFetch({ target: 'sink', action: 'mute', value: !muted }));
+    });
+    el('sinkSelect').addEventListener('change', async () => {
+      renderAudio(await audioFetch({
+        target: 'sink', action: 'select', name: el('sinkSelect').value,
+      }));
+    });
+
+    function startAudio() {
+      stopAudio();
+      const tick = async () => renderAudio(await audioFetch(null));
+      tick();
+      audioTimer = setInterval(tick, 3000);
+    }
+
+    function stopAudio() {
+      if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
+      el('audioPanel').hidden = true;
     }
 
     el('shareScreen').addEventListener('click', () => share('screen'));

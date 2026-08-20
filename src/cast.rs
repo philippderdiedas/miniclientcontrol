@@ -153,6 +153,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/cast/pair", post(start_pairing))
         .route("/api/cast/info", get(cast_info))
         .route("/api/cast/qr.svg", get(cast_qr))
+        .route("/api/cast/audio", get(read_audio).post(control_audio))
         .route(
             "/api/cast/claim",
             post(claim_session).delete(release_session),
@@ -179,6 +180,7 @@ pub fn is_cast_public_path(path: &str) -> bool {
             | "/api/cast/pair"
             | "/api/cast/info"
             | "/api/cast/qr.svg"
+            | "/api/cast/audio"
             | "/api/cast/claim"
     )
 }
@@ -928,6 +930,73 @@ pub async fn release_session(
         info!("Cast: reservation released by {}", peer.ip());
     }
     StatusCode::NO_CONTENT
+}
+
+/// Only the person currently casting may touch the venue's audio.
+///
+/// Stricter than the rest of the cast-public routes on purpose: turning the
+/// speakers down is a physical act in a shared room, and "anyone who can reach
+/// the page" is too wide for it. The address has to match the sender that is
+/// actually connected, so the permission ends when the cast does.
+async fn caster_only(state: &AppState, peer: IpAddr) -> bool {
+    let session = state.cast.lock().await;
+    session.sender.is_some() && session.sender_addr == Some(peer)
+}
+
+/// Processes whose audio counts as "the cast's own".
+async fn cast_process_ids(state: &AppState) -> Vec<u32> {
+    let Some(pid) = *state.browser_pid.lock().await else {
+        // Someone else started the browser, so we cannot claim a subtree. The
+        // panel still works; it just cannot mark one stream as the caster's.
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || crate::audio::descendants(pid))
+        .await
+        .unwrap_or_default()
+}
+
+pub async fn read_audio(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> Response {
+    if !caster_only(&state, peer.ip()).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Kein aktiver Cast."}))).into_response();
+    }
+    let pids = cast_process_ids(&state).await;
+    Json(state.audio.state(&pids).await).into_response()
+}
+
+pub async fn control_audio(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(command): Json<crate::audio::AudioCommand>,
+) -> Response {
+    if !caster_only(&state, peer.ip()).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Kein aktiver Cast."}))).into_response();
+    }
+
+    let pids = cast_process_ids(&state).await;
+    // Needed for a device switch, which has to drag the cast's own stream along
+    // or the audio keeps coming out of the old output.
+    let cast_stream = state
+        .audio
+        .state(&pids)
+        .await
+        .streams
+        .iter()
+        .find(|stream| stream.is_cast)
+        .map(|stream| stream.index);
+
+    if !state.audio.apply(&command, cast_stream).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "Audiosteuerung nicht verfügbar."})),
+        )
+            .into_response();
+    }
+
+    let pids = cast_process_ids(&state).await;
+    Json(state.audio.state(&pids).await).into_response()
 }
 
 /// Operator override: cut the cast short and put the playlist back.
