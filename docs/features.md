@@ -61,6 +61,19 @@ is checking.
 Sizes are in `vmin`, so one setting reads the same on a 1080p panel and a
 portrait 4K one.
 
+The overlay can **stand down during a cast**, and that is the operator's switch,
+not the guest's: the overlay is the venue's own statement, so a presenter cannot
+clear the house message — but a venue that would rather not draw on someone's
+slides says so once and is done. It is off by default.
+
+Two things happen without anyone deciding them. A QR code whose source is the
+screen-share address is dropped while a cast runs, whatever that switch says,
+because the slot is taken and whoever scanned it would only be turned away; a
+typed QR — a menu, a phone number — still means something and stays. And the
+overlay steps aside entirely while the display is showing a **connection code**,
+because the overlay draws above everything else on the page, so a badge in the
+wrong corner would cover the one thing a guest needs to read.
+
 The clock and date are formatted for a language tag that is settable in the admin
 UI or with `--locale`, and which otherwise follows the machine: `LC_ALL`, then
 `LC_TIME`, then `LANG`. `LC_TIME` before `LANG` is deliberate — a desktop set up
@@ -81,13 +94,22 @@ guest stops, closes the laptop, or walks away. See [casting.md](casting.md).
 While a cast is running, the guest can also control the **room's audio** —
 per-stream and per-output volume, mute, and output device — because the person
 presenting is the person who needs it. That permission starts and ends with the
-cast.
+cast, and is bound to the address actually casting rather than to the LAN at
+large: turning the speakers up is a physical act in a shared room.
+
+The operator has the same panel on the admin page, through a door of their own,
+and theirs works whether or not anybody is casting. Both end in the same code, so
+the guest's knobs and the operator's cannot drift apart. A device with no sound
+server shows no panel at all rather than a set of controls that do nothing.
 
 ## Operator surface
 
 `/admin.html` shows what is on screen, what is casting, and the runtime settings:
-whether casting is allowed, how a guest authenticates, the overlay, and the
-credentials for the operator UI itself.
+whether casting is allowed, how a guest authenticates, the overlay, the language
+for dates and times, and the credentials for the operator UI itself. It also
+carries the room-audio panel and, while one is alive, the **pairing code the
+display is currently showing** with its remaining seconds — otherwise the person
+helping a guest over the phone is the only one who cannot see it.
 
 Settings live in the database, so they survive restarts. Anything passed on the
 command line pins that setting and the UI shows it as locked — which is also the

@@ -75,6 +75,14 @@ Getting the two exemption lists confused breaks it in one of two directions:
 widen the display list and its paths become reachable from the whole LAN; narrow
 the guest list and nobody can cast.
 
+Room audio is the case where the same feature sits on both sides of that line.
+`/api/cast/audio` is on the guest list and checks the connected sender's address
+instead of credentials; `/api/audio` is not on it, so the operator credentials
+decide, and it works with no cast running. Two routes rather than one widened
+check: the guest route is exempt from authentication, so admitting "somebody else"
+there would admit the whole LAN. They share their implementation, so the two
+cannot behave differently.
+
 Both listeners are started with connection info attached, because the loopback
 check needs the peer address. Dropping that makes the extractor panic.
 
@@ -124,6 +132,13 @@ registered copy, so both are probed for and no-op when missing.
 The overlay is applied per item, and the item's own overlay is read **fresh** from
 the database rather than from the playlist snapshot, which can be an item duration
 old.
+
+A page that shows a connection code asks the overlay to stand down, and sets a
+global flag **before** calling — the runtime seeds itself from that flag on
+install. This is load-bearing rather than defensive: a pairing code arrives on the
+socket within a second of the page loading, while the controller injects the
+runtime only after its readiness waits, so a page that could only call the method
+would be covered by the very overlay it asked to move.
 
 The overlay's configuration is **pushed into the page** over CDP rather than
 fetched by it. That is why `/api/overlay` needs no authentication exemption: only

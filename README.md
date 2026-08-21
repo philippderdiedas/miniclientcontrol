@@ -164,7 +164,16 @@ These options also support environment variables through `clap` `env` support.
 
 - `GET /api/settings` — current settings plus which ones the command line pinned
 - `PUT /api/settings` — `{ cast_enabled?, cast_auth?, cast_code?, auth_enabled?,
-  auth_user?, auth_password? }`; a pinned setting answers `409`
+  auth_user?, auth_password?, overlay?, locale? }`; a pinned setting answers `409`
+- `GET /api/overlay` — the layers the display runtime wants: the global overlay
+  plus the one belonging to the item on screen, with asset ids already resolved
+
+### Room audio
+
+- `GET /api/audio` — operator: output devices and playing streams
+- `POST /api/audio` — operator: set a volume, mute, or the output device
+- `GET`/`POST /api/cast/audio` — the same, for the guest who is currently casting;
+  guarded by the connected sender's address instead of by credentials
 
 ### Playback Control
 
@@ -190,6 +199,10 @@ These options also support environment variables through `clap` `env` support.
 - `POST /api/cast/claim` — guest: check the code and reserve the session before
   sharing; returns a ticket the WebSocket needs
 - `DELETE /api/cast/claim` — give the reservation back
+
+`GET /api/cast/state` also carries a live pairing code and its remaining seconds
+while one exists, so the admin page can show what the display is showing.
+`/api/cast/info` never does.
 
 ## Screen Casting
 

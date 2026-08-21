@@ -78,6 +78,13 @@ Basic auth is deliberately not an option here: it would mean handing the operato
 password to every guest. Codes are compared in constant time and an address is
 locked out after repeated failures.
 
+There is **no standing pairing code**. One is minted when a guest asks for it,
+lives about thirty seconds and is single use, so there is nothing permanent to
+show; the `code` mode's fixed code is the standing one, and the admin UI edits it.
+While a pairing code *is* alive, the operator's view of the session carries it
+with its remaining seconds, so somebody helping a guest by phone can read out what
+the display is showing. The public endpoint never carries it.
+
 `--cast-auth=code` with no code configured logs an error and refuses every
 sender, but does **not** stop the process. Casting must never keep the signage
 from booting, and the operator can fix it in the UI without a restart.
@@ -150,10 +157,29 @@ individually, plus the output device, its level and its mute. A signage box may
 also be running AirPlay or a music daemon, and someone about to present needs to
 turn those down without hunting for whoever started them.
 
-The endpoints are bound to the **address of the sender that is actually
-connected**, so the permission starts and ends with the cast. Turning the speakers
+The same panel serves the guest and the operator, from one implementation, over
+**two endpoints that differ only in who is let in**:
+
+| Endpoint | Who | Guarded by |
+|---|---|---|
+| `/api/cast/audio` | the guest | the address of the sender actually connected |
+| `/api/audio` | the operator | the operator credentials |
+
+The guest's is exempt from operator credentials — somebody sharing a screen has to
+reach it without them — so it is bound to the connected sender's address and
+nothing else. The permission starts and ends with the cast. Turning the speakers
 down is a physical act in a shared room, and "anyone who can reach the page" is
 too wide for it.
+
+Widening that check to admit the operator is the tempting shortcut and is wrong:
+the route is exempt from authentication, so "also allow somebody else" would let
+any guest on the LAN turn the room up at three in the morning. The operator gets a
+second door instead, which needs no cast to be running. **Loopback is not a way
+around it** — the loopback exemption covers the display browser's paths only, so
+the admin page asks for credentials even on the device itself.
+
+Both endpoints end in the same function, so the guest's knobs and the operator's
+cannot drift apart.
 
 The cast's own stream is identified through the process subtree of the browser the
 controller launched. Names cannot decide it: with two displays both would just say
