@@ -463,7 +463,16 @@
             stats.forEach((s) => {
               if (s.type !== 'outbound-rtp' || !s.frameWidth) return;
               const fps = s.framesPerSecond != null ? `, ${Math.round(s.framesPerSecond)} fps` : '';
-              el('liveStats').textContent = `Gesendet: ${s.frameWidth}×${s.frameHeight}${fps}`;
+              // The sender does know its own limits and throttles on its own; it
+              // just never said so. `none` is the interesting case: quality is
+              // then capped by the display's ceiling or by the caster's choice,
+              // not by this machine struggling.
+              const why = {
+                cpu: ' — begrenzt durch die CPU dieses Rechners',
+                bandwidth: ' — begrenzt durch die Netzwerkbandbreite',
+                other: ' — begrenzt (Grund unbekannt)',
+              }[s.qualityLimitationReason] || '';
+              el('liveStats').textContent = `Gesendet: ${s.frameWidth}×${s.frameHeight}${fps}${why}`;
             });
           } catch (_) {
             // Not every browser exposes these; the line just stays empty.
