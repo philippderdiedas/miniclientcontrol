@@ -111,11 +111,18 @@
       }
       codeBoxes.hidden = false;
       setHint('Diesen Code am eigenen Gerät eingeben.');
+      // The overlay is in the top layer: without standing it down it would cover
+      // the code, which is the one thing on screen that matters right now. The
+      // flag is set too, because the runtime may not be injected yet.
+      globalThis.__ovSuspend = true;
+      if (globalThis.__ov) globalThis.__ov.suspend();
     }
 
     function hideCode() {
       codeBoxes.replaceChildren();
       codeBoxes.hidden = true;
+      globalThis.__ovSuspend = false;
+      if (globalThis.__ov) globalThis.__ov.resume();
     }
 
     function toStandby(message) {

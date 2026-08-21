@@ -502,11 +502,101 @@ async def browser_flow():
         # control: the payload names no controller URL, and the QR needs none.
         http("DELETE", "/api/override", port=HTTP)
 
-        print("\n[47] switching it off takes it away again")
+        print("\n[46b] a connection code makes the overlay stand down")
+        # The runtime's own contract first: suspend keeps the configuration, so
+        # coming back needs no server round trip.
+        put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
+             "position": "bottom-center"}, port=HTTP)
+        # Wait for *this* text, not merely for a box: the previous case left one
+        # on screen, and "a box exists" would pass before the edit arrived.
+        for _ in range(40):
+            if "Werkstatt geschlossen" in json.loads(await page.eval(BOXES))["text"]:
+                break
+            await asyncio.sleep(0.5)
+        await page.eval("globalThis.__ov.suspend()")
+        state = json.loads(await page.eval(
+            "(() => JSON.stringify(globalThis.__ov.state()))()"))
+        check("suspend hides every box", state["boxes"] == 0 and state["suspended"], state)
+        check("but the layers are still known, so nothing has to be re-fetched",
+              state["layers"] >= 1, state)
+        await page.eval("globalThis.__ov.resume()")
+        back = json.loads(await page.eval(BOXES))
+        check("resume brings it back unchanged",
+              back["count"] == 1 and "Werkstatt geschlossen" in back["text"], back)
+
+        # The flag a page sets *before* the runtime exists -- the order that really
+        # happens on a display, where a pairing code arrives within a second and
+        # the runtime is injected after the readiness waits. Re-evaluating the
+        # script is exactly what the controller does after navigation.
+        script = urllib.request.urlopen(
+            f"http://127.0.0.1:{HTTP}/overlay.js", timeout=5).read().decode()
+        seeded = await page.eval(
+            "(() => { delete globalThis.__ov; globalThis.__ovSuspend = true; return 'gone'; })()")
+        check("the runtime can be removed for the test", seeded == "gone", seeded)
+        await page.eval(script)
+        state = json.loads(await page.eval(
+            "(() => JSON.stringify(globalThis.__ov.state()))()"))
+        check("a runtime that loads after the flag starts out suspended",
+              state["suspended"] is True, state)
+        await page.eval("globalThis.__ov.resume()")
+
+        print("\n[46c] the idle screen's standing code wins over the overlay")
+        # code mode with a code: the idle page renders it and stands the overlay
+        # down. Disabling every item is what sends the display to that page.
+        http("PUT", "/api/settings", {"cast_auth": "code", "cast_code": "AB12"}, port=HTTP)
+        for item in http("GET", "/api/playlist", port=HTTP)[1]:
+            http("PUT", f"/api/playlist/{item['id']}", {"enabled": False}, port=HTTP)
+
+        idle = wait_for(
+            lambda: "empty_playlist" in (cdp.page_ws(9232)[1] or {}).get("url", ""), 60)
+        check("the display went to the idle screen", idle is not None,
+              (cdp.page_ws(9232)[1] or {}).get("url"))
+
+        idle_ws, _ = cdp.page_ws(9232, lambda t: "empty_playlist" in t.get("url", ""))
+        async with cdp.Session(idle_ws) as idle_page:
+            shown = None
+            for _ in range(40):
+                shown = json.loads(await idle_page.eval(
+                    """(() => JSON.stringify({
+                         code: (document.getElementById('code') || {}).hidden === false,
+                         flag: !!globalThis.__ovSuspend,
+                         boxes: globalThis.__ov ? globalThis.__ov.state().boxes : null,
+                       }))()"""))
+                if shown["code"]:
+                    break
+                await asyncio.sleep(0.5)
+            check("the idle screen shows the standing code", shown["code"] is True, shown)
+            check("and the overlay drew nothing over it",
+                  shown["flag"] is True and (shown["boxes"] in (0, None)), shown)
+
+        http("PUT", "/api/settings", {"cast_auth": "none"}, port=HTTP)
+
+    # Back to a playlist item, and on a fresh page session: the idle screen above
+    # is a different target, so the handle from earlier no longer points at what
+    # is on screen.
+    for item in http("GET", "/api/playlist", port=HTTP)[1]:
+        http("PUT", f"/api/playlist/{item['id']}", {"enabled": True}, port=HTTP)
+    # Not by URL: the item in this test *points at* empty_playlist.html, because a
+    # page served by the controller is the only reliably offline one. What tells
+    # the two apart is whether the loop reports an item at all.
+    back_on_item = wait_for(
+        lambda: http("GET", "/api/control/current", port=HTTP)[1].get("item_id"), 60)
+    check("the display is playing an item again", back_on_item is not None,
+          http("GET", "/api/control/current", port=HTTP)[1])
+
+    print("\n[47] switching it off takes it away again")
+    live_ws, _ = cdp.page_ws(9232)
+    async with cdp.Session(live_ws) as live:
+        put({"enabled": True, "text": "noch da", "position": "top-left"}, port=HTTP)
+        for _ in range(40):
+            if "noch da" in json.loads(await live.eval(BOXES))["text"]:
+                break
+            await asyncio.sleep(0.5)
+
         put({"enabled": False}, port=HTTP)
         gone = None
         for _ in range(40):
-            gone = json.loads(await page.eval(BOXES))["count"] == 0
+            gone = json.loads(await live.eval(BOXES))["count"] == 0
             if gone:
                 break
             await asyncio.sleep(0.5)

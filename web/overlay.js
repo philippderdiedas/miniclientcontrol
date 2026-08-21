@@ -48,6 +48,17 @@
   };
 
   let payload = null;
+  // Set while a display page is showing something the overlay must not sit on
+  // top of -- a pairing code, or the standing code on the idle screen. The
+  // configuration is kept, so coming back is instant and needs no server round
+  // trip. This is the display's own call: only it knows what it is showing.
+  //
+  // Seeded from a global the page can set *before* this script runs. That order
+  // really happens: a pairing code arrives on the socket within a second of the
+  // page loading, while the controller injects this runtime only after its
+  // readiness waits -- so a page that could only call `suspend()` would be
+  // covered by the very overlay it asked to stand down.
+  let suspended = !!globalThis.__ovSuspend;
   // One entry per corner in use: { host, shadow }.
   const boxes = new Map();
   let ticker = null;
@@ -307,7 +318,7 @@
   }
 
   function render() {
-    const active = layers().filter(hasContent);
+    const active = suspended ? [] : layers().filter(hasContent);
     if (!active.length) {
       remove();
       return;
@@ -417,9 +428,25 @@
       payload = null;
       remove();
     },
+    // Called by our own display pages while they show a connection code: the
+    // overlay is in the top layer, so without this it wins and the code is the
+    // thing that gets covered.
+    suspend() {
+      globalThis.__ovSuspend = true;
+      if (suspended) return;
+      suspended = true;
+      render();
+    },
+    resume() {
+      globalThis.__ovSuspend = false;
+      if (!suspended) return;
+      suspended = false;
+      render();
+    },
     state() {
       return {
         installed: true,
+        suspended,
         boxes: boxes.size,
         positions: [...boxes.keys()],
         layers: layers().length,

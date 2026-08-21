@@ -104,6 +104,12 @@
           }
           codeBox.hidden = false;
           document.getElementById('hint').textContent = 'Diesen Code auf der Seite eingeben.';
+          // The overlay sits in the top layer, so it would cover the code rather
+          // than the other way round. This page owns its space while it is
+          // explaining how to connect, and sets the flag as well because the
+          // runtime is injected after the page loads.
+          globalThis.__ovSuspend = true;
+          if (globalThis.__ov) globalThis.__ov.suspend();
         } else {
           codeBox.hidden = true;
           document.getElementById('hint').textContent = cast.auth === 'pairing'

@@ -134,6 +134,12 @@ and the binary generates its certificate on the device. The result links against
 nothing but glibc, libgcc and libm.
 
 There is no linting config, and `cargo build` is the gate for the Rust side.
+**Stop any locally running instance before the suite.** `test_port.py` needs the
+default `3443` free to test the fallback, and `test_browser.py`/`test_overlay.py`
+launch their own Chrome on `9222`/`9232`. A dev instance holding those makes both
+fail in a way that looks like a code regression -- they pass again the moment it
+is stopped.
+
 `tests/cast/` holds stdlib-only Python end-to-end tests for the cast feature
 (signaling, override coupling, auth modes, runtime settings, basic-auth
 boundaries, and a real two-Chrome WebRTC session). They are not wired into any
@@ -557,6 +563,21 @@ needs a C toolchain that the armv7 `cross` image does not have.
 - Watchdogs: 5s grace after the sender's socket drops (so a page reload does not
   bounce the display back to the playlist), 30s for the display to connect back,
   30s TTL on a pairing code.
+
+**A connection code on screen makes the overlay stand down.** The overlay lives in
+the top layer, so it wins over anything the page draws — which means a badge at
+`bottom-center` covers the pairing code rather than the other way round.
+`cast_display.html` and `empty_playlist.html` therefore call `__ov.suspend()`
+while they show a code and `__ov.resume()` afterwards; the configuration is kept,
+so returning costs no round trip. In `code` mode the idle screen's standing code
+keeps the overlay down for as long as it is up, which is the intended trade: the
+one thing a guest needs to read beats a clock.
+
+They also set `globalThis.__ovSuspend` before calling, and the runtime seeds
+itself from that flag. This is load-bearing: a pairing code arrives on the socket
+within a second of the page loading, while the controller injects the runtime only
+after its readiness waits — so a page that could only call `suspend()` would be
+covered by the very overlay it asked to stand down.
 
 `cast_auth` picks how a guest proves themselves: `none` (trusted LAN), `code`
 (fixed PIN, known out of band), or `pairing` (fresh code shown on the display for
