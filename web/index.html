@@ -114,6 +114,8 @@
         <button type="button" id="qSmooth" class="qbtn">Flüssigkeit</button>
       </p>
       <p class="muted" id="qualityHint"></p>
+      <p class="muted" id="capHint"></p>
+      <p class="muted" id="liveStats"></p>
       <button id="stopShare">Übertragung beenden</button>
     </div>
 
@@ -183,7 +185,17 @@
     function noteDisplayLimits(limits) {
       if (!limits || !limits.max_edge) return;
       maxEdge = limits.max_edge;
+      showCap();
       constrainToDisplay();
+    }
+
+    // Without this, "Schärfe" is a promise the display quietly overrules: the
+    // ceiling is the receiver's (its panel, its GPU, or a cap the operator set),
+    // and a caster who asked for sharpness and got 1280 has no way to know why.
+    function showCap() {
+      el('capHint').textContent = maxEdge
+        ? `Dieses Display nimmt maximal ${maxEdge} px Kantenlänge an.`
+        : '';
     }
 
     // The claim ticket. Held from the moment the code checks out until the
@@ -354,6 +366,7 @@
       if (socket) { socket.close(); socket = null; }
       dropReservation();
       stopCountdown();
+      stopStats();
       stopAudio();
       showLive(false);
       setShareEnabled(authMode === 'none');
@@ -429,6 +442,36 @@
     el('qSharp').addEventListener('click', () => { quality = 'sharp'; applyQuality(); });
     el('qSmooth').addEventListener('click', () => { quality = 'smooth'; applyQuality(); });
 
+    // What is actually going out, as opposed to what was asked for. The encoder
+    // may scale below the capture size on its own, so the capture settings would
+    // be the wrong number to show.
+    let statsTimer = null;
+
+    function stopStats() {
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      el('liveStats').textContent = '';
+    }
+
+    function startStats() {
+      stopStats();
+      statsTimer = setInterval(async () => {
+        if (!peer) return;
+        for (const sender of peer.pc.getSenders()) {
+          if (!sender.track || sender.track.kind !== 'video') continue;
+          try {
+            const stats = await sender.getStats();
+            stats.forEach((s) => {
+              if (s.type !== 'outbound-rtp' || !s.frameWidth) return;
+              const fps = s.framesPerSecond != null ? `, ${Math.round(s.framesPerSecond)} fps` : '';
+              el('liveStats').textContent = `Gesendet: ${s.frameWidth}×${s.frameHeight}${fps}`;
+            });
+          } catch (_) {
+            // Not every browser exposes these; the line just stays empty.
+          }
+        }
+      }, 2000);
+    }
+
     async function startOffer() {
       setStatus('Display gefunden, Verbindung wird aufgebaut…');
       if (peer) peer.close();
@@ -440,6 +483,7 @@
       stream.getTracks().forEach((track) => peer.pc.addTrack(track, stream));
       // Needs a sender to attach to, so after addTrack and before the offer.
       await applyQuality();
+      startStats();
 
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
@@ -516,6 +560,7 @@
 
       showLive(true);
       applyQuality();
+      showCap();
       connect();
       // The panel only exists for the connected sender, so it appears with the
       // stream and goes away with it.
