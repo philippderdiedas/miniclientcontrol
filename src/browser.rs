@@ -28,11 +28,10 @@ pub async fn browser_loop(state: AppState) {
         // deciding it is trustworthy -- there is no end user here to protect from
         // their own click. This is also chromiumoxide's own default.
         //
-        // It cannot be made per item even if we wanted to: sending
-        // `Security.setIgnoreCertificateErrors` to the adopted control page has no
-        // effect (verified -- the page still lands on
-        // `chrome-error://chromewebdata/`). Only the handler setting takes, and it
-        // is applied once, while each target is initialised.
+        // This cannot be made per item: `Security.setIgnoreCertificateErrors` sent
+        // to the adopted control page has no effect at all -- the page still ends on
+        // `chrome-error://chromewebdata/`. Only the handler setting takes, and it is
+        // applied once, while each target is initialised.
         let handler_config = chromiumoxide::handler::HandlerConfig {
             ignore_https_errors: true,
             ..Default::default()
@@ -244,11 +243,11 @@ pub async fn browser_loop(state: AppState) {
                 None => 0,
             };
 
-            // A "Play now" for an item that was added or re-enabled after the previous
-            // playlist fetch cannot be resolved against that older snapshot. Resolve it
-            // here, against the list just read, and clear it only once it has been
-            // checked against a fresh list — consuming it earlier dropped the click and
-            // resumed playback on an unrelated item.
+            // A "Play now" for an item added or re-enabled since the previous
+            // playlist fetch cannot be resolved against that older snapshot, so it is
+            // resolved here against the list just read. It must only be cleared once
+            // it has been checked against a fresh list: consuming it on a miss drops
+            // the click and resumes playback on an unrelated item.
             {
                 let mut pending = state.pending_jump.lock().await;
                 if let Some(target_id) = *pending {
@@ -767,8 +766,9 @@ fn message_indicates_disconnect(msg: &str) -> bool {
         || msg.contains("broken pipe")
 }
 
-/// Previously this matched the bare substring "ws", which fires on any message
-/// containing "rows", "answers", "windows", ... and caused constant reconnects.
+/// Matching must be on whole words. A bare substring like "ws" fires on any
+/// message containing "rows", "answers" or "windows", which means constant
+/// reconnects.
 fn is_connection_lost(err: &(dyn std::error::Error + 'static)) -> bool {
     let mut current = Some(err);
     while let Some(e) = current {

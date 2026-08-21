@@ -81,9 +81,9 @@
     }
 
     async function loadAssets() {
-      // The playlist is fetched alongside the assets purely to count usages. Deleting an
-      // asset cascades to its playlist items (ON DELETE CASCADE), and that used to
-      // happen behind a generic confirm dialog with no hint that items would vanish too.
+      // The playlist is fetched alongside the assets purely to count usages. Deleting
+      // an asset cascades to its playlist items (ON DELETE CASCADE), so the count is
+      // what lets the confirmation say how many items go with it.
       const [assetRes, playlistRes] = await Promise.all([
         fetch('/api/assets'),
         fetch('/api/playlist'),

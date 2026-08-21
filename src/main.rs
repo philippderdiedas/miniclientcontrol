@@ -73,8 +73,8 @@ fn decode_basic(header: &str) -> Option<(String, String)> {
 
 /// Guards the operator surface.
 ///
-/// Always installed, because credentials can now be switched on at runtime from
-/// the admin UI -- there is no longer a startup-time answer to "is auth on".
+/// Always installed: credentials can be switched on at runtime from the admin UI,
+/// so whether authentication applies is a per-request question.
 async fn basic_auth_middleware(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -267,8 +267,8 @@ async fn main() -> Result<()> {
     // The cast sender page needs HTTPS (secure context), everything else is happy
     // over plain HTTP. Both listeners serve the *same* Router and the same AppState,
     // so a sender on the TLS origin and the display on loopback meet in one signaling
-    // registry -- and the sender never has to fetch across origins, which is what
-    // forced the mixed-content proxy in the picklecast setup this replaces.
+    // registry, and the sender never fetches across origins -- which a page served
+    // over TLS could not do towards a plain-HTTP API anyway.
     if let Some(listener) = cast_listener {
         // A name guests are told to type has to be in the certificate too, or
         // they get a name mismatch on top of the unknown-issuer warning.

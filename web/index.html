@@ -153,16 +153,15 @@
     let stream = null;
     let iceServers = [];
 
-    // The largest frame the display can show, as measured and announced by the
-    // display page itself. Null until something told us, in which case we send
-    // whatever the screen produces -- which is what every display before the
-    // kiosk Pi could take.
+    // The largest frame the display can show, announced by the display page
+    // itself. Null until it has said, in which case the capture is unconstrained
+    // and whatever the screen produces goes out.
     let maxEdge = null;
 
     // Capture constraints, not a policy: the number comes from the display.
-    // Applied at capture time because on the second and later casts the limit is
-    // already known from /api/cast/info, so the very first frame is the right
-    // size instead of a black rectangle that fixes itself a second later.
+    // Applied at capture time because from the second cast onwards the limit is
+    // already known from /api/cast/info, which makes the very first frame the
+    // right size rather than one that corrects itself a second later.
     function captureVideoConstraints() {
       if (!maxEdge) return true;
       return { width: { max: maxEdge }, height: { max: maxEdge } };
@@ -512,7 +511,8 @@
           if (frame.peer) startOffer().catch((e) => teardown(e.message, true));
           else setStatus('Warte auf das Display…');
         },
-        // The display measured itself after we had already started capturing.
+        // Arrives late on a first cast: the display announces itself only once it
+        // has connected, by which time the picker has already handed over a stream.
         limits: (frame) => noteDisplayLimits(frame),
         peer: (connected) => {
           if (connected) startOffer().catch((e) => teardown(e.message, true));

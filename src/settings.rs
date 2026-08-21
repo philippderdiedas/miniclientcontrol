@@ -86,9 +86,9 @@ pub struct Overlay {
     pub margin: f32,
     pub max_width: f32,
     pub qr_size: f32,
-    /// Box background, as a colour and an alpha rather than a CSS string: an
-    /// invalid declaration is dropped by the browser without a word, so a typo
-    /// used to mean a box with no background and no error anywhere.
+    /// Box background, as a colour and an alpha rather than a CSS string: the
+    /// browser drops an invalid declaration without a word, so a typo in a string
+    /// would mean a box with no background and no error anywhere.
     pub background_color: String,
     pub background_alpha: f32,
     /// No box at all -- the content sits directly on the page. Its own flag
@@ -648,11 +648,10 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
     }
 
     json!({
-        // Nothing in here is a URL, and that is the point: the overlay's DOM
-        // lives in the displayed page's document, where Chromium's Local Network
-        // Access refuses any request to 127.0.0.1 without a permission click that
-        // a kiosk has nobody to make. Measured on Chrome 151 with a fresh
-        // profile: both `fetch` and `<img>` fail outright.
+        // Nothing in here is a URL, and that is the point: the overlay's DOM lives
+        // in the displayed page's document, where Chromium's Local Network Access
+        // refuses any request to 127.0.0.1 -- both `fetch` and `<img>` -- without a
+        // permission click that a kiosk has nobody to make.
         "locale": "de-DE",
         "layers": layers,
     })
@@ -924,7 +923,7 @@ pub async fn update_settings(
     };
 
     if credentials_changed {
-        // The cache holds a header that was verified against the *old* password.
+        // Otherwise the cache keeps accepting the previous password.
         *state.auth_cache.lock().await = None;
     }
 

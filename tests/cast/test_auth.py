@@ -1,7 +1,8 @@
 """Basic auth must not lock guests out of the cast page, nor let them into admin.
 
-This is the trap the route reshuffle introduced: `/` used to be the operator
-landing page and is now the public sender page.
+`/` is the guest page and `/admin.html` the operator one, so the two exemption
+lists must not be confused: widen the wrong one and either guests are locked out
+or the admin UI is open to the LAN.
 """
 import os, sys, urllib.error, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

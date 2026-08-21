@@ -18,14 +18,14 @@
 //    it stays visible; the z-index below is only the fallback for browsers
 //    without popover support.
 //  * **Pages that rebuild themselves.** SPAs replace whole subtrees, taking the
-//    overlay with them. A MutationObserver puts it back rather than leaving a
-//    display that silently lost its notice.
+//    overlay with them. A MutationObserver puts it back, so a display cannot end
+//    up silently missing its notice.
 //  * **The network, which is not ours.** Nothing here fetches anything. Chromium's
-//    Local Network Access refuses a request from a public origin to 127.0.0.1
-//    without a permission click, and a kiosk has nobody to click it (measured on
-//    Chrome 151 with a fresh profile: `fetch` and `<img>` both fail). So the QR
-//    arrives as a module matrix and is drawn as inline SVG -- which an `img-src`
-//    CSP cannot refuse either -- and an image arrives as a `data:` URI.
+//    Local Network Access refuses a request from a public origin to 127.0.0.1 --
+//    `fetch` and `<img>` alike -- without a permission click, and a kiosk has
+//    nobody to click it. So the QR arrives as a module matrix and is drawn as
+//    inline SVG, which an `img-src` CSP cannot refuse either, and an image
+//    arrives as a `data:` URI.
 //
 // Like `autoscroll.js` this file is both served over HTTP and `include_str!`-ed
 // into the binary, and it must stay idempotent: it is evaluated again after

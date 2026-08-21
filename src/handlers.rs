@@ -287,9 +287,9 @@ pub async fn delete_asset(
         let filepath = state.args.assets_dir.join(&asset.local_path);
         let _ = tokio::fs::remove_file(filepath).await;
 
-        // Explicit, so this also cleans up databases created before `foreign_keys`
-        // was enabled (ON DELETE CASCADE was a no-op then and left orphaned rows
-        // that rendered as "no content").
+        // Explicit, so a database whose rows predate `foreign_keys` being enabled is
+        // cleaned up too. Without it those rows survive as playlist items with no
+        // asset, which render as "no content".
         if let Err(e) = sqlx::query("DELETE FROM playlist_items WHERE asset_id = ?")
             .bind(id)
             .execute(&state.pool)
@@ -732,8 +732,8 @@ pub async fn set_override(
     }
 
     // Only override_signal: the browser loop watches it both while playing the
-    // playlist and while an override is up. Also poking skip_signal used to leave an
-    // unconsumed permit that silently cut the next playlist item short.
+    // playlist and while an override is up. Poking skip_signal as well would leave
+    // an unconsumed permit that cuts the next playlist item short.
     state.override_signal.notify_one();
 
     (StatusCode::OK, Json(OverrideResponse { active: true })).into_response()

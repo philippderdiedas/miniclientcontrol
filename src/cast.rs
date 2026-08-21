@@ -21,13 +21,11 @@
 //! * The per-item `tokio::select!` watches `override_signal`, so a cast starts
 //!   immediately instead of waiting out the current item's duration.
 //!
-//! ## Differences from picklecast, deliberately
+//! ## The protocol carries no addressing
 //!
-//! There are exactly two peers, so the protocol carries no room names and no
-//! peer addressing — picklecast needed both because public WebTorrent trackers
-//! could deliver duplicate peers, which is also why its display had to ignore a
-//! second offer. With one relay and a server-enforced single sender, none of
-//! that applies.
+//! There are exactly two peers, so a frame needs neither a room name nor a peer
+//! id, and the relay forwards SDP and ICE without interpreting them. Not parsing
+//! them is also what keeps the server from being able to break them.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
