@@ -640,6 +640,40 @@ Two traps found on the way, worth not rediscovering:
 `examples/certtest.rs` is the reproduction: it takes a URL and a mode (`none`,
 `explicit`, `adopt`, `adopt-explicit`, `wait`).
 
+### When a receiver cannot keep up
+
+Two knobs, and they belong to different people. `degradationPreference` on the
+sender decides *which way* quality gives -- resolution or framerate -- and that is
+the caster's call, because it follows from the content. The frame-size ceiling is
+the receiver's, reported over the `limits` channel and capped by the operator with
+`--cast-max-edge`.
+
+This is not a bespoke design: it is the same primitive every video platform
+exposes (Discord's "prioritise quality / framerate" sets exactly this). What the
+platforms have and a peer-to-peer link cannot is an SFU with simulcast, where the
+receiver picks a layer from several the sender emits. There is no standard
+receiver-driven resolution signal in plain WebRTC, which is why the `limits`
+message exists at all.
+
+Measured on a Raspberry Pi 2 receiving 1920x1080: it held the resolution and let
+the framerate fall to 5 fps, dropped roughly half the frames, drove the load
+average to 5.6 on four cores, and after two minutes the *sender* declared the
+connection dead -- ICE never failed, nothing crashed, no memory ran out. That is
+`maintain-resolution`, Chrome's default for screen content, working as specified.
+Packet loss and jitter are the only feedback WebRTC carries, and they were not
+enough to converge, because the bottleneck was decode rather than the network.
+
+**A lever deliberately not pulled:** that Pi has a hardware H.264 decoder
+(`/dev/video10`, `vcgencmd codec_enabled H264`) and no hardware VP8 or VP9, while
+Chrome tends to pick VP8 for screen shares. Preferring H.264 through
+`setCodecPreferences()` on the display might move decoding into hardware
+entirely. It was left alone for two reasons: it is unverified whether Chromium
+wires up V4L2 decode for WebRTC at all (the wrapper sets no decode flags, and
+`chrome://gpu` times out on that hardware), and one slow device is not enough
+evidence to bend a codec default around. Revisit if a second receiver shows the
+same pattern -- cheap display hardware generally has H.264 in silicon and not VP9,
+so it may yet turn out to be a general win rather than a Pi special case.
+
 ## Database
 
 SQLite, path from `--database-path` (default `miniclient.db`, gitignored).
