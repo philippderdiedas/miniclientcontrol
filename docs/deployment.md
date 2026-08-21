@@ -38,6 +38,10 @@ ssh device 'cd ~/miniclientcontrol \
   && mv miniclientcontrol.new miniclientcontrol'
 ```
 
+The kiosk this was developed against is `pi@10.124.11.124`, and it reports
+`uname -m` = `armv7l` — so `armv7-unknown-linux-gnueabihf` is the target that
+actually ships, not the `arm-unknown-linux-gnueabihf` also configured in the tree.
+
 Stopping the service first works too and is simpler. The browser is **not** killed
 when the controller stops — a deploy should not blank the screen — so the new
 process finds the CDP port answering and reattaches to the browser that is already
@@ -80,6 +84,21 @@ Make sure the service's working files are writable by the user it runs as. A
 directory left owned by root means no database and no certificate, and the failure
 reads like something else entirely.
 
+### On Wayland
+
+A sway kiosk needs `WAYLAND_DISPLAY=wayland-1` and
+`--chromium-arg=--ozone-platform=wayland` in place of `DISPLAY`. A systemd *user*
+service inherits neither from the compositor, **even when sway's own config is
+what starts it** — `exec systemctl --user start ...` does not carry the
+compositor's environment across.
+
+Without them the failure is close to invisible. Chromium launches, finds no
+display server, and exits before it opens the debugging port; the supervisor
+relaunches it every ten seconds forever. There is no `DevToolsActivePort` file,
+nothing listening on the CDP port, and on an image where journald stores nothing,
+no log either. Give the unit `StandardOutput=append:<path>` before trying to
+diagnose it.
+
 ### Restarting the whole session
 
 On a device where the session is started by an autologin `/bin/login -f`, use
@@ -93,9 +112,10 @@ cgroup, orphans included, and autologin brings everything back. Find the id with
 
 ## The browser
 
-The controller finds Chrome or Chromium itself (`CHROME`, then
-`google-chrome-stable`, `chromium`, `chromium-browser`, and the usual paths) and
-starts it in kiosk mode with the flags it needs. `--chromium` pins the binary.
+The controller finds Chrome or Chromium itself through
+`chromiumoxide::detection` (`CHROME`, then `google-chrome-stable`, `chromium`,
+`chromium-browser`, and the usual paths) and starts it in kiosk mode with the
+flags it needs. `--chromium` pins the binary.
 
 If something is **already listening** on the CDP port, the controller connects to
 that instead of starting its own — so an existing deployment that launches

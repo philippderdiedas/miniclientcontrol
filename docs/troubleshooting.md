@@ -56,9 +56,10 @@ the receiver falling behind, and the answer is `--cast-max-edge`, not a bug. See
 [raspberry-pi.md](raspberry-pi.md) for what the numbers look like.
 
 **The audio panel does not appear.**
-It only exists while a cast is running, and only for the address that is casting.
-Beyond that, no `pactl` or no sound server means the backend reports itself
-unavailable and the panel stays hidden on purpose.
+On the *guest* page it only exists while a cast is running, and only for the
+address that is casting. The operator's copy on the admin page needs no cast. If
+neither shows up, the device has no `pactl` or no sound server, the backend
+reports itself unavailable, and the panel stays hidden on purpose.
 
 **`avahi-publish` errors every few minutes.**
 `avahi-utils` is not installed and `--public-url` names a `.local` host that is not

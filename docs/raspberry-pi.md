@@ -92,6 +92,12 @@ be a general win rather than a Pi special case.
 have — or simply set the hostname to the name you want, and then the daemon
 publishes it for free and the controller correctly does not try to.
 
+Resolving a `.local` name needs `nss-mdns` wired into `/etc/nsswitch.conf`, and it
+needs it **on the guest's machine as well as on this one** — publishing and
+resolving are separate halves. Startup resolves the configured name once and warns
+if it fails, which is the cheapest place to find out. A guest whose machine cannot
+resolve `.local` at all needs the LAN address instead.
+
 A device that publishes with Avahi but resolves through systemd-resolved may fail
 to look up its **own** published names. `avahi-resolve` finds them, `curl` on the
 same box does not, and a guest on the LAN does. Only the last one matters, but the
