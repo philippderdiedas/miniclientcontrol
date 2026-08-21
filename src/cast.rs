@@ -172,6 +172,21 @@ impl CastSession {
         self.sender.is_some() || self.live_reservation().is_some()
     }
 
+    /// Taken by somebody *other* than this address.
+    ///
+    /// The distinction matters for what a guest is told. Holding a reservation
+    /// and then being informed that "someone else is casting" is a dead end the
+    /// guest cannot act on -- and it is their own reservation. The claim endpoint
+    /// already lets the same address re-claim, so the answer here has to agree
+    /// with that.
+    fn taken_by_other(&self, addr: IpAddr) -> bool {
+        let sender_elsewhere = self.sender.is_some() && self.sender_addr != Some(addr);
+        let reserved_elsewhere = self
+            .live_reservation()
+            .is_some_and(|held| held.addr != addr);
+        sender_elsewhere || reserved_elsewhere
+    }
+
     fn live_reservation(&self) -> Option<&Reservation> {
         self.reservation
             .as_ref()
@@ -960,7 +975,10 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// Kept separate from `/api/cast/state`, which stays behind operator auth: the
 /// sender has no business learning who else is casting or from which address.
-pub async fn cast_info(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn cast_info(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
     let sender_url = sender_url(&state);
     let settings = state.settings.read().await;
     let session = state.cast.lock().await;
@@ -968,7 +986,7 @@ pub async fn cast_info(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "enabled": settings.cast_enabled,
         "auth": settings.cast_auth,
-        "busy": session.is_taken(),
+        "busy": session.taken_by_other(peer.ip()),
         // What the display can show. The sender needs this *before* it calls
         // getDisplayMedia, and at that moment it has no socket yet.
         "display_limits": session.display_limits,
