@@ -11,6 +11,12 @@ It provides:
 - screen casting: anyone on the LAN can share their screen or camera to the
   display over WebRTC, and the playlist resumes automatically afterwards.
 
+## Documentation
+
+Longer-form documentation lives in [`docs/`](docs/): what it does, how it is put
+together, the cast subsystem in detail, deployment, Raspberry Pi quirks and
+troubleshooting.
+
 ## Tech Stack
 
 - Rust + Tokio

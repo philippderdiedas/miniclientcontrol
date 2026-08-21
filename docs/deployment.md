@@ -1,0 +1,157 @@
+# Deployment
+
+## Building
+
+```bash
+cargo build --release
+```
+
+For a 32-bit ARM device (Raspberry Pi 2/3/4 on a 32-bit image), cross-compile with
+[`cross`](https://github.com/cross-rs/cross), which needs a running Docker daemon:
+
+```bash
+cross build --release --target armv7-unknown-linux-gnueabihf --target-dir target/cross-armv7
+```
+
+Give each cross target its **own** `--target-dir`. Host proc-macro shared objects
+land in the shared `target/release/build/`, and the per-target images carry
+different glibc versions, so reusing one directory across two targets fails with
+`symbol getrandom, version GLIBC_2.25 not defined`.
+
+The result links against nothing but glibc, libgcc and libm — SQLite and TLS are
+statically linked — so it can be copied to any glibc Linux of the same
+architecture. Building against an older glibc and running on a newer one is the
+supported direction.
+
+There is no linting configuration. `cargo build` is the gate for the Rust side;
+`tests/cast/` holds stdlib-only Python end-to-end tests, not wired into any CI.
+
+## Updating a device that is already running
+
+The binary is being executed, so writing over it in place gets `ETXTBSY`. Copy
+beside it and rename over the top, and keep the previous one for a rollback:
+
+```bash
+scp <binary> device:~/miniclientcontrol/miniclientcontrol.new
+ssh device 'cd ~/miniclientcontrol \
+  && cp -a miniclientcontrol miniclientcontrol.bak \
+  && mv miniclientcontrol.new miniclientcontrol'
+```
+
+Stopping the service first works too and is simpler. The browser is **not** killed
+when the controller stops — a deploy should not blank the screen — so the new
+process finds the CDP port answering and reattaches to the browser that is already
+up.
+
+Beware `pkill -f` over SSH: a pattern like `miniclientcontrol/miniclientcontrol`
+matches the remote shell running the command and kills it mid-script, so the rest
+never runs and the output is silently empty. Match on the truncated process name
+or find the process by the port it holds.
+
+## Service files
+
+The controller starts Chromium itself, so its unit needs the display in its
+environment — a unit that only spoke CDP did not:
+
+```ini
+[Unit]
+Description=miniclientcontrol
+After=graphical-session.target
+
+[Service]
+Environment=DISPLAY=:0
+Environment=RUST_LOG=info
+ExecStart=/home/pi/miniclientcontrol/miniclientcontrol \
+    --database-path /home/pi/miniclientcontrol/miniclient.db \
+    --assets-dir /home/pi/miniclientcontrol/assets \
+    --public-url mdns
+Restart=always
+RestartSec=10
+```
+
+Started from the session, typically by the window manager:
+
+```
+exec --no-startup-id systemctl --user import-environment DISPLAY XAUTHORITY
+exec --no-startup-id systemctl --user start miniclientcontrol.service
+```
+
+Make sure the service's working files are writable by the user it runs as. A
+directory left owned by root means no database and no certificate, and the failure
+reads like something else entirely.
+
+### Restarting the whole session
+
+On a device where the session is started by an autologin `/bin/login -f`, use
+`sudo loginctl terminate-session <id>` rather than restarting the getty
+*service*. The session lives in a logind scope that restarting the service leaves
+alone: the controller and the browser survive as orphans re-parented to PID 1, the
+old controller keeps the port, and the fresh one dies on the bind — leaving the
+display running an already-deleted binary. Terminating the session kills the whole
+cgroup, orphans included, and autologin brings everything back. Find the id with
+`loginctl list-sessions`.
+
+## The browser
+
+The controller finds Chrome or Chromium itself (`CHROME`, then
+`google-chrome-stable`, `chromium`, `chromium-browser`, and the usual paths) and
+starts it in kiosk mode with the flags it needs. `--chromium` pins the binary.
+
+If something is **already listening** on the CDP port, the controller connects to
+that instead of starting its own — so an existing deployment that launches
+Chromium from a session file keeps working untouched. `--no-launch-browser`
+disables starting one entirely.
+
+It also restarts the browser if it exits, which the connect-only arrangement could
+not do: the loop just sat there reconnecting.
+
+## Two displays on one machine
+
+Run one controller per screen. Everything that can collide must differ:
+
+```bash
+miniclientcontrol --port 3000 --cdp-url http://127.0.0.1:9222 \
+    --chromium-class chrome-1 --database-path .../one.db --assets-dir .../one
+miniclientcontrol --port 3001 --cdp-url http://127.0.0.1:9223 \
+    --chromium-class chrome-2 --database-path .../two.db --assets-dir .../two
+```
+
+`--chromium-user-data-dir` and `--chromium-class` default to values derived from
+the CDP port, so they are already distinct, and the TLS port takes the next free
+one by itself. Only the HTTP port, the database and the assets directory have to
+be spelled out.
+
+Sharing a profile directory is the nasty one: a second Chromium started on a
+profile that is already in use hands its URL to the running instance and exits,
+taking its debugging port with it — so the second display silently never appears
+and nothing looks wrong except that it is not there.
+
+### Placing the windows
+
+That is the window manager's job. `--chromium-class` sets `WM_CLASS`, which i3
+matches on:
+
+```
+assign [class="chrome-1"] 1
+assign [class="chrome-2"] 2
+workspace 1 output HDMI-1
+workspace 2 output HDMI-3
+```
+
+The last two lines matter. `assign` only chooses a workspace; without pinning
+workspaces to outputs, i3 decides which screen a workspace lands on, and not
+reliably the same way after a restart.
+
+## Runtime settings versus flags
+
+`cast_enabled`, `cast_auth`, `cast_code`, the overlay and the operator credentials
+live in the database and are edited from the admin UI. A flag actually passed on
+the command line **pins** that setting: the API answers `409` naming the flag and
+the UI renders the control as locked.
+
+Besides deferring to whoever wrote the unit file, that is the recovery path — an
+operator who enables authentication and forgets the password can always get back
+in by passing `--basic-auth-user` and `--basic-auth-password`.
+
+Passwords are stored as PBKDF2 hashes, so a copy of the database is not a copy of
+the credentials.

@@ -4,6 +4,9 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
+Prose documentation for humans lives in `docs/`. This file is the other kind: the
+invariants and traps that must not be broken, kept terse on purpose.
+
 `miniclientcontrol` is a single-binary digital-signage controller that runs **on the
 client/display device itself** (typically a Raspberry Pi — note the
 `arm-unknown-linux-gnueabihf` target in `target/`). It does two things at once:
