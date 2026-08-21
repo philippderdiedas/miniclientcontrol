@@ -76,6 +76,7 @@
     [hidden] { display: none !important; }
   </style>
   <script src="/cast.js"></script>
+  <script src="/audio.js"></script>
 </head>
 <body>
   <h1>Bildschirm übertragen</h1>
@@ -109,18 +110,8 @@
     </div>
 
     <p class="status" id="status"></p>
-    <div id="audioPanel" hidden>
-      <hr />
-      <h2>Ton im Raum</h2>
-      <div class="audiorow" id="sinkRow">
-        <label for="sinkSelect">Ausgang</label>
-        <select id="sinkSelect"></select>
-        <button id="sinkMute" type="button" title="Ausgang stumm schalten">🔊</button>
-        <input type="range" id="sinkVolume" min="0" max="100" />
-      </div>
-      <div id="streams"></div>
-      <p class="muted" id="audioHint"></p>
-    </div>
+    <hr id="audioRule" hidden />
+    <div id="audioPanel" hidden></div>
 
     <p class="warn" id="audioWarning" hidden>
       Kein Ton übertragen — Browser oder Betriebssystem haben keinen Audiokanal
@@ -447,117 +438,27 @@
 
     // --- venue audio ----------------------------------------------------
 
-    // Only reachable while this device is the connected sender; the server
-    // enforces that, and a 403 simply hides the panel again.
-    let audioTimer = null;
-    let audioBusy = false;
-
-    async function audioFetch(body) {
-      const res = await fetch('/api/cast/audio', body ? {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      } : {});
-      if (!res.ok) return null;
-      return res.json();
-    }
-
-    function renderAudio(state) {
-      const panel = el('audioPanel');
-      if (!state || !state.available) {
-        panel.hidden = true;
-        return;
-      }
-      panel.hidden = false;
-
-      // Skip redrawing while a slider is being dragged, or the poll yanks it back.
-      if (audioBusy) return;
-
-      const select = el('sinkSelect');
-      const current = state.sinks.find((s) => s.is_default);
-      select.replaceChildren();
-      for (const sink of state.sinks) {
-        const option = document.createElement('option');
-        option.value = sink.name;
-        option.textContent = sink.description;
-        select.appendChild(option);
-      }
-      if (current) {
-        select.value = current.name;
-        el('sinkVolume').value = current.volume;
-        el('sinkMute').textContent = current.muted ? '🔇' : '🔊';
-      }
-      el('sinkRow').hidden = state.sinks.length === 0;
-
-      const box = el('streams');
-      box.replaceChildren();
-      for (const stream of state.streams) {
-        const row = document.createElement('div');
-        row.className = 'audiorow';
-
-        const name = document.createElement('span');
-        name.className = 'name' + (stream.is_cast ? ' cast' : '');
-        name.textContent = stream.is_cast ? 'Deine Übertragung' : stream.label;
-        name.title = stream.label;
-
-        const mute = document.createElement('button');
-        mute.type = 'button';
-        mute.textContent = stream.muted ? '🔇' : '🔊';
-        mute.addEventListener('click', async () => {
-          renderAudio(await audioFetch({
-            target: 'stream', index: stream.index, action: 'mute', value: !stream.muted,
-          }));
-        });
-
-        const slider = document.createElement('input');
-        slider.type = 'range';
-        slider.min = 0; slider.max = 100; slider.value = stream.volume;
-        slider.addEventListener('pointerdown', () => { audioBusy = true; });
-        slider.addEventListener('pointerup', () => { audioBusy = false; });
-        slider.addEventListener('change', async () => {
-          audioBusy = false;
-          renderAudio(await audioFetch({
-            target: 'stream', index: stream.index, action: 'volume', value: Number(slider.value),
-          }));
-        });
-
-        row.append(name, mute, slider);
-        box.appendChild(row);
-      }
-
-      el('audioHint').textContent = state.streams.length
-        ? '' : 'Zurzeit gibt niemand Ton aus.';
-    }
-
-    el('sinkVolume').addEventListener('pointerdown', () => { audioBusy = true; });
-    el('sinkVolume').addEventListener('pointerup', () => { audioBusy = false; });
-    el('sinkVolume').addEventListener('change', async () => {
-      audioBusy = false;
-      renderAudio(await audioFetch({
-        target: 'sink', action: 'volume', value: Number(el('sinkVolume').value),
-      }));
-    });
-    el('sinkMute').addEventListener('click', async () => {
-      const muted = el('sinkMute').textContent === '🔇';
-      renderAudio(await audioFetch({ target: 'sink', action: 'mute', value: !muted }));
-    });
-    el('sinkSelect').addEventListener('change', async () => {
-      renderAudio(await audioFetch({
-        target: 'sink', action: 'select', name: el('sinkSelect').value,
-      }));
+    // Shared with the admin page (web/audio.js). Only reachable while this device
+    // is the connected sender; the server enforces that, and a 403 simply leaves
+    // the panel hidden.
+    const audio = AudioPanel.mount({
+      root: el('audioPanel'),
+      endpoint: '/api/cast/audio',
+      heading: 'Ton im Raum',
+      castLabel: 'Deine Übertragung',
     });
 
     function startAudio() {
-      stopAudio();
-      const tick = async () => renderAudio(await audioFetch(null));
-      tick();
-      audioTimer = setInterval(tick, 3000);
+      el('audioRule').hidden = false;
+      audio.start();
     }
 
     function stopAudio() {
-      if (audioTimer) { clearInterval(audioTimer); audioTimer = null; }
-      el('audioPanel').hidden = true;
+      audio.stop();
+      el('audioRule').hidden = true;
     }
+
+    // --- buttons ----------------------------------------------------------
 
     el('shareScreen').addEventListener('click', () => share('screen'));
     el('shareCamera').addEventListener('click', () => share('camera'));

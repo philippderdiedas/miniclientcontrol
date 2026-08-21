@@ -25,6 +25,16 @@ async def main():
         check("display is pushed the code", pushed["type"] == "pairing" and len(pushed["code"]) == 4, pushed)
         code = pushed["code"]
 
+        # The operator's view carries it too, and only theirs: somebody helping a
+        # guest by phone is otherwise the one person who cannot see the code.
+        state = http("GET", "/api/cast/state")[1]
+        check("the operator state shows the live code and its remaining time",
+              (state.get("pairing") or {}).get("code") == code
+              and 0 < state["pairing"]["expires_in"] <= 30, state.get("pairing"))
+        check("and the public info still does not",
+              "pairing" not in http("GET", "/api/cast/info")[1],
+              http("GET", "/api/cast/info")[1])
+
         await asyncio.sleep(0.4)
         check("pairing pins the display so the code is visible",
               http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))

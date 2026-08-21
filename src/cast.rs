@@ -209,6 +209,9 @@ pub fn is_cast_public_path(path: &str) -> bool {
             | "/index.html"
             | "/cast.html"
             | "/cast.js"
+            // The guest page's audio panel: shared with the admin page, so the
+            // file has to be reachable without credentials too.
+            | "/audio.js"
             | "/cast_display.html"
             | "/api/cast/ws"
             | "/api/cast/pair"
@@ -898,6 +901,12 @@ async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) {
 // ------------------------------------------------------------------- http
 
 #[derive(Serialize)]
+pub struct PairingView {
+    code: String,
+    expires_in: u64,
+}
+
+#[derive(Serialize)]
 pub struct CastStateResponse {
     /// Effective switch: the stored one, forced off by `--disable-cast`.
     enabled: bool,
@@ -915,6 +924,13 @@ pub struct CastStateResponse {
     started_at: Option<String>,
     tls_port: u16,
     sender_url: String,
+    /// The pairing code currently on the display, with the seconds it has left.
+    ///
+    /// Only ever here, never on `/api/cast/info`: this is the operator's view. It
+    /// exists because a pairing code is created on request and lives 30 seconds,
+    /// so without it whoever is helping a guest by phone is the one person who
+    /// cannot see it.
+    pairing: Option<PairingView>,
     /// What the display said it can show. Visible here because "the cast is
     /// black" is otherwise very hard to tell from "the cast is not running".
     display_limits: Option<DisplayLimits>,
@@ -937,6 +953,13 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
         tls_port: state.cast_tls_port,
         sender_url,
         display_limits: session.display_limits,
+        pairing: session.pairing.as_ref().and_then(|pairing| {
+            let remaining = pairing.expires_at.saturating_duration_since(Instant::now());
+            (!remaining.is_zero()).then(|| PairingView {
+                code: pairing.code.clone(),
+                expires_in: remaining.as_secs(),
+            })
+        }),
     })
 }
 
@@ -1059,7 +1082,7 @@ async fn caster_only(state: &AppState, peer: IpAddr) -> bool {
 }
 
 /// Processes whose audio counts as "the cast's own".
-async fn cast_process_ids(state: &AppState) -> Vec<u32> {
+pub async fn cast_process_ids(state: &AppState) -> Vec<u32> {
     let Some(pid) = *state.browser_pid.lock().await else {
         // Someone else started the browser, so we cannot claim a subtree. The
         // panel still works; it just cannot mark one stream as the caster's.
@@ -1081,16 +1104,12 @@ pub async fn read_audio(
     Json(state.audio.state(&pids).await).into_response()
 }
 
-pub async fn control_audio(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Json(command): Json<crate::audio::AudioCommand>,
-) -> Response {
-    if !caster_only(&state, peer.ip()).await {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "Kein aktiver Cast."}))).into_response();
-    }
-
-    let pids = cast_process_ids(&state).await;
+/// The part both audio routes share, after each has decided who is allowed in.
+///
+/// One body on purpose: the guest's panel and the operator's are the same
+/// controls, and two copies would drift the moment one gains a feature.
+pub async fn apply_audio(state: &AppState, command: crate::audio::AudioCommand) -> Response {
+    let pids = cast_process_ids(state).await;
     // Needed for a device switch, which has to drag the cast's own stream along
     // or the audio keeps coming out of the old output.
     let cast_stream = state
@@ -1110,8 +1129,20 @@ pub async fn control_audio(
             .into_response();
     }
 
-    let pids = cast_process_ids(&state).await;
+    let pids = cast_process_ids(state).await;
     Json(state.audio.state(&pids).await).into_response()
+}
+
+pub async fn control_audio(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(command): Json<crate::audio::AudioCommand>,
+) -> Response {
+    if !caster_only(&state, peer.ip()).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Kein aktiver Cast."}))).into_response();
+    }
+
+    apply_audio(&state, command).await
 }
 
 /// Operator override: cut the cast short and put the playlist back.

@@ -134,6 +134,19 @@ async def main():
                 "(() => { const v = document.getElementById('video');"
                 " return Math.max(v.videoWidth, v.videoHeight); })()") <= limits.get("max_edge", 0))
 
+            # The guest's audio panel is the same code as the operator's
+            # (web/audio.js). Mounting it on this page once broke the share
+            # buttons, so it is worth one assertion.
+            available = http("GET", "/api/cast/audio", port=HTTP)[1].get("available")
+            panel_shown = await sender.eval(
+                "(() => !document.getElementById('audioPanel').hidden)()")
+            check("the shared audio panel follows what the device can do",
+                  bool(panel_shown) == bool(available), (panel_shown, available))
+            check("and the share buttons still exist after mounting it",
+                  await sender.eval(
+                      "(() => !!document.getElementById('shareScreen')"
+                      " && !!document.getElementById('stopShare'))()") is True)
+
             print("\n[11] stopping the cast returns the display to the playlist")
             await sender.eval("document.getElementById('stopShare').click()")
             back = wait_for(lambda: http("GET", "/api/override", port=HTTP)[1]["active"] is False, 20)

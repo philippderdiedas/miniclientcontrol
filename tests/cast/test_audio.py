@@ -8,6 +8,48 @@ def audio(method="GET", body=None):
     return http(method, "/api/cast/audio", body)
 
 async def main():
+    print("\n[30b] the operator has their own way in")
+    with Server():
+        status, state = http("GET", "/api/audio")
+        check("reachable with no cast running, unlike the guest route",
+              status == 200 and "available" in state, (status, state))
+        check("while the guest route still refuses",
+              http("GET", "/api/cast/audio")[0] == 403)
+
+        # Not in is_cast_public_path, so credentials decide -- and a guest on the
+        # LAN must not be able to turn the room up at three in the morning. The
+        # request has to go over TLS: the plain listener is loopback-only.
+        import ssl, subprocess
+        from test_cast import TLS
+        lan = subprocess.run(["python3", "-c",
+            "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+            "s.connect(('10.254.254.254',1));print(s.getsockname()[0])"],
+            capture_output=True, text=True).stdout.strip()
+        http("PUT", "/api/settings",
+             {"auth_enabled": True, "auth_user": "op", "auth_password": "geheim!!"})
+        try:
+            with urllib.request.urlopen(f"https://{lan}:{TLS}/api/audio", timeout=5,
+                                        context=ssl._create_unverified_context()) as res:
+                code = res.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        check("a remote request without credentials is refused", code == 401, code)
+        # Loopback is exempt only for the *display* paths, and this is not one:
+        # an operator route behaves like /api/settings even on the device itself.
+        status, _ = http("GET", "/api/audio")
+        check("and loopback is not a way around the credentials either",
+              status == 401, status)
+
+        import base64
+        token = base64.b64encode(b"op:geheim!!").decode()
+        req = urllib.request.Request(f"http://127.0.0.1:{HTTP}/api/audio",
+                                     headers={"Authorization": "Basic " + token})
+        with urllib.request.urlopen(req, timeout=5) as res:
+            check("with the credentials it answers", res.status == 200, res.status)
+
+        http("PUT", "/api/settings", {"auth_enabled": False,
+                                      "auth_user": "op", "auth_password": "geheim!!"})
+
     print("\n[31] the audio panel belongs to the active caster")
     with Server():
         status, body = audio()

@@ -271,6 +271,29 @@ PDFs are a special case: they are rendered by `web/pdf_viewer.html` (pdf.js), wh
 drives its own scrolling from query parameters. `browser.rs` detects this with
 `is_internal_pdf_viewer_url` and skips `start_scrolling`/`stop_scrolling` for those.
 
+### Room audio, two doors (`web/audio.js`)
+
+The same panel serves the guest and the operator, from one implementation, over
+two endpoints that differ only in who is let in:
+
+- `/api/cast/audio` — the guest's. Guarded by `caster_only` (the connected
+  sender's address, nobody else) and listed in `is_cast_public_path`, because
+  somebody sharing a screen has to reach it without operator credentials.
+- `/api/audio` — the operator's. Absent from that list, so basic auth decides,
+  and it works whether or not anybody is casting. **Loopback is not a way around
+  it**: the loopback exemption in `basic_auth_middleware` covers `is_display_path`
+  only, so the admin page asks for credentials even on the device itself, exactly
+  like `/api/settings`.
+
+Both end in `cast::apply_audio`, so the guest's knobs and the operator's cannot
+drift apart. The panel hides itself when the device reports no sound server
+(`available: false`), and the admin card follows the panel rather than
+second-guessing it — a Pi image without `pactl` simply shows no card.
+
+Widening `caster_only` to admit the operator was the tempting shortcut and is
+wrong: that route is exempt from basic auth, so "also allow anyone else" would let
+any guest on the LAN turn the room up at three in the morning.
+
 ### The overlay (`web/overlay.js`)
 
 Badges the operator can put on top of whatever is playing — text, an uploaded
@@ -537,7 +560,15 @@ needs a C toolchain that the armv7 `cross` image does not have.
 
 `cast_auth` picks how a guest proves themselves: `none` (trusted LAN), `code`
 (fixed PIN, known out of band), or `pairing` (fresh code shown on the display for
-30s, single-use). Wrong codes are compared in constant time and lock the address
+30s, single-use).
+
+**There is no standing pairing code.** It is minted by `POST /api/cast/pair` when
+a guest asks, lives `PAIRING_TTL`, and is single-use — nothing rotates in the
+background, so there is nothing permanent to display. The `code` mode's PIN is the
+standing one, and the admin UI already edits it. While a pairing code *is* alive,
+`/api/cast/state` carries it with its remaining seconds so the admin card can show
+it: the person helping a guest by phone was otherwise the only one who could not
+see what the display was showing. `/api/cast/info` still never carries it. Wrong codes are compared in constant time and lock the address
 out after 5 tries.
 
 **Settings are runtime state (see `src/settings.rs`), and the command line
@@ -677,6 +708,7 @@ playlist, so one bad row would blank the screen.
 | DELETE | `/api/cast/session` | Operator: end the cast now |
 | POST | `/api/cast/pair` | `--cast-auth=pairing` only; shows a code on the display |
 | GET/PUT | `/api/settings` | Operator: runtime settings + which flags pinned them |
+| GET/POST | `/api/audio` | Operator: room audio, whether or not a cast runs |
 | GET | `/api/overlay` | The layers the display runtime wants: global + the item on screen |
 | POST/DELETE | `/api/cast/claim` | Guest: reserve the session before sharing |
 

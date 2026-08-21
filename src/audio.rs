@@ -346,3 +346,35 @@ pub fn descendants(root: u32) -> Vec<u32> {
     }
     all
 }
+
+// -------------------------------------------------------------------- http
+
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+
+use crate::models::AppState;
+
+/// The operator's own way in.
+///
+/// Deliberately *not* `/api/cast/audio`: that one is guarded by `caster_only` and
+/// exempt from basic auth, because a guest has to reach it while casting. This
+/// route is absent from `is_cast_public_path`, so the operator's credentials (or
+/// loopback) decide instead -- and the operator can turn the room down whether or
+/// not anybody is casting.
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/api/audio", get(read).post(control))
+}
+
+pub async fn read(State(state): State<AppState>) -> Response {
+    let pids = crate::cast::cast_process_ids(&state).await;
+    Json(state.audio.state(&pids).await).into_response()
+}
+
+pub async fn control(
+    State(state): State<AppState>,
+    Json(command): Json<AudioCommand>,
+) -> Response {
+    crate::cast::apply_audio(&state, command).await
+}

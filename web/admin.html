@@ -11,6 +11,17 @@
     .card { border: 1px solid #d8d8d8; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
     /* Deliberately not a .card: this row saves across two of them. */
     .row { display: flex; align-items: center; gap: .8rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    /* Same rows as the guest page: one panel implementation, one look. */
+    .audiorow { display: flex; align-items: center; gap: .6rem; margin-bottom: .5rem; flex-wrap: wrap; }
+    .audiorow label, .audiorow .name {
+      min-width: 8rem; font-size: .9rem; color: #444;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .audiorow .name.cast { font-weight: 700; color: #0b6b3a; }
+    .audiorow input[type=range] { flex: 1; min-width: 8rem; }
+    .audiorow select { flex: 1; min-width: 8rem; font: inherit; padding: .3rem; }
+    .audiorow button { padding: .35rem .6rem; }
+    h2 { font-size: 1.1rem; margin: 0 0 .6rem; }
     a.button {
       display: inline-block; padding: .6rem 1rem; border: 1px solid #333; border-radius: 6px;
       text-decoration: none; color: #111; margin-right: .5rem;
@@ -56,6 +67,13 @@
   <div class="card" id="castCard" hidden>
     <p class="status" id="castStatus">Übertragung: –</p>
     <p class="muted" id="castHint"></p>
+    <!-- A pairing code is created on request and lives 30 seconds, so this line
+         only exists while one does. Without it the person helping a guest by
+         phone is the one who cannot see the code on the display. -->
+    <p id="castPairing" hidden>
+      Code auf dem Display: <strong id="castPairingCode"></strong>
+      <span class="muted" id="castPairingLeft"></span>
+    </p>
     <button id="castStop" hidden>Übertragung beenden</button>
 
     <hr />
@@ -83,6 +101,14 @@
         <span class="lock" id="lockCode" hidden>per Kommandozeile festgelegt</span>
       </p>
     </div>
+  </div>
+
+  <div class="card" id="audioCard" hidden>
+    <p class="status">Ton im Raum</p>
+    <p class="muted">
+      Gilt für dieses Gerät, unabhängig davon, ob gerade jemand überträgt.
+    </p>
+    <div id="audioPanel"></div>
   </div>
 
   <div class="card" id="authCard">
@@ -220,6 +246,7 @@
   </div>
 
 
+  <script src="/audio.js"></script>
   <script>
     // Same polling contract as the playlist page: report what is on screen right now,
     // so the landing page answers the first question an operator has.
@@ -265,6 +292,14 @@
         const cast = await res.json();
         card.hidden = false;
         document.getElementById('castHardOff').hidden = !cast.hard_disabled;
+
+        const pairingRow = document.getElementById('castPairing');
+        pairingRow.hidden = !cast.pairing;
+        if (cast.pairing) {
+          document.getElementById('castPairingCode').textContent = cast.pairing.code;
+          document.getElementById('castPairingLeft').textContent =
+            `— noch ${cast.pairing.expires_in} s`;
+        }
 
         if (!cast.enabled || cast.hard_disabled) {
           status.textContent = cast.hard_disabled
@@ -567,6 +602,21 @@
       } catch (_) {
         ovFeedback('Vorschau nicht möglich.', false);
       }
+    });
+
+    // The panel hides itself when the device has no sound server (no pactl, no
+    // PipeWire), so the card follows it rather than second-guessing.
+    const audio = AudioPanel.mount({
+      root: document.getElementById('audioPanel'),
+      endpoint: '/api/audio',
+      castLabel: 'Übertragung',
+    });
+    audio.start();
+    new MutationObserver(() => {
+      document.getElementById('audioCard').hidden =
+        document.getElementById('audioPanel').hidden;
+    }).observe(document.getElementById('audioPanel'), {
+      attributes: true, attributeFilter: ['hidden'],
     });
 
     for (const input of qrSourceInputs()) input.addEventListener('change', syncQrSource);

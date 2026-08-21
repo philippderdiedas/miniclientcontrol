@@ -253,6 +253,7 @@ async fn main() -> Result<()> {
         )
         .merge(cast::routes())
         .merge(settings::routes())
+        .merge(audio::routes())
         .nest_service("/uploads", serve_dir)
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 
