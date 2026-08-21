@@ -80,6 +80,12 @@ pub struct Overlay {
     /// copy would go quietly wrong on a screen nobody is checking.
     pub qr_source: String,
     pub qr_label: String,
+    /// Take the overlay off the screen while somebody is casting.
+    ///
+    /// The operator's call, not the guest's: the overlay is the venue's own
+    /// statement, so a presenter cannot clear the house message -- but a venue
+    /// that would rather not draw on someone's slides can say so once.
+    pub hide_during_cast: bool,
     pub position: String,
     /// vmin, so one setting reads the same on a 1080p panel and a portrait 4K one.
     pub size: f32,
@@ -123,6 +129,7 @@ impl Default for Overlay {
             qr_text: String::new(),
             qr_source: "text".to_string(),
             qr_label: String::new(),
+            hide_during_cast: false,
             position: "bottom-right".to_string(),
             size: 2.4,
             margin: 3.0,
@@ -596,7 +603,15 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
         let settings = state.settings.read().await;
         (settings.overlay.clone(), settings.cast_enabled)
     };
+    // `is_active` rather than "a sender is connected": during the grace period
+    // after a sender's socket drops the cast page is still on screen, and an
+    // overlay blinking back for those five seconds would look like a fault.
+    let casting = state.cast.lock().await.is_active();
     let mut layers: Vec<serde_json::Value> = Vec::new();
+
+    if casting && overlay.hide_during_cast {
+        return json!({ "locale": "de-DE", "layers": layers });
+    }
 
     if overlay.enabled && !overlay.is_empty() {
         let mut layer = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
@@ -609,7 +624,9 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
                 // Resolved here, not stored: see the note on `qr_source`. Nothing
                 // is drawn when casting is switched off -- advertising a way to
                 // share a screen that refuses every sender is worse than silence.
-                "cast" if cast_enabled => crate::cast::sender_url(state),
+                // Same while one is running: the slot is taken, so whoever scans
+                // it would be turned away.
+                "cast" if cast_enabled && !casting => crate::cast::sender_url(state),
                 "cast" => String::new(),
                 _ => overlay.qr_text.clone(),
             };

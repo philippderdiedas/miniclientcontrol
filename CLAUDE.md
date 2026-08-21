@@ -564,6 +564,21 @@ needs a C toolchain that the armv7 `cross` image does not have.
   bounce the display back to the playlist), 30s for the display to connect back,
   30s TTL on a pairing code.
 
+**Who decides about the overlay during a cast: the operator.** The overlay is the
+venue's own statement, so a guest presenting slides cannot clear it —
+`hide_during_cast` is a setting in the admin UI, default off, and a venue that
+would rather not draw on someone's slides says so once. There is deliberately no
+switch on the sender page.
+
+Independently of that switch, a **cast-sourced QR is dropped while a cast runs**:
+the slot is taken, so whoever scanned it would be turned away. A typed QR (a menu
+URL, say) stays — it still means something. The test drives a real sender socket
+and checks both halves.
+
+The condition is `CastSession::is_active()`, not "a sender is connected": during
+the five-second grace after a sender's socket drops the cast page is still on
+screen, and an overlay blinking back for those seconds would look like a fault.
+
 **A connection code on screen makes the overlay stand down.** The overlay lives in
 the top layer, so it wins over anything the page draws — which means a badge at
 `bottom-center` covers the pairing code rather than the other way round.

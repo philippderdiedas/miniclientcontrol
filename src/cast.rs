@@ -161,7 +161,7 @@ pub struct CastSession {
 }
 
 impl CastSession {
-    fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         self.holding_override || self.sender.is_some()
     }
 

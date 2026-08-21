@@ -8,7 +8,8 @@ shadow root back out.
 import asyncio, json, os, shutil, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cdp
-from test_cast import HTTP as CAST_HTTP, Server, check, failures, http
+import wsclient
+from test_cast import HTTP as CAST_HTTP, Server, check, failures, http, ws
 
 SP = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(SP, "..", "..", "target", "debug", "miniclientcontrol")
@@ -249,6 +250,38 @@ async def settings_flow():
               body["overlay"]["qr_source"] == "text", body)
 
         # Back to a plain overlay, so the restart case below checks what it did.
+        put({"enabled": True, "text": "Kaffee 1 Euro", "qr_source": "text",
+             "qr_text": "https://example.invalid/menu", "qr_label": "Karte"})
+
+        print("\n[41d] during a cast: the operator decides, the guest does not")
+        put({"enabled": True, "text": "Werkstatt schließt 16 Uhr",
+             "qr_source": "cast", "qr_label": "Teilen", "hide_during_cast": False})
+
+        dr, dw = await ws("display")
+        await wsclient.recv_json(dr)
+        sr, sw = await ws("sender")
+        await wsclient.recv_json(sr)
+        await asyncio.sleep(0.6)
+        check("a cast is running", http("GET", "/api/cast/state")[1]["active"] is True)
+
+        layers = http("GET", "/api/overlay")[1]["layers"]
+        check("the venue's message stays on screen",
+              len(layers) == 1 and layers[0]["text"].startswith("Werkstatt"), layers)
+        check("but the cast QR is gone, because the slot is taken",
+              layers[0]["qr_modules"] is None, layers[0].get("qr_modules"))
+
+        put({"enabled": True, "text": "Werkstatt schließt 16 Uhr", "hide_during_cast": True})
+        check("with the operator's switch set, nothing is drawn at all",
+              http("GET", "/api/overlay")[1]["layers"] == [],
+              http("GET", "/api/overlay")[1])
+
+        sw.close()
+        dw.close()
+        await asyncio.sleep(6)
+        check("and it comes back once the cast is over",
+              len(http("GET", "/api/overlay")[1]["layers"]) == 1,
+              http("GET", "/api/overlay")[1])
+
         put({"enabled": True, "text": "Kaffee 1 Euro", "qr_source": "text",
              "qr_text": "https://example.invalid/menu", "qr_label": "Karte"})
 

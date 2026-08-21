@@ -169,6 +169,9 @@
         <select id="ovImage"><option value="">— keins —</option></select>
       </p>
       <p>
+        <label><input type="checkbox" id="ovHideCast" /> während einer Übertragung ausblenden</label>
+      </p>
+      <p>
         <label><input type="checkbox" id="ovClock" /> Uhr</label>
         <label><input type="checkbox" id="ovSeconds" /> mit Sekunden</label>
         <label><input type="checkbox" id="ovDate" /> Datum</label>
@@ -434,6 +437,7 @@
       show_seconds: 'ovSeconds', show_date: 'ovDate', qr_text: 'ovQrText',
       qr_label: 'ovQrLabel', position: 'ovPosition', size: 'ovSize',
       margin: 'ovMargin', max_width: 'ovMaxWidth', qr_size: 'ovQrSize',
+      hide_during_cast: 'ovHideCast',
       background_color: 'ovBackgroundColor', plain: 'ovPlain',
       background_css: 'ovBackgroundCss', color: 'ovColor',
     };
