@@ -61,6 +61,17 @@ is checking.
 Sizes are in `vmin`, so one setting reads the same on a 1080p panel and a
 portrait 4K one.
 
+The clock and date are formatted for a language tag that is settable in the admin
+UI or with `--locale`, and which otherwise follows the machine: `LC_ALL`, then
+`LC_TIME`, then `LANG`. `LC_TIME` before `LANG` is deliberate — a desktop set up
+with English menus and German dates is a common arrangement, and it is the date
+setting that applies here. `C` and `POSIX` count as "no locale chosen" and are not
+passed on; the display browser's own default is then used, which follows from
+`--browser-language`.
+
+That is a different setting from `--browser-language`, which decides what
+*websites* are asked to serve.
+
 ## Screen casting
 
 A guest opens the device's address, optionally enters a code, and shares a screen

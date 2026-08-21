@@ -125,6 +125,21 @@
     <span class="muted" id="setFeedback"></span>
   </div>
 
+  <div class="card" id="localeCard">
+    <p class="status">Sprache für Datum und Uhrzeit</p>
+    <p class="muted">
+      Gilt für die Uhr im Overlay und für Zeitangaben in dieser Verwaltung.
+      Leer lassen heißt: der Anzeige-Browser entscheidet, was sich aus
+      <code>--browser-language</code> ergibt.
+    </p>
+    <p>
+      <label for="setLocale">Kennung:</label>
+      <input id="setLocale" size="10" placeholder="z. B. de-DE" autocomplete="off" />
+      <span class="lock" id="lockLocale" hidden>per Kommandozeile festgelegt</span>
+      <button type="button" id="useSystemLocale" hidden></button>
+    </p>
+  </div>
+
   <div class="card" id="overlayCard">
     <p class="status">Overlay</p>
     <p class="muted">
@@ -281,7 +296,7 @@
           return;
         }
         const since = cast.started_at
-          ? new Date(cast.started_at).toLocaleTimeString('de-DE')
+          ? new Date(cast.started_at).toLocaleTimeString(uiLocale || undefined)
           : '?';
         status.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
         hint.textContent = cast.display_connected
@@ -302,6 +317,7 @@
       cast_enabled: ['setEnabled', 'lockEnabled'],
       cast_auth: ['setAuth', 'lockAuth'],
       cast_code: ['setCode', 'lockCode'],
+      locale: ['setLocale', 'lockLocale'],
     };
 
     function syncCodeRow() {
@@ -314,6 +330,10 @@
         !document.getElementById('authEnabled').checked;
     }
 
+    // Kept from the settings load so the cast status line formats its time the
+    // same way the display does.
+    let uiLocale = '';
+
     function applySettings(settings) {
       document.getElementById('setEnabled').checked = settings.cast_enabled;
       document.getElementById('setAuth').value = settings.cast_auth;
@@ -321,6 +341,22 @@
       document.getElementById('authEnabled').checked = settings.auth_enabled;
       document.getElementById('authUser').value = settings.auth_user || '';
       document.getElementById('authPassword').value = '';
+      uiLocale = settings.locale || '';
+      document.getElementById('setLocale').value = uiLocale;
+
+      // Offered rather than filled in: the field already shows what the system
+      // tag produced, and overwriting a deliberate choice on every load would
+      // be worse than a button nobody presses.
+      const useSystem = document.getElementById('useSystemLocale');
+      if (settings.system_locale && settings.system_locale !== uiLocale) {
+        useSystem.textContent = `System: ${settings.system_locale}`;
+        useSystem.hidden = false;
+        useSystem.onclick = () => {
+          document.getElementById('setLocale').value = settings.system_locale;
+        };
+      } else {
+        useSystem.hidden = true;
+      }
 
       // A control the command line pinned is shown as pinned rather than
       // silently discarding edits.
@@ -363,6 +399,7 @@
         cast_enabled: document.getElementById('setEnabled').checked,
         cast_auth: document.getElementById('setAuth').value,
         cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
+        locale: document.getElementById('setLocale').value.trim(),
         auth_enabled: document.getElementById('authEnabled').checked,
         auth_user: document.getElementById('authUser').value.trim(),
       };

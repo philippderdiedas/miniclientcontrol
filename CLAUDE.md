@@ -543,6 +543,14 @@ needs a C toolchain that the armv7 `cross` image does not have.
 30s, single-use). Wrong codes are compared in constant time and lock the address
 out after 5 tries.
 
+The locale for dates and times on screen resolves in three steps: `--locale`,
+then the stored setting, then the machine's own (`LC_ALL`, `LC_TIME`, `LANG`, in
+that order — `LC_TIME` outranks `LANG` because this is a date setting, and mixed
+setups are common). `C` and `POSIX` resolve to nothing rather than to English, so
+`Intl` falls back to the display browser, which follows `--browser-language`.
+Keep the two apart: `--browser-language` decides what websites are asked to
+serve, `--locale` only how dates are written.
+
 **Settings are runtime state (see `src/settings.rs`), and the command line
 always wins.** `cast_enabled`, `cast_auth`, `cast_code` and the operator
 credentials live in the `settings` table and are edited from the admin UI — but a

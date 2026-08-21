@@ -144,8 +144,8 @@ reliably the same way after a restart.
 
 ## Runtime settings versus flags
 
-`cast_enabled`, `cast_auth`, `cast_code`, the overlay and the operator credentials
-live in the database and are edited from the admin UI. A flag actually passed on
+`cast_enabled`, `cast_auth`, `cast_code`, the locale, the overlay and the operator
+credentials live in the database and are edited from the admin UI. A flag actually passed on
 the command line **pins** that setting: the API answers `409` naming the flag and
 the UI renders the control as locked.
 

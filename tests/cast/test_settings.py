@@ -89,6 +89,38 @@ async def main():
         put({"cast_enabled": True})
         check("re-enabling works", http("GET", "/api/cast/info")[1]["enabled"] is True)
 
+    print("\n[15d] the locale for dates and times")
+    with Server():
+        st = settings()
+        # Not asserted against a fixed tag: the default follows LC_ALL/LC_TIME/LANG
+        # of whoever runs the tests, and "no locale chosen" is a valid answer.
+        check("the default follows the system, whatever it is",
+              st["locale"] == (st["system_locale"] or ""), (st["locale"], st["system_locale"]))
+        check("nothing is locked without the flag", st["locks"]["locale"] is False)
+
+        status, body = put({"locale": "de-DE; color: red"})
+        check("a tag that could carry a second value is refused", status == 400, (status, body))
+        status, body = put({"locale": "sv-SE"})
+        check("a plain tag is accepted", status == 200 and body["locale"] == "sv-SE", (status, body))
+        check("and reaches the overlay runtime",
+              http("GET", "/api/overlay")[1].get("locale") == "sv-SE",
+              http("GET", "/api/overlay")[1].get("locale"))
+        status, body = put({"locale": ""})
+        check("empty is allowed, leaving it to the display browser",
+              status == 200 and body["locale"] == "", (status, body))
+        put({"locale": "sv-SE"})
+
+    with Server(fresh=False):
+        check("the stored tag survives a restart", settings()["locale"] == "sv-SE", settings()["locale"])
+
+    with Server(fresh=False, locale="ja-JP"):
+        st = settings()
+        check("the flag overrides the stored tag", st["locale"] == "ja-JP", st["locale"])
+        check("and locks the control", st["locks"]["locale"] is True, st["locks"])
+        status, body = put({"locale": "it-IT"})
+        check("changing it is refused, naming the flag",
+              status == 409 and "--locale" in body.get("error", ""), (status, body))
+
     print("\n[16b] --disable-cast pins the switch off")
     with Server(fresh=False, disable_cast=True):
         st = settings()

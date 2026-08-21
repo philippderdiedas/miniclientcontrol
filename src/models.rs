@@ -109,6 +109,14 @@ pub struct Args {
     #[arg(long, env)]
     pub chromium_arg: Vec<String>,
 
+    /// Language tag for the dates and times the display shows, e.g. `de-DE`.
+    ///
+    /// Distinct from `--browser-language`, which decides what websites are asked
+    /// to serve. Unset, the stored setting applies, and failing that the tag is
+    /// taken from `LC_ALL`, `LC_TIME` or `LANG`.
+    #[arg(long, env)]
+    pub locale: Option<String>,
+
     /// Languages written into the browser profile.
     ///
     /// Chromium offers to translate a page whose language is not in this list, and
