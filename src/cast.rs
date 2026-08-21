@@ -737,12 +737,28 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
                 return true;
             };
 
+            // The operator's cap wins over what the display reports about itself.
+            // Applied here, in the one place the limit passes through, so the
+            // relay to the sender and /api/cast/info cannot disagree.
+            let limits = match state.args.cast_max_edge {
+                Some(cap) if cap < limits.max_edge => {
+                    info!(
+                        "Cast: display offers {}px, capped to {}px by --cast-max-edge",
+                        limits.max_edge, cap
+                    );
+                    DisplayLimits { max_edge: cap }
+                }
+                _ => {
+                    info!("Cast: display can show frames up to {}px", limits.max_edge);
+                    limits
+                }
+            };
+
             let sender = {
                 let mut session = state.cast.lock().await;
                 session.display_limits = Some(limits);
                 session.sender.as_ref().map(|peer| peer.tx.clone())
             };
-            info!("Cast: display can show frames up to {}px", limits.max_edge);
             if let Some(sender) = sender {
                 let _ = sender.send(Message::Text(
                     json!({"type": "display_limits", "max_edge": limits.max_edge})

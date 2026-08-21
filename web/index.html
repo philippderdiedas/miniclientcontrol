@@ -46,6 +46,9 @@
     }
     .code-boxes input:focus { border-color: #0b6b3a; outline: none; }
     .status { font-weight: 600; margin-top: .5rem; }
+    .qualityrow { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: 0 0 .3rem; }
+    .qualityrow > span { font-size: .9rem; color: #444; }
+    .qbtn.active { background: #0b6b3a; border-color: #0b6b3a; color: #fff; }
     hr { border: none; border-top: 1px solid #e5e5e5; margin: 1.2rem 0 .8rem; }
     h2 { font-size: 1.1rem; margin: 0 0 .6rem; }
     .audiorow {
@@ -105,6 +108,12 @@
     </div>
 
     <div id="liveBlock" hidden>
+      <p class="qualityrow">
+        <span>Priorität:</span>
+        <button type="button" id="qSharp" class="qbtn">Schärfe</button>
+        <button type="button" id="qSmooth" class="qbtn">Flüssigkeit</button>
+      </p>
+      <p class="muted" id="qualityHint"></p>
       <button id="stopShare">Übertragung beenden</button>
     </div>
 
@@ -355,6 +364,71 @@
       setStatus(message, isError);
     }
 
+    // --- what to sacrifice when the link or the receiver cannot keep up -------
+    //
+    // WebRTC always degrades under pressure; the only question is in which
+    // direction, and that is `degradationPreference`. Chrome's default for screen
+    // content is maintain-resolution, which is why a Pi held 1920x1080 while its
+    // framerate collapsed to 5 fps and half the frames were dropped.
+    //
+    // The direction is the caster's call because it depends on the content, not on
+    // the hardware: a spreadsheet is unreadable when softened, a video is
+    // unwatchable when it stutters. The frame-size ceiling stays the display's
+    // call -- see noteDisplayLimits.
+    //
+    // The framerate cap rides along with the choice. Slides do not move, so
+    // spending decode budget on 30 fps of a still image is what starves the
+    // resolution the caster asked to keep.
+    const QUALITY = {
+      sharp: {
+        hint: 'detail',
+        preference: 'maintain-resolution',
+        maxFramerate: 12,
+        note: 'Text bleibt scharf, Bewegung kann ruckeln.',
+      },
+      smooth: {
+        hint: 'motion',
+        preference: 'maintain-framerate',
+        maxFramerate: 30,
+        note: 'Bewegung bleibt flüssig, das Bild kann weicher werden.',
+      },
+    };
+    let quality = 'sharp';
+
+    async function applyQuality() {
+      const cfg = QUALITY[quality];
+      el('qSharp').classList.toggle('active', quality === 'sharp');
+      el('qSmooth').classList.toggle('active', quality === 'smooth');
+      el('qualityHint').textContent = cfg.note;
+
+      // contentHint alone already steers the encoder; it works even before a
+      // sender exists, so set it whenever we have a track.
+      if (stream) {
+        for (const track of stream.getVideoTracks()) track.contentHint = cfg.hint;
+      }
+      if (!peer) return;
+
+      for (const sender of peer.pc.getSenders()) {
+        if (!sender.track || sender.track.kind !== 'video') continue;
+        try {
+          const params = sender.getParameters();
+          // Before the first negotiation `encodings` can be empty, and
+          // setParameters rejects a list of a different length than it handed out.
+          if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+          params.degradationPreference = cfg.preference;
+          params.encodings[0].maxFramerate = cfg.maxFramerate;
+          await sender.setParameters(params);
+        } catch (e) {
+          // Older browsers reject degradationPreference; the contentHint above
+          // still nudges the encoder, so this is not worth failing the cast over.
+          console.warn('could not apply the quality preference', e);
+        }
+      }
+    }
+
+    el('qSharp').addEventListener('click', () => { quality = 'sharp'; applyQuality(); });
+    el('qSmooth').addEventListener('click', () => { quality = 'smooth'; applyQuality(); });
+
     async function startOffer() {
       setStatus('Display gefunden, Verbindung wird aufgebaut…');
       if (peer) peer.close();
@@ -364,6 +438,8 @@
         dead: () => teardown('Verbindung getrennt.'),
       });
       stream.getTracks().forEach((track) => peer.pc.addTrack(track, stream));
+      // Needs a sender to attach to, so after addTrack and before the offer.
+      await applyQuality();
 
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
@@ -439,6 +515,7 @@
       });
 
       showLive(true);
+      applyQuality();
       connect();
       // The panel only exists for the connected sender, so it appears with the
       // stream and goes away with it.
