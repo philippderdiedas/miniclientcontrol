@@ -1,28 +1,26 @@
 //! Launching and supervising the display browser.
 //!
-//! The controller used to require Chromium to be started elsewhere (a sway
-//! `exec` line) with the right flags. That put the two things that have to agree
-//! — the debugging port and the browser's behaviour — in two places, and left
-//! the display dead if Chromium ever exited.
+//! The controller starts the browser and keeps it alive, unless something is
+//! already listening on the CDP port — an externally managed Chromium is then
+//! driven as it stands, so a deployment that launches it from a session file
+//! needs no change here.
 //!
-//! Now the controller starts it and keeps it alive, but only if nothing is
-//! already listening on the CDP port. An externally managed Chromium therefore
-//! still works untouched: existing deployments keep their sway line, and new ones
-//! need no browser configuration at all.
+//! Keeping the launch in one place keeps the debugging port and the browser's
+//! flags from having to agree across two, and lets a browser that exits be
+//! restarted.
 //!
 //! ## Why the profile is written here
 //!
 //! Chromium's "translate this page?" bubble cannot be turned off with a flag on
-//! Linux. The managed policy at `/etc/chromium/policies/managed/` works but needs
-//! root, and a profile preference used to be pointless because the profile
-//! directory was wiped on boot. Owning the launch fixes that: the preferences are
-//! rewritten *every start*, so nothing has to survive a reboot.
+//! Linux, and there is no CDP command for it. The managed policy under
+//! `/etc/chromium/policies/managed/` does work, but needs root.
 //!
-//! What actually stops the bubble is the language list. The prompt appears when
-//! the page's language is not among the profile's accepted languages, so setting
-//! `intl.accept_languages` to the language the signage shows removes the trigger.
-//! `translate.enabled` is set too, belt and braces. Verified: with these written,
-//! `navigator.languages` follows and Chromium keeps both keys on write-back.
+//! What stops the bubble is the language list: the prompt appears when the page's
+//! language is not among the profile's accepted languages. So
+//! `intl.accept_languages` is set from `--browser-language` and
+//! `translate.enabled` to false. Chromium keeps both keys when it rewrites the
+//! file, and writing them on every start covers a profile directory that does not
+//! survive a reboot.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

@@ -218,9 +218,8 @@
     }
 
     // --- scroll config editor -------------------------------------------------
-    // One builder for the add form, the override form and every card, so the three
-    // stay in sync. Previously a row's scroll config could only be changed by ticking
-    // a per-row box that silently applied the *global* add form's values.
+    // One builder for the add form, the override form and every card, so all three
+    // stay in sync and every row carries its own values.
     function scrollEditor(initial) {
       const cfg = initial || { type: 'None' };
       const o = cfg.options || {};

@@ -33,6 +33,7 @@ const KEY_CAST_ENABLED: &str = "cast_enabled";
 const KEY_CAST_AUTH: &str = "cast_auth";
 const KEY_CAST_CODE: &str = "cast_code";
 const KEY_OVERLAY: &str = "overlay_config";
+const KEY_LOCALE: &str = "locale";
 
 /// Overlay images travel base64-encoded inside every apply, so this caps what one
 /// costs. Generous for a logo, small enough that a re-apply stays cheap on a Pi.
@@ -51,6 +52,10 @@ pub struct AppSettings {
     pub auth_secret: Option<Secret>,
     /// The badge drawn on top of whatever is playing.
     pub overlay: Overlay,
+    /// BCP-47 tag for the dates and times the display shows. Empty means
+    /// "whatever the display browser would use on its own", which follows from
+    /// `--browser-language`.
+    pub locale: String,
 }
 
 /// What the overlay shows and where.
@@ -92,9 +97,9 @@ pub struct Overlay {
     pub margin: f32,
     pub max_width: f32,
     pub qr_size: f32,
-    /// Box background, as a colour and an alpha rather than a CSS string: an
-    /// invalid declaration is dropped by the browser without a word, so a typo
-    /// used to mean a box with no background and no error anywhere.
+    /// Box background, as a colour and an alpha rather than a CSS string: the
+    /// browser drops an invalid declaration without a word, so a typo in a string
+    /// would mean a box with no background and no error anywhere.
     pub background_color: String,
     pub background_alpha: f32,
     /// No box at all -- the content sits directly on the page. Its own flag
@@ -396,6 +401,7 @@ pub struct Locks {
     pub cast_auth: bool,
     pub cast_code: bool,
     pub basic_auth: bool,
+    pub locale: bool,
 }
 
 impl Locks {
@@ -407,6 +413,7 @@ impl Locks {
             cast_auth: args.cast_auth.is_some(),
             cast_code: args.cast_code.is_some(),
             basic_auth: args.basic_auth_user.is_some(),
+            locale: args.locale.is_some(),
         }
     }
 }
@@ -465,6 +472,35 @@ fn verify_hash(encoded: &str, password: &str) -> bool {
     pbkdf2::verify(PBKDF2_ALG, iterations, &salt, password.as_bytes(), &expected).is_ok()
 }
 
+/// The locale the surrounding system is configured for, as a BCP-47 tag.
+///
+/// POSIX spells it `de_DE.UTF-8@euro` where `Intl` wants `de-DE`. `C` and `POSIX`
+/// mean "no locale chosen", which is not worth passing on: the display browser's
+/// own default is a better answer than forcing one.
+pub fn system_locale() -> Option<String> {
+    let raw = ["LC_ALL", "LC_TIME", "LANG"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .find(|value| !value.is_empty())?;
+
+    let tag = raw
+        .split(['.', '@'])
+        .next()
+        .unwrap_or_default()
+        .replace('_', "-");
+
+    (!tag.is_empty() && tag != "C" && tag != "POSIX").then_some(tag)
+}
+
+/// Accepts a language tag and nothing that could pass for markup or a second
+/// value: this string is handed to `Intl` inside the displayed page.
+fn is_locale_tag(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.len() <= 35
+        && raw.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && raw.starts_with(|c: char| c.is_ascii_alphabetic())
+}
+
 pub fn parse_cast_auth(raw: &str) -> Option<CastAuth> {
     match raw {
         "none" => Some(CastAuth::None),
@@ -492,6 +528,7 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         .await
         .and_then(|raw| parse_cast_auth(&raw));
     let stored_code = crate::db::load_setting(pool, KEY_CAST_CODE).await;
+    let stored_locale = crate::db::load_setting(pool, KEY_LOCALE).await;
     let stored_overlay = crate::db::load_setting(pool, KEY_OVERLAY)
         .await
         .and_then(|raw| serde_json::from_str::<Overlay>(&raw).ok())
@@ -520,6 +557,16 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         auth_user,
         auth_secret,
         overlay: stored_overlay,
+        // Command line, then what the operator stored, then the system this runs
+        // on. The last step is the point: a box already set up in German should
+        // not have to be told a second time.
+        locale: args
+            .locale
+            .clone()
+            .filter(|tag| is_locale_tag(tag))
+            .or_else(|| stored_locale.filter(|tag| is_locale_tag(tag)))
+            .or_else(system_locale)
+            .unwrap_or_default(),
     }
 }
 
@@ -530,6 +577,7 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
         (KEY_CAST_ENABLED, settings.cast_enabled.to_string()),
         (KEY_CAST_AUTH, cast_auth_key(settings.cast_auth).to_string()),
         (KEY_CAST_CODE, settings.cast_code.clone()),
+        (KEY_LOCALE, settings.locale.clone()),
         (
             KEY_AUTH_USER,
             settings.auth_user.clone().unwrap_or_default(),
@@ -596,12 +644,16 @@ pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
 /// they stack in when both want the same corner -- and the reason the global one
 /// decides that box's style.
 pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> serde_json::Value {
-    // One acquisition for both: the cast switch decides whether a cast QR is
-    // drawn at all, and taking the lock twice in one build invites a reader to
-    // wonder whether the two halves can disagree.
-    let (overlay, cast_enabled) = {
+    // One acquisition for all three: the cast switch decides whether a cast QR is
+    // drawn at all, and taking the lock more than once in a single build invites a
+    // reader to wonder whether the parts can disagree.
+    let (overlay, cast_enabled, locale) = {
         let settings = state.settings.read().await;
-        (settings.overlay.clone(), settings.cast_enabled)
+        (
+            settings.overlay.clone(),
+            settings.cast_enabled,
+            settings.locale.clone(),
+        )
     };
     // `is_active` rather than "a sender is connected": during the grace period
     // after a sender's socket drops the cast page is still on screen, and an
@@ -665,12 +717,13 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
     }
 
     json!({
-        // Nothing in here is a URL, and that is the point: the overlay's DOM
-        // lives in the displayed page's document, where Chromium's Local Network
-        // Access refuses any request to 127.0.0.1 without a permission click that
-        // a kiosk has nobody to make. Measured on Chrome 151 with a fresh
-        // profile: both `fetch` and `<img>` fail outright.
-        "locale": "de-DE",
+        // Nothing in here is a URL, and that is the point: the overlay's DOM lives
+        // in the displayed page's document, where Chromium's Local Network Access
+        // refuses any request to 127.0.0.1 -- both `fetch` and `<img>` -- without a
+        // permission click that a kiosk has nobody to make.
+        // Empty is meaningful: `Intl` then falls back to the display browser's own
+        // locale, which follows from --browser-language.
+        "locale": locale,
         "layers": layers,
     })
 }
@@ -775,6 +828,9 @@ struct SettingsResponse {
     auth_enabled: bool,
     auth_user: Option<String>,
     overlay: Overlay,
+    locale: String,
+    /// What the surrounding system reports, so the admin page can offer it.
+    system_locale: Option<String>,
     locks: Locks,
 }
 
@@ -788,6 +844,8 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
         auth_enabled: settings.auth_user.is_some(),
         auth_user: settings.auth_user.clone(),
         overlay: settings.overlay.clone(),
+        locale: settings.locale.clone(),
+        system_locale: system_locale(),
         locks: state.locks,
     })
 }
@@ -801,6 +859,7 @@ pub struct UpdateRequest {
     auth_user: Option<String>,
     auth_password: Option<String>,
     overlay: Option<Overlay>,
+    locale: Option<String>,
 }
 
 pub async fn update_settings(
@@ -863,6 +922,19 @@ pub async fn update_settings(
                 return locked("--cast-code");
             }
             next.cast_code = code;
+        }
+    }
+
+    if let Some(locale) = payload.locale {
+        let locale = locale.trim().to_string();
+        if !locale.is_empty() && !is_locale_tag(&locale) {
+            return bad("Ungültiges Sprachkennzeichen, erwartet wird z. B. de-DE.".to_string());
+        }
+        if locale != next.locale {
+            if state.locks.locale {
+                return locked("--locale");
+            }
+            next.locale = locale;
         }
     }
 
@@ -941,7 +1013,7 @@ pub async fn update_settings(
     };
 
     if credentials_changed {
-        // The cache holds a header that was verified against the *old* password.
+        // Otherwise the cache keeps accepting the previous password.
         *state.auth_cache.lock().await = None;
     }
 

@@ -500,9 +500,9 @@ async def browser_flow():
         print("\n[46] on a page from a genuinely foreign origin nothing is fetched")
         # Reached by the LAN address on purpose. Chromium's Local Network Access
         # refuses requests to 127.0.0.1 from any origin that is not itself
-        # loopback -- measured on Chrome 151 with a fresh profile, where both
-        # `fetch` and `<img src="http://127.0.0.1/...">` fail outright. A foreign
-        # page served from 127.0.0.1 would pass while a real display failed.
+        # loopback -- `fetch` and `<img src="http://127.0.0.1/...">` alike. A
+        # foreign page served from 127.0.0.1 would pass here while a real display
+        # failed.
         foreign = subprocess.Popen([sys.executable, f"{SP}/foreign_page.py", "3061"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(foreign)

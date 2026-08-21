@@ -4,19 +4,17 @@
 //!
 //! `pactl` is a client of a *protocol*, not of a particular server. PipeWire
 //! implements that protocol through `pipewire-pulse`, so one code path covers
-//! both the old and the new world — on the kiosk this talks to
-//! "PulseAudio (on PipeWire 1.6.8)". The PipeWire-native tools (`wpctl`,
-//! `pw-cli`) would be strictly *narrower*, and `amixer` is not even installed
-//! there.
+//! both it and PulseAudio itself. The PipeWire-native tools (`wpctl`, `pw-cli`)
+//! reach strictly less, and `amixer` reaches something else entirely.
 //!
-//! Shelling out rather than binding libpulse: an FFI dependency is exactly the
-//! kind of thing that made `aws-lc-rs` unusable for the armv7 cross build, and a
-//! few milliseconds per click is not worth that risk.
+//! Shelling out rather than binding libpulse keeps an FFI dependency out of the
+//! tree, which matters for the armv7 cross build; a few milliseconds per click is
+//! a cheap price for that.
 //!
-//! The one stack this does not reach is a machine with no sound server at all
-//! (a Raspberry Pi OS Lite image, say). That is what `AudioBackend` is for: the
-//! seam exists so an ALSA backend can be added without touching any caller. It
-//! is deliberately not written yet — no device here needs it.
+//! The one stack this does not reach is a machine with no sound server at all,
+//! which a minimal image can be. That is what `AudioBackend` is for: the seam
+//! lets an ALSA backend be added without touching any caller. None is written,
+//! because no device needs one.
 
 use std::collections::HashMap;
 

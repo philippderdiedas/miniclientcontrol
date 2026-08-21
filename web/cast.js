@@ -2,9 +2,8 @@
 // receiver (cast_display.html).
 //
 // The server relays opaque `{sdp}` / `{ice}` blobs between exactly two peers, so
-// there are no rooms and no peer ids here. That is the main simplification over
-// picklecast, whose display had to defend against duplicate offers arriving from
-// several public trackers at once.
+// there are no rooms and no peer ids here, and no need to guard against the same
+// offer arriving twice.
 //
 // The sender always makes the offer, because it is the side holding the media.
 

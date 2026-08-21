@@ -21,13 +21,11 @@
 //! * The per-item `tokio::select!` watches `override_signal`, so a cast starts
 //!   immediately instead of waiting out the current item's duration.
 //!
-//! ## Differences from picklecast, deliberately
+//! ## The protocol carries no addressing
 //!
-//! There are exactly two peers, so the protocol carries no room names and no
-//! peer addressing — picklecast needed both because public WebTorrent trackers
-//! could deliver duplicate peers, which is also why its display had to ignore a
-//! second offer. With one relay and a server-enforced single sender, none of
-//! that applies.
+//! There are exactly two peers, so a frame needs neither a room name nor a peer
+//! id, and the relay forwards SDP and ICE without interpreting them. Not parsing
+//! them is also what keeps the server from being able to break them.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -170,6 +168,21 @@ impl CastSession {
     /// cannot block the display forever.
     fn is_taken(&self) -> bool {
         self.sender.is_some() || self.live_reservation().is_some()
+    }
+
+    /// Taken by somebody *other* than this address.
+    ///
+    /// The distinction matters for what a guest is told. Holding a reservation
+    /// and then being informed that "someone else is casting" is a dead end the
+    /// guest cannot act on -- and it is their own reservation. The claim endpoint
+    /// already lets the same address re-claim, so the answer here has to agree
+    /// with that.
+    fn taken_by_other(&self, addr: IpAddr) -> bool {
+        let sender_elsewhere = self.sender.is_some() && self.sender_addr != Some(addr);
+        let reserved_elsewhere = self
+            .live_reservation()
+            .is_some_and(|held| held.addr != addr);
+        sender_elsewhere || reserved_elsewhere
     }
 
     fn live_reservation(&self) -> Option<&Reservation> {
@@ -740,12 +753,28 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
                 return true;
             };
 
+            // The operator's cap wins over what the display reports about itself.
+            // Applied here, in the one place the limit passes through, so the
+            // relay to the sender and /api/cast/info cannot disagree.
+            let limits = match state.args.cast_max_edge {
+                Some(cap) if cap < limits.max_edge => {
+                    info!(
+                        "Cast: display offers {}px, capped to {}px by --cast-max-edge",
+                        limits.max_edge, cap
+                    );
+                    DisplayLimits { max_edge: cap }
+                }
+                _ => {
+                    info!("Cast: display can show frames up to {}px", limits.max_edge);
+                    limits
+                }
+            };
+
             let sender = {
                 let mut session = state.cast.lock().await;
                 session.display_limits = Some(limits);
                 session.sender.as_ref().map(|peer| peer.tx.clone())
             };
-            info!("Cast: display can show frames up to {}px", limits.max_edge);
             if let Some(sender) = sender {
                 let _ = sender.send(Message::Text(
                     json!({"type": "display_limits", "max_edge": limits.max_edge})
@@ -967,7 +996,10 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
 ///
 /// Kept separate from `/api/cast/state`, which stays behind operator auth: the
 /// sender has no business learning who else is casting or from which address.
-pub async fn cast_info(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn cast_info(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
     let sender_url = sender_url(&state);
     let settings = state.settings.read().await;
     let session = state.cast.lock().await;
@@ -975,7 +1007,7 @@ pub async fn cast_info(State(state): State<AppState>) -> impl IntoResponse {
     Json(json!({
         "enabled": settings.cast_enabled,
         "auth": settings.cast_auth,
-        "busy": session.is_taken(),
+        "busy": session.taken_by_other(peer.ip()),
         // What the display can show. The sender needs this *before* it calls
         // getDisplayMedia, and at that moment it has no socket yet.
         "display_limits": session.display_limits,

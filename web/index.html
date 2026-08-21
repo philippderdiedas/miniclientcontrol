@@ -46,6 +46,9 @@
     }
     .code-boxes input:focus { border-color: #0b6b3a; outline: none; }
     .status { font-weight: 600; margin-top: .5rem; }
+    .qualityrow { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: 0 0 .3rem; }
+    .qualityrow > span { font-size: .9rem; color: #444; }
+    .qbtn.active { background: #0b6b3a; border-color: #0b6b3a; color: #fff; }
     hr { border: none; border-top: 1px solid #e5e5e5; margin: 1.2rem 0 .8rem; }
     h2 { font-size: 1.1rem; margin: 0 0 .6rem; }
     .audiorow {
@@ -106,6 +109,14 @@
     </div>
 
     <div id="liveBlock" hidden>
+      <p class="qualityrow">
+        <span>Priorität:</span>
+        <button type="button" id="qSharp" class="qbtn">Schärfe</button>
+        <button type="button" id="qSmooth" class="qbtn">Flüssigkeit</button>
+      </p>
+      <p class="muted" id="qualityHint"></p>
+      <p class="muted" id="capHint"></p>
+      <p class="muted" id="liveStats"></p>
       <button id="stopShare">Übertragung beenden</button>
     </div>
 
@@ -133,16 +144,15 @@
     let stream = null;
     let iceServers = [];
 
-    // The largest frame the display can show, as measured and announced by the
-    // display page itself. Null until something told us, in which case we send
-    // whatever the screen produces -- which is what every display before the
-    // kiosk Pi could take.
+    // The largest frame the display can show, announced by the display page
+    // itself. Null until it has said, in which case the capture is unconstrained
+    // and whatever the screen produces goes out.
     let maxEdge = null;
 
     // Capture constraints, not a policy: the number comes from the display.
-    // Applied at capture time because on the second and later casts the limit is
-    // already known from /api/cast/info, so the very first frame is the right
-    // size instead of a black rectangle that fixes itself a second later.
+    // Applied at capture time because from the second cast onwards the limit is
+    // already known from /api/cast/info, which makes the very first frame the
+    // right size rather than one that corrects itself a second later.
     function captureVideoConstraints() {
       if (!maxEdge) return true;
       return { width: { max: maxEdge }, height: { max: maxEdge } };
@@ -165,7 +175,17 @@
     function noteDisplayLimits(limits) {
       if (!limits || !limits.max_edge) return;
       maxEdge = limits.max_edge;
+      showCap();
       constrainToDisplay();
+    }
+
+    // Without this, "Schärfe" is a promise the display quietly overrules: the
+    // ceiling is the receiver's (its panel, its GPU, or a cap the operator set),
+    // and a caster who asked for sharpness and got 1280 has no way to know why.
+    function showCap() {
+      el('capHint').textContent = maxEdge
+        ? `Dieses Display nimmt maximal ${maxEdge} px Kantenlänge an.`
+        : '';
     }
 
     // The claim ticket. Held from the moment the code checks out until the
@@ -336,6 +356,7 @@
       if (socket) { socket.close(); socket = null; }
       dropReservation();
       stopCountdown();
+      stopStats();
       stopAudio();
       showLive(false);
       setShareEnabled(authMode === 'none');
@@ -344,6 +365,110 @@
         clearCode();
       }
       setStatus(message, isError);
+    }
+
+    // --- what to sacrifice when the link or the receiver cannot keep up -------
+    //
+    // WebRTC always degrades under pressure; the only question is in which
+    // direction, and that is `degradationPreference`. Chrome's default for screen
+    // content is maintain-resolution, which is why a Pi held 1920x1080 while its
+    // framerate collapsed to 5 fps and half the frames were dropped.
+    //
+    // The direction is the caster's call because it depends on the content, not on
+    // the hardware: a spreadsheet is unreadable when softened, a video is
+    // unwatchable when it stutters. The frame-size ceiling stays the display's
+    // call -- see noteDisplayLimits.
+    //
+    // The framerate cap rides along with the choice. Slides do not move, so
+    // spending decode budget on 30 fps of a still image is what starves the
+    // resolution the caster asked to keep.
+    const QUALITY = {
+      sharp: {
+        hint: 'detail',
+        preference: 'maintain-resolution',
+        maxFramerate: 12,
+        note: 'Text bleibt scharf, Bewegung kann ruckeln.',
+      },
+      smooth: {
+        hint: 'motion',
+        preference: 'maintain-framerate',
+        maxFramerate: 30,
+        note: 'Bewegung bleibt flüssig, das Bild kann weicher werden.',
+      },
+    };
+    let quality = 'sharp';
+
+    async function applyQuality() {
+      const cfg = QUALITY[quality];
+      el('qSharp').classList.toggle('active', quality === 'sharp');
+      el('qSmooth').classList.toggle('active', quality === 'smooth');
+      el('qualityHint').textContent = cfg.note;
+
+      // contentHint alone already steers the encoder; it works even before a
+      // sender exists, so set it whenever we have a track.
+      if (stream) {
+        for (const track of stream.getVideoTracks()) track.contentHint = cfg.hint;
+      }
+      if (!peer) return;
+
+      for (const sender of peer.pc.getSenders()) {
+        if (!sender.track || sender.track.kind !== 'video') continue;
+        try {
+          const params = sender.getParameters();
+          // Before the first negotiation `encodings` can be empty, and
+          // setParameters rejects a list of a different length than it handed out.
+          if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+          params.degradationPreference = cfg.preference;
+          params.encodings[0].maxFramerate = cfg.maxFramerate;
+          await sender.setParameters(params);
+        } catch (e) {
+          // Older browsers reject degradationPreference; the contentHint above
+          // still nudges the encoder, so this is not worth failing the cast over.
+          console.warn('could not apply the quality preference', e);
+        }
+      }
+    }
+
+    el('qSharp').addEventListener('click', () => { quality = 'sharp'; applyQuality(); });
+    el('qSmooth').addEventListener('click', () => { quality = 'smooth'; applyQuality(); });
+
+    // What is actually going out, as opposed to what was asked for. The encoder
+    // may scale below the capture size on its own, so the capture settings would
+    // be the wrong number to show.
+    let statsTimer = null;
+
+    function stopStats() {
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      el('liveStats').textContent = '';
+    }
+
+    function startStats() {
+      stopStats();
+      statsTimer = setInterval(async () => {
+        if (!peer) return;
+        for (const sender of peer.pc.getSenders()) {
+          if (!sender.track || sender.track.kind !== 'video') continue;
+          try {
+            const stats = await sender.getStats();
+            stats.forEach((s) => {
+              if (s.type !== 'outbound-rtp' || !s.frameWidth) return;
+              const fps = s.framesPerSecond != null ? `, ${Math.round(s.framesPerSecond)} fps` : '';
+              // The sender does know its own limits and throttles on its own; it
+              // just never said so. `none` is the interesting case: quality is
+              // then capped by the display's ceiling or by the caster's choice,
+              // not by this machine struggling.
+              const why = {
+                cpu: ' — begrenzt durch die CPU dieses Rechners',
+                bandwidth: ' — begrenzt durch die Netzwerkbandbreite',
+                other: ' — begrenzt (Grund unbekannt)',
+              }[s.qualityLimitationReason] || '';
+              el('liveStats').textContent = `Gesendet: ${s.frameWidth}×${s.frameHeight}${fps}${why}`;
+            });
+          } catch (_) {
+            // Not every browser exposes these; the line just stays empty.
+          }
+        }
+      }, 2000);
     }
 
     async function startOffer() {
@@ -355,6 +480,9 @@
         dead: () => teardown('Verbindung getrennt.'),
       });
       stream.getTracks().forEach((track) => peer.pc.addTrack(track, stream));
+      // Needs a sender to attach to, so after addTrack and before the offer.
+      await applyQuality();
+      startStats();
 
       const offer = await peer.pc.createOffer();
       await peer.pc.setLocalDescription(offer);
@@ -374,7 +502,8 @@
           if (frame.peer) startOffer().catch((e) => teardown(e.message, true));
           else setStatus('Warte auf das Display…');
         },
-        // The display measured itself after we had already started capturing.
+        // Arrives late on a first cast: the display announces itself only once it
+        // has connected, by which time the picker has already handed over a stream.
         limits: (frame) => noteDisplayLimits(frame),
         peer: (connected) => {
           if (connected) startOffer().catch((e) => teardown(e.message, true));
@@ -430,6 +559,8 @@
       });
 
       showLive(true);
+      applyQuality();
+      showCap();
       connect();
       // The panel only exists for the connected sender, so it appears with the
       // stream and goes away with it.

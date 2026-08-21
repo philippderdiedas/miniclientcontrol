@@ -4,6 +4,9 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
+Prose documentation for humans lives in `docs/`. This file is the other kind: the
+invariants and traps that must not be broken, kept terse on purpose.
+
 `miniclientcontrol` is a single-binary digital-signage controller that runs **on the
 client/display device itself** (typically a Raspberry Pi — note the
 `arm-unknown-linux-gnueabihf` target in `target/`). It does two things at once:
@@ -607,6 +610,14 @@ it: the person helping a guest by phone was otherwise the only one who could not
 see what the display was showing. `/api/cast/info` still never carries it. Wrong codes are compared in constant time and lock the address
 out after 5 tries.
 
+The locale for dates and times on screen resolves in three steps: `--locale`,
+then the stored setting, then the machine's own (`LC_ALL`, `LC_TIME`, `LANG`, in
+that order — `LC_TIME` outranks `LANG` because this is a date setting, and mixed
+setups are common). `C` and `POSIX` resolve to nothing rather than to English, so
+`Intl` falls back to the display browser, which follows `--browser-language`.
+Keep the two apart: `--browser-language` decides what websites are asked to
+serve, `--locale` only how dates are written.
+
 **Settings are runtime state (see `src/settings.rs`), and the command line
 always wins.** `cast_enabled`, `cast_auth`, `cast_code` and the operator
 credentials live in the `settings` table and are edited from the admin UI — but a
@@ -706,6 +717,40 @@ Two traps found on the way, worth not rediscovering:
 
 `examples/certtest.rs` is the reproduction: it takes a URL and a mode (`none`,
 `explicit`, `adopt`, `adopt-explicit`, `wait`).
+
+### When a receiver cannot keep up
+
+Two knobs, and they belong to different people. `degradationPreference` on the
+sender decides *which way* quality gives -- resolution or framerate -- and that is
+the caster's call, because it follows from the content. The frame-size ceiling is
+the receiver's, reported over the `limits` channel and capped by the operator with
+`--cast-max-edge`.
+
+This is not a bespoke design: it is the same primitive every video platform
+exposes (Discord's "prioritise quality / framerate" sets exactly this). What the
+platforms have and a peer-to-peer link cannot is an SFU with simulcast, where the
+receiver picks a layer from several the sender emits. There is no standard
+receiver-driven resolution signal in plain WebRTC, which is why the `limits`
+message exists at all.
+
+Measured on a Raspberry Pi 2 receiving 1920x1080: it held the resolution and let
+the framerate fall to 5 fps, dropped roughly half the frames, drove the load
+average to 5.6 on four cores, and after two minutes the *sender* declared the
+connection dead -- ICE never failed, nothing crashed, no memory ran out. That is
+`maintain-resolution`, Chrome's default for screen content, working as specified.
+Packet loss and jitter are the only feedback WebRTC carries, and they were not
+enough to converge, because the bottleneck was decode rather than the network.
+
+**A lever deliberately not pulled:** that Pi has a hardware H.264 decoder
+(`/dev/video10`, `vcgencmd codec_enabled H264`) and no hardware VP8 or VP9, while
+Chrome tends to pick VP8 for screen shares. Preferring H.264 through
+`setCodecPreferences()` on the display might move decoding into hardware
+entirely. It was left alone for two reasons: it is unverified whether Chromium
+wires up V4L2 decode for WebRTC at all (the wrapper sets no decode flags, and
+`chrome://gpu` times out on that hardware), and one slow device is not enough
+evidence to bend a codec default around. Revisit if a second receiver shows the
+same pattern -- cheap display hardware generally has H.264 in silicon and not VP9,
+so it may yet turn out to be a general win rather than a Pi special case.
 
 ## Database
 

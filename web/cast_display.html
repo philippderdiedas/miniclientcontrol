@@ -148,9 +148,9 @@
     async function onSignal(data) {
       if (data.sdp) {
         // A fresh offer means a new media session -- the sender switched from
-        // screen to camera, or reconnected. Replace the old connection rather
-        // than ignoring the offer, which is what left picklecast showing a
-        // frozen frame after a source change.
+        // screen to camera, or reconnected. The old connection has to be replaced
+        // rather than the offer ignored, or a source change leaves a frozen frame
+        // on screen.
         if (peer) peer.close();
 
         peer = Cast.createPeer(window.__iceServers, socket, {

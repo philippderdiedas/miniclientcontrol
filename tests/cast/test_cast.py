@@ -175,7 +175,12 @@ async def main_flow():
         status, body = claim("QT7X")
         check("correct code reserves the session",
               status == 200 and len(body.get("ticket", "")) == 32, (status, body))
-        check("the reservation shows up as busy", http("GET", "/api/cast/info")[1]["busy"] is True)
+        # `busy` is answered relative to the asking address, so the holder is not
+        # told the slot is taken -- test_reserve covers both directions. What is
+        # observable from here is that the slot is held at all.
+        check("the reservation holds the slot",
+              http("GET", "/api/cast/state")[1]["reserved"] is True,
+              http("GET", "/api/cast/state")[1])
         check("but does not take over the display yet",
               http("GET", "/api/override")[1]["active"] is False)
 
@@ -187,8 +192,8 @@ async def main_flow():
 
     print("\n[5] display role is loopback only")
     with Server():
-        # Over TLS from the LAN address: plain HTTP no longer listens there, and
-        # this is the only way a non-loopback peer can reach the endpoint at all.
+        # Over TLS from the LAN address: plain HTTP is bound to loopback, so this is
+        # the only way a non-loopback peer can reach the endpoint at all.
         lan = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         lan.connect(("10.254.254.254", 1))
         lan_ip = lan.getsockname()[0]

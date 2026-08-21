@@ -109,6 +109,14 @@ pub struct Args {
     #[arg(long, env)]
     pub chromium_arg: Vec<String>,
 
+    /// Language tag for the dates and times the display shows, e.g. `de-DE`.
+    ///
+    /// Distinct from `--browser-language`, which decides what websites are asked
+    /// to serve. Unset, the stored setting applies, and failing that the tag is
+    /// taken from `LC_ALL`, `LC_TIME` or `LANG`.
+    #[arg(long, env)]
+    pub locale: Option<String>,
+
     /// Languages written into the browser profile.
     ///
     /// Chromium offers to translate a page whose language is not in this list, and
@@ -126,6 +134,16 @@ pub struct Args {
     ///   sits behind a proxy
     #[arg(long, env, default_value = "none")]
     pub public_url: String,
+
+    /// Cap on the longest frame edge a cast may send here, in pixels.
+    ///
+    /// The display reports what it can *show* (panel size, GPU texture limit).
+    /// Neither says anything about whether the CPU can decode that in real time,
+    /// and there is no signal in WebRTC for "my decoder is drowning" — so on weak
+    /// hardware the operator has to say. A Raspberry Pi 2 holds 1080p for about
+    /// two minutes before the sender gives up on it.
+    #[arg(long, env)]
+    pub cast_max_edge: Option<u32>,
 
     /// Optional STUN server for cast ICE. Only needed when host candidates on the
     /// LAN do not connect (mDNS `.local` candidates failing to resolve).
