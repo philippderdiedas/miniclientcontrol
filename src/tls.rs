@@ -12,13 +12,20 @@
 
 use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 const CERT_MARKER: &str = "-----BEGIN CERTIFICATE-----";
 
 pub const DEFAULT_CAST_TLS_PORT: u16 = 3443;
+/// Tried before anything else when no port was asked for.
+///
+/// A guest reads the address off a QR code or types it, and `https://host/` is
+/// meaningfully shorter than `https://host:3443/`. Binding it needs a privilege
+/// this process usually does not have, so it is an attempt and not a
+/// requirement -- see the capability note in docs/deployment.md.
+pub const PREFERRED_CAST_TLS_PORT: u16 = 443;
 /// How far past the default to look when no port was asked for.
 const AUTO_PORT_ATTEMPTS: u16 = 20;
 
@@ -33,6 +40,25 @@ pub fn bind_cast_listener(preferred: Option<u16>) -> Result<std::net::TcpListene
     let bind = |port: u16| std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port));
 
     let Some(port) = preferred else {
+        // 443 first, because it drops out of the URL entirely. A device without
+        // CAP_NET_BIND_SERVICE gets PermissionDenied here, which is ordinary and
+        // not worth a warning -- only an unexpected error is.
+        match bind(PREFERRED_CAST_TLS_PORT) {
+            Ok(listener) => {
+                info!("Cast HTTPS listening on {}", PREFERRED_CAST_TLS_PORT);
+                return Ok(listener);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse
+                ) => {}
+            Err(e) => warn!(
+                "Could not use port {} for the cast HTTPS listener: {}",
+                PREFERRED_CAST_TLS_PORT, e
+            ),
+        }
+
         let last = DEFAULT_CAST_TLS_PORT + AUTO_PORT_ATTEMPTS;
         for port in DEFAULT_CAST_TLS_PORT..last {
             match bind(port) {
@@ -95,6 +121,151 @@ pub fn system_hostname() -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+// ------------------------------------------------- the managed public name
+
+/// The zone whose wildcard certificate the managed name borrows.
+///
+/// Its DNS answers `<address-with-dashes>.clientctrl.cc` with the address spelled
+/// out in the label, so a private address gets a public name that a public
+/// certificate can cover. Note the zone is `clientctrl.cc` while the API serving
+/// the certificate is on `clientcontrol.cc` -- two different names, not a typo.
+pub const MANAGED_DOMAIN: &str = "clientctrl.cc";
+
+/// A name of the form `192-168-178-15.clientctrl.cc`.
+#[derive(Clone, Debug)]
+pub struct ManagedName {
+    pub host: String,
+    pub addr: IpAddr,
+}
+
+/// Spell an address as a single DNS label.
+///
+/// One label and not several: the wildcard is `*.clientctrl.cc`, which covers
+/// exactly one level, so an encoding that produced a dot would fall outside the
+/// certificate.
+fn dashed_label(addr: IpAddr) -> Option<String> {
+    match addr {
+        IpAddr::V4(v4) => Some(v4.to_string().replace('.', "-")),
+        IpAddr::V6(v6) => {
+            // `to_string` gives the RFC 5952 form, so `::` becomes `--` and the
+            // label stays as short as it can be -- this ends up in a QR code.
+            let text = v6.to_string();
+            // An IPv4-mapped or -compatible address renders with dots.
+            if text.contains('.') {
+                return None;
+            }
+            Some(text.replace(':', "-"))
+        }
+    }
+}
+
+fn is_global_v6(addr: &Ipv6Addr) -> bool {
+    // 2000::/3. `Ipv6Addr::is_global` is still unstable, hence the bit test.
+    (addr.segments()[0] & 0xe000) == 0x2000
+}
+
+fn is_ula_v6(addr: &Ipv6Addr) -> bool {
+    // fc00::/7, likewise unstable in std.
+    (addr.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// IPv6 addresses this machine answers on, read from `/proc/net/if_inet6`.
+///
+/// The UDP-connect trick used for IPv4 picks the source address for one
+/// destination, which cannot tell a ULA apart from a global address without a
+/// route to probe for. Reading the table is both simpler and complete.
+///
+/// Columns are: address as 32 hex digits, interface index, prefix length, scope,
+/// flags, name. Only globally scoped addresses are of interest -- link-local is
+/// useless without a zone index, and the zone's DNS does not answer for it.
+fn local_ipv6_addresses() -> Vec<Ipv6Addr> {
+    const TENTATIVE: u32 = 0x40;
+    const DEPRECATED: u32 = 0x20;
+    const DADFAILED: u32 = 0x08;
+    const TEMPORARY: u32 = 0x01;
+
+    let Ok(table) = std::fs::read_to_string("/proc/net/if_inet6") else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<(bool, Ipv6Addr)> = Vec::new();
+    for line in table.lines() {
+        let mut columns = line.split_whitespace();
+        let (Some(raw), Some(_index), Some(_prefix), Some(scope), Some(flags)) = (
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+            columns.next(),
+        ) else {
+            continue;
+        };
+        if raw.len() != 32 {
+            continue;
+        }
+        // Scope 0 is global; 0x20 link, 0x10 host, 0x40 site.
+        if u32::from_str_radix(scope, 16).unwrap_or(u32::MAX) != 0 {
+            continue;
+        }
+        let flags = u32::from_str_radix(flags, 16).unwrap_or(0);
+        if flags & (TENTATIVE | DEPRECATED | DADFAILED) != 0 {
+            continue;
+        }
+        let mut segments = [0u16; 8];
+        let mut ok = true;
+        for (i, segment) in segments.iter_mut().enumerate() {
+            match u16::from_str_radix(&raw[i * 4..i * 4 + 4], 16) {
+                Ok(value) => *segment = value,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            // A privacy address rotates, and a name built on one would stop
+            // resolving to this device -- so it sorts last rather than out.
+            found.push((flags & TEMPORARY != 0, Ipv6Addr::from(segments)));
+        }
+    }
+    found.sort_by_key(|(temporary, _)| *temporary);
+    found.into_iter().map(|(_, addr)| addr).collect()
+}
+
+/// Pick the address this device should be named after, if any qualifies.
+///
+/// **IPv4 first, on purpose.** A dashed IPv4 label is a fraction of the length of
+/// an IPv6 one, and the name's whole reason for existing is a QR code that a
+/// guest scans from across a room.
+///
+/// Only a private IPv4 counts: a device with a public address is not the case
+/// this feature is for, and pointing a public name at it would publish it.
+/// Link-local (169.254/16) and CGNAT (100.64/10) are both excluded --
+/// `Ipv4Addr::is_private` is exactly RFC 1918 and neither of those is in it.
+pub fn managed_name() -> Option<ManagedName> {
+    let v4 = primary_local_ipv4();
+    if v4.is_private() {
+        let host = dashed_label(IpAddr::V4(v4))?;
+        return Some(ManagedName {
+            host: format!("{}.{}", host, MANAGED_DOMAIN),
+            addr: IpAddr::V4(v4),
+        });
+    }
+
+    let v6 = local_ipv6_addresses();
+    // A routable address before a ULA: both work inside the LAN, and the routable
+    // one also works from outside it.
+    let pick = v6
+        .iter()
+        .find(|addr| is_global_v6(addr))
+        .or_else(|| v6.iter().find(|addr| is_ula_v6(addr)))?;
+    let host = dashed_label(IpAddr::V6(*pick))?;
+    Some(ManagedName {
+        host: format!("{}.{}", host, MANAGED_DOMAIN),
+        addr: IpAddr::V6(*pick),
+    })
 }
 
 /// Names the certificate must cover, sorted and deduplicated so the list can be
@@ -275,11 +446,33 @@ pub fn public_host(setting: &str) -> Option<String> {
 }
 
 /// The base URL handed to guests, always ending in a slash.
+/// `:443` is left off: it is the default for the scheme, and the whole point of
+/// preferring that port is a shorter address on the screen.
+fn authority(host: &str, tls_port: u16) -> String {
+    match tls_port {
+        PREFERRED_CAST_TLS_PORT => host.to_string(),
+        other => format!("{}:{}", host, other),
+    }
+}
+
+/// The managed base URL for whatever address this machine answers on *now*.
+///
+/// Recomputed rather than stored, exactly like `public_base_url`: a DHCP lease
+/// changes the address and therefore the name, and the wildcard covers the new
+/// one without any new certificate. Returns `None` once no address qualifies —
+/// the caller then falls back to the plain address.
+pub fn managed_base_url(tls_port: u16) -> Option<String> {
+    let name = managed_name()?;
+    Some(format!("https://{}/", authority(&name.host, tls_port)))
+}
+
 pub fn public_base_url(setting: &str, tls_port: u16) -> String {
     match public_url(setting) {
-        PublicUrl::LanAddress => format!("https://{}:{}/", primary_local_ipv4(), tls_port),
+        PublicUrl::LanAddress => {
+            format!("https://{}/", authority(&primary_local_ipv4().to_string(), tls_port))
+        }
         PublicUrl::Mdns(host) | PublicUrl::Host(host) => {
-            format!("https://{}:{}/", host, tls_port)
+            format!("https://{}/", authority(&host, tls_port))
         }
         // A full URL is taken at its word: the port belongs to whatever is
         // proxying, not to our listener.
@@ -308,5 +501,89 @@ pub async fn check_mdns(setting: &str) {
              is running on this device and on their machines.",
             host
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v4(s: &str) -> IpAddr {
+        IpAddr::V4(s.parse().unwrap())
+    }
+    fn v6(s: &str) -> IpAddr {
+        IpAddr::V6(s.parse().unwrap())
+    }
+
+    #[test]
+    fn ipv4_becomes_one_dashed_label() {
+        assert_eq!(dashed_label(v4("192.168.178.15")).unwrap(), "192-168-178-15");
+        assert_eq!(dashed_label(v4("10.0.0.1")).unwrap(), "10-0-0-1");
+    }
+
+    #[test]
+    fn ipv6_uses_the_compressed_form() {
+        // Measured against the zone: both `fd00--1` and the fully expanded
+        // `fd00-0-0-0-0-0-0-1` resolve, so the short one is safe and scans better.
+        assert_eq!(dashed_label(v6("fd00::1")).unwrap(), "fd00--1");
+        assert_eq!(dashed_label(v6("2001:db8::1")).unwrap(), "2001-db8--1");
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_are_refused() {
+        // These render with dots, which would make a second label and fall
+        // outside the `*.clientctrl.cc` wildcard.
+        assert!(dashed_label(v6("::ffff:192.168.1.1")).is_none());
+    }
+
+    #[test]
+    fn only_rfc1918_counts_as_private() {
+        for private in ["10.0.0.1", "172.16.5.4", "192.168.178.15", "172.31.255.254"] {
+            let IpAddr::V4(addr) = v4(private) else { unreachable!() };
+            assert!(addr.is_private(), "{private} should count");
+        }
+        // Deliberately excluded: CGNAT and link-local are not RFC 1918, and a
+        // public address is not the case this feature is for.
+        for other in ["100.64.0.1", "169.254.1.1", "8.8.8.8", "172.32.0.1"] {
+            let IpAddr::V4(addr) = v4(other) else { unreachable!() };
+            assert!(!addr.is_private(), "{other} should not count");
+        }
+    }
+
+    #[test]
+    fn the_default_https_port_is_left_out_of_the_url() {
+        // The whole reason for preferring 443 -- a shorter address on screen and
+        // fewer modules in the QR code.
+        assert_eq!(authority("host.example", 443), "host.example");
+        assert_eq!(authority("host.example", 3443), "host.example:3443");
+        assert_eq!(
+            public_base_url("signage.example.com", 443),
+            "https://signage.example.com/"
+        );
+        assert_eq!(
+            public_base_url("signage.example.com", 3443),
+            "https://signage.example.com:3443/"
+        );
+    }
+
+    #[test]
+    fn a_full_base_url_keeps_whatever_the_operator_wrote() {
+        // The port there belongs to whatever is proxying, not to our listener.
+        assert_eq!(
+            public_base_url("https://signage.example.com:8443", 443),
+            "https://signage.example.com:8443/"
+        );
+    }
+
+    #[test]
+    fn ipv6_classification() {
+        let global: Ipv6Addr = "2a10:c5c1:cafe:210::1".parse().unwrap();
+        let ula: Ipv6Addr = "fd00::1".parse().unwrap();
+        let link: Ipv6Addr = "fe80::1".parse().unwrap();
+
+        assert!(is_global_v6(&global) && !is_ula_v6(&global));
+        assert!(is_ula_v6(&ula) && !is_global_v6(&ula));
+        // Link-local is neither, and the zone does not answer for it anyway.
+        assert!(!is_global_v6(&link) && !is_ula_v6(&link));
     }
 }

@@ -51,7 +51,12 @@ class Server:
         cmd = [BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
                "--database-path", f"{SP}/t.db", "--assets-dir", f"{SP}/assets",
                "--cast-cert-path", f"{SP}/cert.pem", "--no-launch-browser"]
-        for k, v in self.flags.items():
+        flags = dict(self.flags)
+        # Off unless a case asks for it. `auto` reaches out to the certificate
+        # API and depends on this machine having a private address, which would
+        # make every unrelated test here network-dependent and slower.
+        flags.setdefault("managed_cert", "off")
+        for k, v in flags.items():
             cmd += ["--" + k.replace("_", "-")] + ([str(v)] if v is not True else [])
         self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):

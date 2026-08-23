@@ -1379,6 +1379,9 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "include_dir",
  "mime_guess",
  "qrcode",
@@ -1390,12 +1393,14 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2926,6 +2931,15 @@ checksum = "f2c7c5718134e770ee62af3b6b4a84518ec10101aad610c024b64d6ff29bb1ff"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

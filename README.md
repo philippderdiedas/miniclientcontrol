@@ -50,8 +50,12 @@ cargo run --release
 
 2. Open the pages (accept the certificate warning once):
 
-- `https://<device-ip>:3443/` — the **cast page** for guests
-- `https://<device-ip>:3443/admin.html` — the **operator UI**
+- `https://<device>/` — the **cast page** for guests
+- `https://<device>/admin.html` — the **operator UI**
+
+  On a private network `<device>` is a name derived from the LAN address, such as
+  `192-168-178-15.clientctrl.cc`, served with a certificate browsers already
+  trust. Otherwise it is `<device-ip>:3443` with a self-signed one.
 
 Port 3000 is plain HTTP and binds to loopback only. It exists for the display
 browser on this device, not for people; `--http-listen 0.0.0.0` opens it up if
@@ -112,7 +116,7 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --basic-auth-user <string>   (optional, must be set with password)
 --basic-auth-password <string> (optional, must be set with user)
 --disable-cast               (default: false)
---cast-tls-port <u16>        (unset: 3443 or next free; set: fatal if taken)
+--cast-tls-port <u16>        (unset: 443, else 3443 or next free; set: fatal if taken)
 --cast-cert-path <path>      (default: cast-cert.pem)
 --cast-cert-san <name,...>   (extra hostnames/IPs for the certificate)
 --cast-auth <none|code|pairing>  (default: none)
@@ -125,6 +129,7 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --chromium-arg <flag>        (extra browser flags, repeatable)
 --browser-language <list>    (default: de,de-DE,en-US,en)
 --locale <tag>               (dates and times; default: from LC_ALL/LC_TIME/LANG)
+--managed-cert <auto|off>    (real cert for a <lan-ip>.clientctrl.cc name; default: auto)
 --public-url <none|mdns|X>   (how guests reach this device; default: none;
                               a custom .local name is published via avahi)
 ```
@@ -206,7 +211,7 @@ while one exists, so the admin page can show what the display is showing.
 
 ## Screen Casting
 
-A guest opens `https://<device-ip>:3443/`, enters the code if one is required,
+A guest opens `https://<device>/`, enters the code if one is required,
 and picks **Bildschirm teilen** or **Kamera teilen**. The code is checked the
 moment it is typed and the session is reserved right then — before the browser's
 screen picker opens, so nobody chooses a window only to be told the code was
@@ -228,9 +233,9 @@ it left off.
 By default that is the device's LAN address. `--public-url` changes it:
 
 ```bash
---public-url none                        # https://<lan-ip>:3443/   (default)
---public-url mdns                        # https://<hostname>.local:3443/
---public-url signage.example.com         # https://signage.example.com:3443/
+--public-url none                        # https://<lan-ip>-dashed.clientctrl.cc/  (default)
+--public-url mdns                        # https://<hostname>.local/
+--public-url signage.example.com         # https://signage.example.com/
 --public-url https://signage.example.com # taken as-is, for a reverse proxy
 ```
 

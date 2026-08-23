@@ -87,6 +87,12 @@ That is a different setting from `--browser-language`, which decides what
 
 ## Screen casting
 
+By default the device gives guests a name like
+`https://192-168-178-15.clientctrl.cc/` and serves a certificate a browser
+already trusts, so there is no warning page to click through and no port to type.
+It falls back to the bare address with a self-signed certificate when it cannot
+arrange that — see [casting.md](casting.md#a-real-certificate-for-a-private-address).
+
 A guest opens the device's address, optionally enters a code, and shares a screen
 or a camera. The display switches to it, and returns to the playlist when the
 guest stops, closes the laptop, or walks away. See [casting.md](casting.md).

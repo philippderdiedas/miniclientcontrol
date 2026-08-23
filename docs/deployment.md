@@ -162,6 +162,40 @@ The last two lines matter. `assign` only chooses a workspace; without pinning
 workspaces to outputs, i3 decides which screen a workspace lands on, and not
 reliably the same way after a restart.
 
+## Giving the controller port 443
+
+With no `--cast-tls-port` the listener tries 443 before falling back to 3443, so
+the port drops out of the address guests are given. Ports below 1024 are
+privileged, and the controller does not ask for anything special — if it cannot
+have 443 it takes 3443 and says nothing, because on most machines that is simply
+the normal outcome.
+
+Granting it is a sysadmin decision, not something the binary should arrange for
+itself. Three ways, roughly in order of how little they change:
+
+```bash
+# 1. the capability, on the binary
+sudo setcap cap_net_bind_service=+ep ~/miniclientcontrol/miniclientcontrol
+
+# 2. lower the threshold for the whole machine
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443   # /etc/sysctl.d to persist
+
+# 3. run it as a system service with AmbientCapabilities=CAP_NET_BIND_SERVICE
+```
+
+**A capability set with `setcap` does not survive a deploy.** It is an attribute
+of the inode, and the update procedure above renames a new file over the old one,
+so the new binary has no capability and quietly lands on 3443 — while the short
+URL that was handed out, printed or scanned still points at 443. Re-run `setcap`
+after every update, or use one of the other two.
+
+A systemd **user** service cannot be given `AmbientCapabilities`: the user
+manager has no capabilities to hand out. That leaves options 1 and 2 for the
+usual kiosk arrangement.
+
+On a machine driving two displays only one instance can hold 443. The other falls
+back, which works, but only one of the two gets the short address.
+
 ## Runtime settings versus flags
 
 `cast_enabled`, `cast_auth`, `cast_code`, the locale, the overlay and the operator

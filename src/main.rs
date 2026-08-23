@@ -3,6 +3,7 @@ mod handlers;
 mod models;
 mod browser;
 mod web;
+mod managed_cert;
 mod tls;
 mod cast;
 mod settings;
@@ -197,6 +198,37 @@ async fn main() -> Result<()> {
         .map(|addr| addr.port())
         .unwrap_or(tls::DEFAULT_CAST_TLS_PORT);
 
+    // Resolved here, before AppState exists, because the name guests are given
+    // depends on whether this succeeded -- and every URL the API hands out is
+    // built from that answer.
+    //
+    // Only for `--public-url none`: anything else is a name the operator chose.
+    let managed = if cast_listener.is_some()
+        && args.managed_cert == "auto"
+        && matches!(tls::public_url(&args.public_url), tls::PublicUrl::LanAddress)
+    {
+        match tls::managed_name() {
+            Some(name) => {
+                // Log the mapping, not just the name: when a guest's resolver refuses
+                // it, the first question is always which address it should answer with.
+                tracing::info!("Advertising this device as {} -> {}", name.host, name.addr);
+                managed_cert::obtain(&args.cast_cert_path, &name.host)
+                    .await
+                    .map(|bundle| (name, bundle))
+            }
+            None => {
+                tracing::info!(
+                    "No private IPv4 and no usable IPv6 address; keeping the \
+                     self-signed certificate and the bare LAN address"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let managed_cert_active = managed.is_some();
+
     // 3. Init State
     let state = AppState {
         pool: pool.clone(),
@@ -210,6 +242,7 @@ async fn main() -> Result<()> {
         override_item: Arc::new(Mutex::new(None)),
         cast: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
+        managed_cert: managed_cert_active,
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
@@ -272,18 +305,39 @@ async fn main() -> Result<()> {
     // over TLS could not do towards a plain-HTTP API anyway.
     if let Some(listener) = cast_listener {
         // A name guests are told to type has to be in the certificate too, or
-        // they get a name mismatch on top of the unknown-issuer warning.
-        let mut cert_names = args.cast_cert_san.clone();
-        if let Some(host) = tls::public_host(&args.public_url) {
-            cert_names.push(host);
-        }
-        match tls::load_cast_tls(&args.cast_cert_path, &cert_names).await {
+        // they get a name mismatch on top of the unknown-issuer warning. A
+        // managed certificate already covers its name by construction, and its
+        // SANs are not ours to choose, so that path skips the generator whole.
+        let loaded = match &managed {
+            Some((_, bundle)) => axum_server::tls_rustls::RustlsConfig::from_pem(
+                bundle.fullchain.clone().into_bytes(),
+                bundle.key.clone().into_bytes(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("loading the managed certificate into rustls: {e}")),
+            None => {
+                let mut cert_names = args.cast_cert_san.clone();
+                if let Some(host) = tls::public_host(&args.public_url) {
+                    cert_names.push(host);
+                }
+                tls::load_cast_tls(&args.cast_cert_path, &cert_names).await
+            }
+        };
+        match loaded {
             Ok(config) => {
+                if let Some((name, bundle)) = managed {
+                    managed_cert::spawn_renewal(
+                        config.clone(),
+                        args.cast_cert_path.clone(),
+                        name.host,
+                        bundle,
+                    );
+                }
                 let tls_app = app.clone();
                 // Must go through the same resolution the API and the QR code
                 // use, or the first thing an operator reads on startup disagrees
                 // with the address guests are actually given.
-                let base = tls::public_base_url(&args.public_url, cast_tls_port);
+                let base = cast::sender_url(&state);
                 tracing::info!("Guests: {base}  |  Operator: {base}admin.html");
                 let server = axum_server::from_tcp_rustls(listener, config)?;
                 tokio::spawn(async move {

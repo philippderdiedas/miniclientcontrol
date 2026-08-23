@@ -135,6 +135,22 @@ pub struct Args {
     #[arg(long, env, default_value = "none")]
     pub public_url: String,
 
+    /// Whether to take a real certificate for a name derived from the LAN
+    /// address, instead of generating a self-signed one.
+    ///
+    /// Only applies when `--public-url` is `none`: any other setting is a name
+    /// the operator chose, and second-guessing it would be wrong. When it
+    /// applies, the device is advertised as `<address>.clientctrl.cc`, whose
+    /// public DNS resolves straight back to the private address, and the
+    /// matching wildcard certificate is fetched and kept fresh. Guests then get
+    /// no warning page at all.
+    ///
+    /// `off` keeps the self-signed certificate and the bare address. Worth
+    /// reaching for on a device that must not talk to anything outside the LAN,
+    /// since `auto` contacts the certificate API at startup.
+    #[arg(long, env, default_value = "auto", value_parser = ["auto", "off"])]
+    pub managed_cert: String,
+
     /// Cap on the longest frame edge a cast may send here, in pixels.
     ///
     /// The display reports what it can *show* (panel size, GPU texture limit).
@@ -296,6 +312,10 @@ pub struct AppState {
     /// The port the cast listener actually bound, which is not necessarily the
     /// one in `args` — see `tls::bind_cast_listener`.
     pub cast_tls_port: u16,
+    /// Whether a managed certificate is in use, which decides what name guests
+    /// are given. The name itself is *not* cached: it follows the machine's
+    /// current address, and the wildcard covers whatever that turns into.
+    pub managed_cert: bool,
     /// Operator-editable configuration. Read on nearly every request, so it sits
     /// behind its own `RwLock` rather than inside the cast session's mutex,
     /// which is held across signaling work.

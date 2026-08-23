@@ -243,8 +243,44 @@ On teardown the previous override is restored **only if the one on screen is sti
 ours**. An operator who set a different override during the cast made a newer
 decision.
 
+### The managed certificate (`src/managed_cert.rs`)
+
+What it is and why: [docs/casting.md](docs/casting.md#a-real-certificate-for-a-private-address).
+The rules:
+
+- **`cast::sender_url` is the only place that answers "what are guests told".**
+  It branches on `AppState::managed_cert`. `main` logs the startup banner through
+  it too — a second copy of that resolution drifts, and then the first line an
+  operator reads disagrees with the QR code.
+- **The name is recomputed, never stored.** `tls::managed_name()` follows the
+  machine's current address, so a DHCP move renames the device and needs no new
+  certificate — the wildcard already covers it. Caching the name would strand it.
+- **A managed certificate skips `subject_alt_names`/`generate`/the `.sans`
+  sidecar entirely.** Its SANs are not ours to choose, and running the
+  regeneration check against them would throw the certificate away on every
+  start.
+- **`Bundle::covers` is checked before use**, on the fetched *and* the cached
+  copy. Serving a certificate for the wrong name is worse than falling back: the
+  browser warning is scarier and nothing says why.
+- **A wildcard covers exactly one label.** That is why the address is encoded as
+  one — `dashed_label` refuses an IPv4-mapped IPv6, which would render with dots.
+- **Never fail hard.** No address, no network, a bad response: fall back to
+  self-signed. Casting must not keep the signage from booting.
+- Renewal uses `RustlsConfig::reload_from_pem`, not a restart — a restart
+  navigates the display browser, and a failed swap must leave the old
+  certificate serving.
+- **Not `reqwest`**: its `rustls` feature hard-wires `aws-lc-rs`, which needs a C
+  toolchain the armv7 `cross` image does not have. hyper + `tokio-rustls` +
+  `webpki-roots` is the combination that cross-compiles. Verify with `cross
+  build` before assuming any new HTTP dependency is free.
+- The Python harness passes `--managed-cert off` by default. Without that every
+  unrelated test in `tests/cast/` would need the network and a private address.
+
 **`AppState::cast_tls_port` is the port actually bound — build the guest URL from
-it, never from `args.cast_tls_port`.** The socket is bound in `main` before
+it, never from `args.cast_tls_port`.** With no flag the listener prefers 443 and
+falls back to 3443, so the bound port is even less predictable than before;
+`authority()` drops `:443` from the URL, which is the entire reason for
+preferring it. The socket is bound in `main` before
 `AppState` exists, so a clash is a startup error rather than casting silently
 dead.
 

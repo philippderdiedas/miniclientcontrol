@@ -89,6 +89,71 @@ the display is showing. The public endpoint never carries it.
 sender, but does **not** stop the process. Casting must never keep the signage
 from booting, and the operator can fix it in the UI without a restart.
 
+## A real certificate, for a private address
+
+By default a guest meets a self-signed certificate and clicks through a warning.
+That is one more thing to explain to somebody who only wants to show a slide, and
+on a phone the warning is worse than on a laptop.
+
+With `--public-url none` (the default) and `--managed-cert auto` (also the
+default) the device instead advertises itself as
+`192-168-178-15.clientctrl.cc`. That zone's public DNS answers with the address
+spelled out in the name, so the name points straight back into the LAN — and a
+public wildcard certificate for `*.clientctrl.cc` covers it. The controller
+fetches that certificate from `api.clientcontrol.cc`, caches it beside the
+self-signed one, and renews it in the background. Guests get no warning at all.
+
+Note the two names: the certificate is served by `clientcontrol.cc`, and the zone
+it certifies is `clientctrl.cc`. Not a typo.
+
+IPv4 comes first and only when it is [RFC 1918][rfc1918] private — `10/8`,
+`172.16/12`, `192.168/16`, and deliberately not CGNAT or link-local. A device on
+a public address is not the case this is for. Failing that, a globally routable
+IPv6 is preferred over a ULA, and both are encoded the same way with `:` becoming
+`-`, so `fd00::1` is `fd00--1.clientctrl.cc`. Link-local is never used: it needs a
+zone index to be reachable at all, and the zone does not answer for it.
+
+IPv4 before IPv6 is for the QR code. A dashed IPv4 label is a fraction of the
+length of an IPv6 one, and the code is scanned from across a room.
+
+[rfc1918]: https://datatracker.ietf.org/doc/html/rfc1918
+
+Three properties worth knowing:
+
+- **The name follows the address.** It is recomputed rather than stored, so a
+  DHCP move changes the name — and needs no new certificate, because the wildcard
+  already covers whatever it turns into. The old self-signed path had to
+  regenerate on every address change.
+- **The private key is public.** Every device needs it, so the API serves it
+  without authentication, which means anybody can impersonate a
+  `*.clientctrl.cc` name. This is the same arrangement `traefik.me` and
+  `local.gd` use. The trade is deliberate: the names only ever point into
+  somebody's LAN, and the alternative is a warning page for every guest.
+- **It can fail, and failure is quiet.** No network, no private address, or an
+  API that will not answer, and the device falls back to the self-signed
+  certificate and the bare address. `--managed-cert off` makes that the
+  permanent choice, which is the setting for a device that must not talk to
+  anything outside the LAN.
+
+When the cache has expired and the API cannot be reached, the **expired**
+certificate is served rather than falling back. Falling back would change the
+advertised *name*, and every QR code already printed or scanned would stop
+working; an expired certificate costs the same warning page the fallback would
+have shown anyway.
+
+## Port 443, when it can be had
+
+With no `--cast-tls-port`, the listener tries 443 first and drops to 3443 and
+upwards if it cannot have it. On 443 the port disappears from the URL, which is
+the whole point: `https://192-168-178-15.clientctrl.cc/` is shorter to read out,
+shorter to type, and fewer modules in the QR code.
+
+Binding a port below 1024 needs a privilege this process does not have by
+default, so failing to get it is ordinary and silent. Granting it is a deployment
+decision — see [deployment.md](deployment.md#giving-the-controller-port-443). On a
+machine driving two displays only one of the two can have 443; the other takes
+3443 and its URL keeps the port.
+
 ## HTTPS is not optional
 
 `getDisplayMedia` and `RTCPeerConnection` only exist in a secure context. The

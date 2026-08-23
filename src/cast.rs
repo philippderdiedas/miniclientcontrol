@@ -242,6 +242,11 @@ pub fn is_cast_public_path(path: &str) -> bool {
 /// depends on `--public-url`, on the port actually bound, and on the machine's
 /// current address, all of which can change without anybody editing anything.
 pub fn sender_url(state: &AppState) -> String {
+    if state.managed_cert {
+        if let Some(url) = crate::tls::managed_base_url(state.cast_tls_port) {
+            return url;
+        }
+    }
     crate::tls::public_base_url(&state.args.public_url, state.cast_tls_port)
 }
 

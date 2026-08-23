@@ -61,6 +61,21 @@ address that is casting. The operator's copy on the admin page needs no cast. If
 neither shows up, the device has no `pactl` or no sound server, the backend
 reports itself unavailable, and the panel stays hidden on purpose.
 
+**Guests get "server not found" for a `.clientctrl.cc` name.**
+That name is public DNS pointing at a private address, which is exactly the
+pattern DNS-rebinding protection blocks — dnsmasq's `stop-dns-rebind`, Pi-hole,
+some OpenWRT builds and a fair number of consumer routers. It is the *guest's*
+resolver doing it, so nothing on this device can detect or fix it. The startup
+log prints the name and the address it should answer with, which is the first
+thing to compare against what the guest's machine resolves. `--managed-cert off`
+falls back to the bare address, which no resolver can object to.
+
+**The URL still has `:3443` in it.**
+The listener could not bind 443 and fell back, which is silent by design. Either
+the privilege is missing (see
+[deployment.md](deployment.md#giving-the-controller-port-443)) or something else
+holds the port — on a two-display machine, the other instance.
+
 **`avahi-publish` errors every few minutes.**
 `avahi-utils` is not installed and `--public-url` names a `.local` host that is not
 this machine's hostname. Either install it, or set the hostname to that name, or
