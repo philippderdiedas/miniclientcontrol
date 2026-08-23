@@ -37,7 +37,7 @@ Independent of the rest and valuable on its own: today any URL served as an atta
 - Consumes: nothing
 - Produces: nothing other tasks call. The behaviour is global.
 
-- [ ] **Step 1: Find the exact insertion point**
+- [x] **Step 1: Find the exact insertion point**
 
 Run: `grep -n 'ignore_https_errors' -A 12 src/browser.rs`
 
@@ -45,7 +45,7 @@ You are looking for the block that builds `HandlerConfig` and then calls
 `Browser::connect_with_config`. The new command goes *after* a successful
 connect, because it needs the `browser` handle.
 
-- [ ] **Step 2: Send `Browser.setDownloadBehavior` once per connection**
+- [x] **Step 2: Send `Browser.setDownloadBehavior` once per connection**
 
 Add the import near the other `chromiumoxide::cdp` imports at the top of `src/browser.rs`:
 
@@ -89,12 +89,12 @@ Immediately after the connect succeeds and before the control page is picked, ad
 
 Make sure `warn` is imported in that file; if not, add it to the existing `tracing` import.
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 Run: `cargo build`
 Expected: `Finished` with no errors.
 
-- [ ] **Step 4: Verify against a real browser**
+- [x] **Step 4: Verify against a real browser**
 
 Start a Chrome on the CDP port the tests use, run the controller against it, and
 navigate to something that downloads.
@@ -131,7 +131,7 @@ pkill -f 'remote-debugging-port=9242'; kill "$(cat /tmp/dlspike/http.pid)"
 pkill -f 'cast-tls-port 3465'
 ```
 
-- [ ] **Step 5: Automate it in `test_browser.py`**
+- [x] **Step 5: Automate it in `test_browser.py`**
 
 The Python suite's other files run with `--no-launch-browser`, so there is no
 browser in them to download anything. `test_browser.py` already starts a real
@@ -187,7 +187,7 @@ Run: `cd tests/cast && python3 test_browser.py`
 Expected: `ALL PASSED`, including the new case. Stash the `src/browser.rs` change
 and rerun to watch it fail — that is what proves the test is testing something.
 
-- [ ] **Step 6: Document the invariant**
+- [x] **Step 6: Document the invariant**
 
 In `CLAUDE.md`, under `## The display browser (\`src/chromium.rs\`)`, add:
 
@@ -218,7 +218,7 @@ at `/etc/chromium/policies/managed/no-downloads.json`:
 policy above.
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/browser.rs tests/cast/test_browser.py CLAUDE.md docs/raspberry-pi.md
@@ -246,14 +246,14 @@ never wanted a download, so there is no case to keep working."
 - Consumes: nothing
 - Produces: `AppSettings::guest_pages_enabled: bool` and `Locks::guest_pages: bool`, read by Task 4 in `authorize_sender` and reported by Task 6.
 
-- [ ] **Step 1: Read how an existing boolean setting is threaded**
+- [x] **Step 1: Read how an existing boolean setting is threaded**
 
 Run: `grep -n 'cast_enabled' src/settings.rs src/models.rs`
 
 Every place that names `cast_enabled` needs a sibling for `guest_pages_enabled`,
 except that its default is **false**, not true.
 
-- [ ] **Step 2: Add the CLI flag**
+- [x] **Step 2: Add the CLI flag**
 
 In `src/models.rs`, beside `pub managed_cert: String`:
 
@@ -270,7 +270,7 @@ In `src/models.rs`, beside `pub managed_cert: String`:
 No `default_value`: `None` has to mean "not given", which is what makes the lock
 work.
 
-- [ ] **Step 3: Thread it through settings**
+- [x] **Step 3: Thread it through settings**
 
 In `src/settings.rs`, add the key beside the others:
 
@@ -351,7 +351,7 @@ did not change, so the operator could not edit anything else on the page.
 
 Wherever `AppSettings` is constructed in tests or defaults, add the field.
 
-- [ ] **Step 4: Write the failing unit test**
+- [x] **Step 4: Write the failing unit test**
 
 Add to the `#[cfg(test)]` module in `src/settings.rs`, or create one if absent:
 
@@ -388,13 +388,13 @@ Then call `resolve_guest_pages(args.guest_pages.as_deref(), Some(stored_guest_pa
 from the resolve function instead of the inline `match` written in Step 3, so the
 tested code is the code that runs.
 
-- [ ] **Step 5: Run the test to see it fail, then pass**
+- [x] **Step 5: Run the test to see it fail, then pass**
 
 Run: `cargo test --bins the_flag_pins_guest_pages`
 Expected first: a compile error naming `resolve_guest_pages`, until Step 4's
 helper exists. After it exists: PASS.
 
-- [ ] **Step 6: Extend the Python settings test**
+- [x] **Step 6: Extend the Python settings test**
 
 In `tests/cast/test_settings.py`, following the shape already used for
 `cast_enabled`, add cases that the setting round-trips through
@@ -404,7 +404,7 @@ In `tests/cast/test_settings.py`, following the shape already used for
 Run: `cd tests/cast && python3 test_settings.py`
 Expected: `ALL PASSED`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/settings.rs src/models.rs tests/cast/test_settings.py
@@ -436,7 +436,7 @@ Pure functions, no wiring. Everything later depends on these two names.
   Task 4 calls `parse_guest_url` on the `present` frame and stores the `Url`;
   Task 6 calls `redact` for `/api/cast/state` and every log line.
 
-- [ ] **Step 1: Add the dependency**
+- [x] **Step 1: Add the dependency**
 
 In `Cargo.toml`, beside the other direct dependencies:
 
@@ -449,7 +449,7 @@ url = "2"
 Run: `cargo build`
 Expected: `Finished`, nothing new compiled.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `src/guest_page.rs` containing only the test module for now:
 
@@ -511,7 +511,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run it to see it fail**
+- [x] **Step 3: Run it to see it fail**
 
 Run: `cargo test --bins guest_page`
 Expected: FAIL — `cannot find function \`parse_guest_url\``.
@@ -519,7 +519,7 @@ Expected: FAIL — `cannot find function \`parse_guest_url\``.
 You will also need `mod guest_page;` in `src/main.rs` beside the other module
 declarations before the test is even compiled.
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Above the test module in `src/guest_page.rs`:
 
@@ -574,7 +574,7 @@ pub fn redact(url: &Url) -> String {
 Note `is_none_or` needs a recent Rust; if the toolchain rejects it, use
 `map_or(true, str::is_empty)`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 Run: `cargo test --bins guest_page`
 Expected: PASS, 5 tests.
@@ -583,7 +583,7 @@ If `redaction_reveals_a_deceptive_host` fails on a trailing slash, adjust the
 *expectation* to whatever `Url` canonicalises to — do not weaken the assertion to
 a `contains`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock src/guest_page.rs src/main.rs
@@ -612,7 +612,7 @@ The core change. Everything here is in `src/cast.rs`.
 - Consumes: `guest_page::parse_guest_url`, `guest_page::redact` (Task 3); `AppSettings::guest_pages_enabled` (Task 2)
 - Produces: `CastSession::showing: Showing` and `pub fn showing_json(&self) -> serde_json::Value`, read by Task 6.
 
-- [ ] **Step 1: Add the mode and the longer grace**
+- [x] **Step 1: Add the mode and the longer grace**
 
 Beside the other constants in `src/cast.rs`:
 
@@ -659,7 +659,7 @@ pub enum ClaimMode {
 Add `mode: ClaimMode` to `Reservation`, and `showing: Showing` plus
 `pending_mode: ClaimMode` to `CastSession`. Add `use url::Url;` to the imports.
 
-- [ ] **Step 2: Make activate/deactivate take what they install**
+- [x] **Step 2: Make activate/deactivate take what they install**
 
 Replace the hardcoded target in `activate_display` with a parameter. The
 signature becomes:
@@ -732,7 +732,7 @@ and clear `session.showing = Showing::Nothing;` beside the other resets.
 
 Update the one existing call site in `register_peer` (Step 4 rewrites it anyway).
 
-- [ ] **Step 3: Pick the grace by what is showing**
+- [x] **Step 3: Pick the grace by what is showing**
 
 In `unregister_peer`, the grace call needs to know the mode. Capture it in the
 same lock that reads `holding`:
@@ -753,7 +753,7 @@ fn watch_sender_grace(state: AppState, epoch: u64, grace: Duration) {
         tokio::time::sleep(grace).await;
 ```
 
-- [ ] **Step 4: Do not pin the cast page for a page-mode sender**
+- [x] **Step 4: Do not pin the cast page for a page-mode sender**
 
 At the end of `register_peer`, replace the unconditional activation:
 
@@ -772,7 +772,7 @@ At the end of `register_peer`, replace the unconditional activation:
     }
 ```
 
-- [ ] **Step 5: Handle the `present` frame**
+- [x] **Step 5: Handle the `present` frame**
 
 In `handle_frame`, beside the `limits` arm:
 
@@ -835,7 +835,7 @@ In `handle_frame`, beside the `limits` arm:
 
 Import `ScrollOptions` alongside `ScrollMode` at the top of the file.
 
-- [ ] **Step 6: Make the gate mode-aware**
+- [x] **Step 6: Make the gate mode-aware**
 
 In `authorize_sender`, take the mode as an argument and check the right switch:
 
@@ -877,7 +877,7 @@ and replace the `if !enabled` block:
 
 The code check that follows stays exactly as it is: the same door guards both.
 
-- [ ] **Step 7: Carry the mode through claim**
+- [x] **Step 7: Carry the mode through claim**
 
 Add to `ClaimRequest`:
 
@@ -904,7 +904,7 @@ the session:
         session.pending_mode = reservation.mode;
 ```
 
-- [ ] **Step 8: Expose what is showing**
+- [x] **Step 8: Expose what is showing**
 
 Add to `impl CastSession`:
 
@@ -920,7 +920,7 @@ Add to `impl CastSession`:
     }
 ```
 
-- [ ] **Step 9: Build and run the existing suite**
+- [x] **Step 9: Build and run the existing suite**
 
 Run: `cargo build`
 Expected: `Finished`. Fix every call-site error the signature changes produced.
@@ -937,7 +937,7 @@ done
 Expected: `ALL PASSED` for each. These are the files that exercise the claim,
 socket and override paths you just changed.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add src/cast.rs
@@ -967,14 +967,14 @@ while a guest page is up too -- the slot is taken either way."
 - Consumes: `POST /api/cast/claim` with `{"mode":"page"}`, the `present` frame, the `presenting` and `error` frames (Task 4); `page_enabled` from `/api/cast/info` (Task 6 — implement Task 6 first, or stub the field read as `info.page_enabled === true`)
 - Produces: nothing other tasks consume.
 
-- [ ] **Step 1: Read the existing share flow**
+- [x] **Step 1: Read the existing share flow**
 
 Run: `grep -n 'shareBlock\|shareScreen\|liveBlock\|claim' web/index.html | head -30`
 
 Follow how `shareScreen` claims, opens the socket, and swaps `shareBlock` for
 `liveBlock`. The page flow copies that structure; do not invent a second one.
 
-- [ ] **Step 2: Add the markup**
+- [x] **Step 2: Add the markup**
 
 Inside `#shareBlock`, after the camera button:
 
@@ -1004,7 +1004,7 @@ And a block beside `#liveBlock`:
     </div>
 ```
 
-- [ ] **Step 3: Wire it**
+- [x] **Step 3: Wire it**
 
 Following the existing script's style — `textContent`, no `innerHTML`:
 
@@ -1099,7 +1099,7 @@ payload:
 Casting being off hides the two share buttons and leaves this one, which is the
 independent-switch case working.
 
-- [ ] **Step 4: Rebuild and look at it**
+- [x] **Step 4: Rebuild and look at it**
 
 Run: `cargo build`
 
@@ -1116,7 +1116,7 @@ Then start an instance with the setting on and open the guest page in a browser:
 
 Expected: the third button appears; with `--guest-pages off` it does not.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/index.html
@@ -1139,7 +1139,7 @@ something."
 - Consumes: `CastSession::showing_json` (Task 4), `AppSettings::guest_pages_enabled` and `Locks::guest_pages` (Task 2)
 - Produces: `page_enabled` on `/api/cast/info`, consumed by Task 5.
 
-- [ ] **Step 1: Add `page_enabled` to the public info**
+- [x] **Step 1: Add `page_enabled` to the public info**
 
 In `cast_info`, extend the settings read and the JSON:
 
@@ -1153,7 +1153,7 @@ In `cast_info`, extend the settings read and the JSON:
 and add `"page_enabled": page_enabled,` to the object it returns. Add **nothing
 else** there: that endpoint is public and reaches the whole LAN.
 
-- [ ] **Step 2: Add `showing` to the operator state**
+- [x] **Step 2: Add `showing` to the operator state**
 
 In `cast_state`, add to the object it builds:
 
@@ -1163,7 +1163,7 @@ In `cast_state`, add to the object it builds:
 
 `showing_json` redacts, so this is safe to render into the admin page.
 
-- [ ] **Step 3: Admin UI**
+- [x] **Step 3: Admin UI**
 
 In `web/admin.html`, in the card that holds the casting settings, add a checkbox
 following the exact shape of the existing `cast_enabled` control, including the
@@ -1192,7 +1192,7 @@ In the cast status card, render what is showing:
         }
 ```
 
-- [ ] **Step 4: Rebuild and check both**
+- [x] **Step 4: Rebuild and check both**
 
 Run: `cargo build`
 
@@ -1203,7 +1203,7 @@ curl -s http://127.0.0.1:3063/api/cast/state | python3 -m json.tool
 
 Expected: `page_enabled` present in the first, `showing` in the second.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/cast.rs web/admin.html
@@ -1226,7 +1226,7 @@ land on the operator's screen."
 - Consumes: everything above.
 - Produces: nothing.
 
-- [ ] **Step 1: Read the harness**
+- [x] **Step 1: Read the harness**
 
 Run: `sed -n '1,80p' tests/cast/test_cast.py`
 
@@ -1236,7 +1236,7 @@ way. `ws()` claims for senders — you will need a variant that claims with
 `mode="page"`, so extend `claim()` with an optional mode rather than writing a
 second one.
 
-- [ ] **Step 2: Write the test file**
+- [x] **Step 2: Write the test file**
 
 ```python
 """A guest putting a web page on the display instead of casting."""
@@ -1410,7 +1410,7 @@ sys.exit(1 if failures else 0)
 flag, depending on what the harness supports — check how `test_settings.py` turns
 casting off and follow that.
 
-- [ ] **Step 3: Extend `claim()` and `ws()` in the harness**
+- [x] **Step 3: Extend `claim()` and `ws()` in the harness**
 
 In `tests/cast/test_cast.py`:
 
@@ -1427,7 +1427,7 @@ def claim(code=None, port=None, mode=None):
 
 and give `ws()` a `mode=None` parameter that it passes to `claim`.
 
-- [ ] **Step 4: Run it**
+- [x] **Step 4: Run it**
 
 Run: `cd tests/cast && python3 test_guestpage.py`
 Expected: `ALL PASSED`.
@@ -1435,7 +1435,7 @@ Expected: `ALL PASSED`.
 Where a check fails, fix the code rather than the assertion, unless the
 assertion encodes something the spec did not ask for.
 
-- [ ] **Step 5: Run the whole suite**
+- [x] **Step 5: Run the whole suite**
 
 With no controller of your own running:
 
@@ -1454,7 +1454,7 @@ Expected: 15 PASS.
 Add the new file to the list in `tests/cast/README.md` with a one-line
 description, following the existing entries.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tests/cast/test_guestpage.py tests/cast/test_cast.py tests/cast/README.md
@@ -1474,7 +1474,7 @@ guest holding their slot so a typo does not cost a fresh claim."
 
 **Interfaces:** none.
 
-- [ ] **Step 1: `docs/casting.md`**
+- [x] **Step 1: `docs/casting.md`**
 
 Add a section after "A real certificate, for a private address":
 
@@ -1511,7 +1511,7 @@ Turning authentication on is the answer; carving out one address would leave
 every other internal page reachable anyway.
 ```
 
-- [ ] **Step 2: `docs/features.md`**
+- [x] **Step 2: `docs/features.md`**
 
 In the screen-casting section, after the first paragraph:
 
@@ -1521,7 +1521,7 @@ operator has allowed it — often what someone actually wanted, and far cheaper 
 the device than a video stream. See [casting.md](casting.md#a-guest-showing-a-page).
 ```
 
-- [ ] **Step 3: `docs/troubleshooting.md`**
+- [x] **Step 3: `docs/troubleshooting.md`**
 
 ```markdown
 **A guest's page never appears.**
@@ -1537,13 +1537,13 @@ discarded rather than merely backgrounded; the keepalive itself survives
 backgrounding.
 ```
 
-- [ ] **Step 4: `README.md`**
+- [x] **Step 4: `README.md`**
 
 Add `--guest-pages <on|off>` to the flag list with the note that it defaults to
 off, add `mode` to the `POST /api/cast/claim` line, and add `page_enabled` to the
 `/api/cast/info` line.
 
-- [ ] **Step 5: `CLAUDE.md`**
+- [x] **Step 5: `CLAUDE.md`**
 
 In the casting section:
 
@@ -1566,7 +1566,7 @@ In the casting section:
   `SENDER_GRACE`.
 ```
 
-- [ ] **Step 6: Verify the anchors resolve**
+- [x] **Step 6: Verify the anchors resolve**
 
 ```bash
 grep -ohE '\]\(([A-Za-z./-]*)#([a-z0-9-]+)\)' CLAUDE.md README.md docs/*.md \
@@ -1576,7 +1576,7 @@ grep -ohE '\]\(([A-Za-z./-]*)#([a-z0-9-]+)\)' CLAUDE.md README.md docs/*.md \
 Check each target heading exists; `## A guest showing a page` becomes
 `#a-guest-showing-a-page`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add docs README.md CLAUDE.md
@@ -1593,7 +1593,7 @@ remedy already exists, so this is written down rather than special-cased."
 
 **Files:** none changed unless something breaks.
 
-- [ ] **Step 1: Cross build**
+- [x] **Step 1: Cross build**
 
 Run:
 
@@ -1603,7 +1603,7 @@ cross build --release --target armv7-unknown-linux-gnueabihf --target-dir target
 
 Expected: `Finished`. Docker must be running.
 
-- [ ] **Step 2: Check nothing native crept in**
+- [x] **Step 2: Check nothing native crept in**
 
 ```bash
 readelf -d target/cross-armv7/armv7-unknown-linux-gnueabihf/release/miniclientcontrol | grep NEEDED
@@ -1613,6 +1613,6 @@ Expected exactly: `libgcc_s.so.1`, `librt.so.1`, `libpthread.so.0`, `libm.so.6`,
 `libdl.so.2`, `libc.so.6`, `ld-linux-armhf.so.3`. Anything else means a
 dependency pulled in native code and must be replaced.
 
-- [ ] **Step 3: Commit if anything changed**
+- [x] **Step 3: Commit if anything changed**
 
 Only if a fix was needed. Otherwise this task produces no commit.

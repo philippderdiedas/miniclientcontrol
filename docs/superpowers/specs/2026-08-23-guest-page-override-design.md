@@ -1,6 +1,6 @@
 # Guest page override
 
-**Status:** approved, not yet implemented
+**Status:** implemented
 **Date:** 2026-08-23
 
 ## What and why
