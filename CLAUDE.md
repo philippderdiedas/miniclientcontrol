@@ -318,6 +318,36 @@ written `0600`.
 a C toolchain the armv7 `cross` image does not have. The same reasoning keeps
 `libpulse-binding` out of `src/audio.rs`.
 
+### Guest pages
+
+A guest may put a web page on the display instead of casting, when
+`guest_pages_enabled` says so. Why and what it costs:
+[docs/casting.md](docs/casting.md#a-guest-showing-a-page). The rules:
+
+- **The claim carries the mode** (`cast` or `page`), not the socket.
+  `register_peer` activates the display the moment a sender's socket arrives —
+  deliberately, so a sender whose socket fails never interrupts the playlist —
+  and a page-mode sender must not pin `cast_display.html` on its way to the
+  guest's URL. **`watch_display_arrival` must not run for a page** either: there
+  is no display peer coming, and it would tear the page down on its deadline.
+- **`authorize_sender` gates on the capability the mode asks for**, never on
+  `cast_enabled` alone. The two switches are independent, and a device too weak
+  for WebRTC can still render a page.
+- `activate_display`/`deactivate_display` take what they install. The
+  still-ours check on teardown compares against `session.showing`, not against
+  the cast page.
+- **Credentials in a guest URL reach the browser and nothing else.** Everything
+  that logs or displays one goes through `guest_page::redact`. Refusing them
+  outright would be theatre (`?token=` is equivalent) and would break the
+  internal-dashboard case that allowing LAN targets exists for.
+- The grace period follows what is showing: `PAGE_GRACE`, not `SENDER_GRACE`.
+  The keepalive is a protocol-level ping, so backgrounding a tab does not end a
+  session; discarding it does.
+- `is_active()` covers a page as well as a cast, which is what makes
+  `hide_during_cast` and the cast-QR drop apply to both. Do not narrow it.
+- The Python harness passes `--managed-cert off` and `--guest-pages off` by
+  default, so unrelated tests need neither the network nor this feature.
+
 ### Display limits
 
 `cast_display.html` measures `min(MAX_TEXTURE_SIZE, longest panel edge ×

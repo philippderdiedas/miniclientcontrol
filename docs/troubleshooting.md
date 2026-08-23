@@ -89,6 +89,18 @@ the privilege is missing (see
 [deployment.md](deployment.md#giving-the-controller-port-443)) or something else
 holds the port — on a two-display machine, the other instance.
 
+**A guest's page never appears.**
+Guest pages are off by default. They are refused at claim time, so the guest
+should have been told why rather than seeing nothing happen. If the address was
+accepted and the screen did not change, it was probably a file rather than a
+page: downloads are refused browser-wide, so nothing is written and nothing is
+shown.
+
+**The screen went back to the playlist while the guest was still standing there.**
+Their page stopped holding its socket. On a phone that usually means the tab was
+discarded rather than merely backgrounded — backgrounding alone does not do it,
+because the keepalive is answered by the browser and not by the page's script.
+
 **`avahi-publish` errors every few minutes.**
 `avahi-utils` is not installed and `--public-url` names a `.local` host that is not
 this machine's hostname. Either install it, or set the hostname to that name, or

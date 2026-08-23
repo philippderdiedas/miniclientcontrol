@@ -93,6 +93,12 @@ already trusts, so there is no warning page to click through and no port to type
 It falls back to the bare address with a self-signed certificate when it cannot
 arrange that — see [casting.md](casting.md#a-real-certificate-for-a-private-address).
 
+A guest may also simply hand the kiosk a **web address** to open, when the
+operator has allowed it — often what somebody actually wanted, and far cheaper
+for the device than a video stream. It is a switch of its own, so a display too
+weak for casting can still be given a page. See
+[casting.md](casting.md#a-guest-showing-a-page).
+
 A guest opens the device's address, optionally enters a code, and shares a screen
 or a camera. The display switches to it, and returns to the playlist when the
 guest stops, closes the laptop, or walks away. See [casting.md](casting.md).
