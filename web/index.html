@@ -385,6 +385,10 @@
       stopCountdown();
       stopStats();
       stopAudio();
+      sessionMode = 'cast';
+      el('pageBlock').hidden = true;
+      el('pageLiveBlock').hidden = true;
+      el('pageError').textContent = '';
       showLive(false);
       setShareEnabled(authMode === 'none');
       if (authMode !== 'none') {
@@ -526,6 +530,13 @@
         welcome: (frame) => {
           iceServers = frame.ice_servers || [];
           noteDisplayLimits(frame.display_limits);
+          // A page has no display peer and never will: the kiosk simply
+          // navigates. Saying "waiting for the display" would be a lie that
+          // never resolves, and starting an offer would be worse.
+          if (sessionMode === 'page') {
+            setStatus('Seite wird an den Bildschirm geschickt…');
+            return;
+          }
           if (frame.peer) startOffer().catch((e) => teardown(e.message, true));
           else setStatus('Warte auf das Display…');
         },
@@ -533,6 +544,9 @@
         // has connected, by which time the picker has already handed over a stream.
         limits: (frame) => noteDisplayLimits(frame),
         peer: (connected) => {
+          // Not ours to react to while showing a page: the peer that comes and
+          // goes here is the cast display, which a page never involves.
+          if (sessionMode === 'page') return;
           if (connected) startOffer().catch((e) => teardown(e.message, true));
           else teardown('Das Display hat die Verbindung beendet.');
         },
@@ -543,6 +557,9 @@
           // textContent, not innerHTML: a guest typed this.
           el('pageLiveUrl').textContent = 'Auf dem Bildschirm: ' + frame.url;
           el('pageError').textContent = '';
+          // The page block says what is happening now; a second line below it
+          // would only repeat itself.
+          setStatus('');
         },
         error: (frame) => {
           // A refused address keeps the slot, so the guest can correct a typo
@@ -674,6 +691,10 @@
     // --- showing a web page instead of streaming ---------------------------
 
     let pageScroll = 'none';
+    // Which kind of session this socket belongs to. The socket is the same one
+    // a cast uses, but a page has no display peer and none of the WebRTC
+    // handlers apply to it.
+    let sessionMode = 'cast';
 
     function selectScroll(which) {
       pageScroll = which;
@@ -713,6 +734,7 @@
           return;
         }
       }
+      sessionMode = 'page';
       if (!socket || !socket.ready) connect();
       // The socket needs a moment before the first frame will go out.
       for (let i = 0; i < 40 && !(socket && socket.ready); i += 1) {
@@ -727,9 +749,11 @@
 
     el('pageStop').onclick = () => {
       if (socket) socket.stop();
+      sessionMode = 'cast';
       el('pageLiveBlock').hidden = true;
       el('pageBlock').hidden = true;
       el('shareBlock').hidden = false;
+      setStatus('');
       dropReservation();
     };
 
