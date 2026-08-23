@@ -151,6 +151,15 @@ pub struct Args {
     #[arg(long, env, default_value = "auto", value_parser = ["auto", "off"])]
     pub managed_cert: String,
 
+    /// Whether guests may put a web page on the display instead of casting.
+    ///
+    /// Off unless said otherwise: this decides whether strangers on the LAN can
+    /// place content on the venue's screen. Passing the flag pins the setting,
+    /// so a deployment can nail it down and the admin UI shows it as locked --
+    /// which is why there is no clap default. `None` has to mean "not given".
+    #[arg(long, env, value_parser = ["on", "off"])]
+    pub guest_pages: Option<String>,
+
     /// Cap on the longest frame edge a cast may send here, in pixels.
     ///
     /// The display reports what it can *show* (panel size, GPU texture limit).
