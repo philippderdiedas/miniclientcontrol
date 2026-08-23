@@ -68,19 +68,29 @@ class Server:
     def __exit__(self, *a):
         self.proc.terminate(); self.proc.wait(timeout=10)
 
-def claim(code=None, port=None):
-    """POST /api/cast/claim -> (status, body). This is where a code is checked."""
-    return http("POST", "/api/cast/claim", {"code": code} if code else {}, port=port)
+def claim(code=None, port=None, mode=None):
+    """POST /api/cast/claim -> (status, body). This is where a code is checked.
+
+    `mode` is "page" for a guest who wants a web page on the display rather than
+    a stream. It is decided here and not on the socket, because the server pins
+    the display as soon as a sender connects.
+    """
+    body = {}
+    if code:
+        body["code"] = code
+    if mode:
+        body["mode"] = mode
+    return http("POST", "/api/cast/claim", body, port=port)
 
 
-async def ws(role, code=None, host="127.0.0.1", ticket="auto"):
+async def ws(role, code=None, host="127.0.0.1", ticket="auto", mode=None):
     """Open a signaling socket, claiming the session first for senders.
 
     `ticket="auto"` claims with `code`; pass an explicit ticket (or None) to
     exercise the socket's own admission checks.
     """
     if role == "sender" and ticket == "auto":
-        status, body = claim(code)
+        status, body = claim(code, mode=mode)
         assert status == 200, f"claim refused: {status} {body}"
         ticket = body["ticket"]
     elif ticket == "auto":

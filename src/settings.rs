@@ -30,6 +30,7 @@ static PBKDF2_ALG: pbkdf2::Algorithm = pbkdf2::PBKDF2_HMAC_SHA256;
 const PBKDF2_ITERATIONS: u32 = 120_000;
 
 const KEY_CAST_ENABLED: &str = "cast_enabled";
+const KEY_GUEST_PAGES: &str = "guest_pages_enabled";
 const KEY_CAST_AUTH: &str = "cast_auth";
 const KEY_CAST_CODE: &str = "cast_code";
 const KEY_OVERLAY: &str = "overlay_config";
@@ -44,6 +45,12 @@ const KEY_AUTH_HASH: &str = "basic_auth_hash";
 #[derive(Clone, Debug)]
 pub struct AppSettings {
     pub cast_enabled: bool,
+    /// Whether a guest may put a web page on the display.
+    ///
+    /// Independent of `cast_enabled`: rendering a page costs the device almost
+    /// nothing while WebRTC costs it a great deal, so a display too weak to
+    /// receive a cast can still sensibly be given a page.
+    pub guest_pages_enabled: bool,
     pub cast_auth: CastAuth,
     pub cast_code: String,
     /// Basic-auth user. `None` means the operator UI is open.
@@ -398,6 +405,7 @@ impl Secret {
 #[derive(Clone, Copy, Debug, Serialize, Default)]
 pub struct Locks {
     pub cast_enabled: bool,
+    pub guest_pages: bool,
     pub cast_auth: bool,
     pub cast_code: bool,
     pub basic_auth: bool,
@@ -410,11 +418,27 @@ impl Locks {
             // --disable-cast is a hard switch: it decides whether the listener
             // binds at all, so it cannot be undone from the UI either way.
             cast_enabled: args.disable_cast,
+            guest_pages: args.guest_pages.is_some(),
             cast_auth: args.cast_auth.is_some(),
             cast_code: args.cast_code.is_some(),
             basic_auth: args.basic_auth_user.is_some(),
             locale: args.locale.is_some(),
         }
+    }
+}
+
+/// `--guest-pages` wins over the stored value; absent both, off.
+///
+/// Off is the default because this decides whether strangers on the LAN may put
+/// content on the venue's screen. The flag winning in *both* directions is the
+/// same recovery path the other pinned settings have: a deployment can force it
+/// off whatever the database says, and back on if somebody locked themselves out
+/// of a screen they need.
+fn resolve_guest_pages(flag: Option<&str>, stored: Option<bool>) -> bool {
+    match flag {
+        Some("on") => true,
+        Some("off") => false,
+        _ => stored.unwrap_or(false),
     }
 }
 
@@ -520,6 +544,9 @@ pub fn cast_auth_key(auth: CastAuth) -> &'static str {
 
 /// Stored values, with anything given on the command line taking precedence.
 pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
+    let stored_guest_pages = crate::db::load_setting(pool, KEY_GUEST_PAGES)
+        .await
+        .map(|raw| raw == "true");
     let stored_enabled = crate::db::load_setting(pool, KEY_CAST_ENABLED)
         .await
         .map(|raw| raw == "true")
@@ -548,6 +575,7 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
     AppSettings {
         // --disable-cast forces off; otherwise the stored switch decides.
         cast_enabled: !args.disable_cast && stored_enabled,
+        guest_pages_enabled: resolve_guest_pages(args.guest_pages.as_deref(), stored_guest_pages),
         cast_auth: args.cast_auth.or(stored_auth).unwrap_or(CastAuth::None),
         cast_code: args
             .cast_code
@@ -575,6 +603,7 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
 pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
     let mut rows = vec![
         (KEY_CAST_ENABLED, settings.cast_enabled.to_string()),
+        (KEY_GUEST_PAGES, settings.guest_pages_enabled.to_string()),
         (KEY_CAST_AUTH, cast_auth_key(settings.cast_auth).to_string()),
         (KEY_CAST_CODE, settings.cast_code.clone()),
         (KEY_LOCALE, settings.locale.clone()),
@@ -822,6 +851,7 @@ async fn image_data_uri(state: &AppState, asset_id: Option<i64>) -> Option<Strin
 #[derive(Serialize)]
 struct SettingsResponse {
     cast_enabled: bool,
+    guest_pages_enabled: bool,
     cast_auth: &'static str,
     cast_code: String,
     /// Whether the operator UI currently demands credentials.
@@ -839,6 +869,7 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
     // The password, hashed or not, is never sent back.
     Json(SettingsResponse {
         cast_enabled: settings.cast_enabled,
+        guest_pages_enabled: settings.guest_pages_enabled,
         cast_auth: cast_auth_key(settings.cast_auth),
         cast_code: settings.cast_code.clone(),
         auth_enabled: settings.auth_user.is_some(),
@@ -853,6 +884,7 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 pub struct UpdateRequest {
     cast_enabled: Option<bool>,
+    guest_pages_enabled: Option<bool>,
     cast_auth: Option<String>,
     cast_code: Option<String>,
     auth_enabled: Option<bool>,
@@ -888,6 +920,18 @@ pub async fn update_settings(
                 return locked("--disable-cast");
             }
             next.cast_enabled = enabled;
+        }
+    }
+
+    if let Some(enabled) = payload.guest_pages_enabled {
+        // The inequality guard is load-bearing, not decoration: without it,
+        // saving the settings form while the flag is set would 409 even when
+        // this value did not change, so nothing else on the page could be edited.
+        if enabled != next.guest_pages_enabled {
+            if state.locks.guest_pages {
+                return locked("--guest-pages");
+            }
+            next.guest_pages_enabled = enabled;
         }
     }
 
@@ -1034,4 +1078,23 @@ pub async fn update_settings(
     }
 
     read_settings(State(state)).await.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guest_pages_default_off_and_the_flag_pins_it() {
+        // Off until somebody says otherwise: this decides whether strangers can
+        // put content on the venue's screen.
+        assert!(!resolve_guest_pages(None, None));
+        assert!(!resolve_guest_pages(None, Some(false)));
+        assert!(resolve_guest_pages(None, Some(true)));
+        // A flag that was actually passed wins over the stored value, in both
+        // directions -- that is the recovery path, not just deference.
+        assert!(resolve_guest_pages(Some("on"), Some(false)));
+        assert!(!resolve_guest_pages(Some("off"), Some(true)));
+        assert!(resolve_guest_pages(Some("on"), None));
+    }
 }

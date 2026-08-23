@@ -130,6 +130,36 @@ async def main():
         check("turning it back on is refused",
               status == 409 and "--disable-cast" in body.get("error", ""), (status, body))
 
+    print("\n[16c] guest pages are their own switch")
+    with Server():
+        st = settings()
+        check("off by default", st["guest_pages_enabled"] is False, st["guest_pages_enabled"])
+        check("and not locked", st["locks"]["guest_pages"] is False, st["locks"])
+        status, _ = put({"guest_pages_enabled": True})
+        check("turning it on is accepted", status == 200, status)
+        check("and reads back", settings()["guest_pages_enabled"] is True)
+        # Independent of casting: turning one off must not touch the other.
+        put({"cast_enabled": False})
+        check("casting off leaves guest pages on",
+              settings()["guest_pages_enabled"] is True, settings())
+        put({"cast_enabled": True})
+
+    with Server(fresh=False):
+        check("it survived the restart", settings()["guest_pages_enabled"] is True)
+
+    print("\n[16d] --guest-pages pins it")
+    with Server(fresh=False, guest_pages="off"):
+        st = settings()
+        check("the flag forces it off", st["guest_pages_enabled"] is False, st)
+        check("and locks the control", st["locks"]["guest_pages"] is True, st["locks"])
+        status, body = put({"guest_pages_enabled": True})
+        check("turning it on is refused, naming the flag",
+              status == 409 and "--guest-pages" in body.get("error", ""), (status, body))
+        # Saving the form unchanged must still work, or nothing else on the page
+        # could be edited while the flag is set.
+        status, _ = put({"guest_pages_enabled": False, "cast_code": "ABCD"})
+        check("an unchanged value does not trip the lock", status == 200, status)
+
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
 sys.exit(1 if failures else 0)

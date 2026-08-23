@@ -130,6 +130,7 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --browser-language <list>    (default: de,de-DE,en-US,en)
 --locale <tag>               (dates and times; default: from LC_ALL/LC_TIME/LANG)
 --managed-cert <auto|off>    (real cert for a <lan-ip>.clientctrl.cc name; default: auto)
+--guest-pages <on|off>       (may guests put a web page on the display; default: off)
 --public-url <none|mdns|X>   (how guests reach this device; default: none;
                               a custom .local name is published via avahi)
 ```
@@ -168,8 +169,9 @@ These options also support environment variables through `clap` `env` support.
 ### Settings
 
 - `GET /api/settings` — current settings plus which ones the command line pinned
-- `PUT /api/settings` — `{ cast_enabled?, cast_auth?, cast_code?, auth_enabled?,
-  auth_user?, auth_password?, overlay?, locale? }`; a pinned setting answers `409`
+- `PUT /api/settings` — `{ cast_enabled?, guest_pages_enabled?, cast_auth?,
+  cast_code?, auth_enabled?, auth_user?, auth_password?, overlay?, locale? }`;
+  a pinned setting answers `409`
 - `GET /api/overlay` — the layers the display runtime wants: the global overlay
   plus the one belonging to the item on screen, with asset ids already resolved
 
@@ -195,14 +197,17 @@ These options also support environment variables through `clap` `env` support.
 ### Casting
 
 - `GET /api/cast/ws?role=sender|display[&code=]` — WebSocket signaling relay
-- `GET /api/cast/info` — public: `{ enabled, auth, busy, sender_url }`
+- `GET /api/cast/info` — public: `{ enabled, page_enabled, auth, busy, sender_url }`
 - `GET /api/cast/qr.svg` — public: QR code for the guest URL
-- `GET /api/cast/state` — operator: who is casting and since when
+- `GET /api/cast/state` — operator: who is casting and since when, plus
+  `showing`: `null`, `"cast"`, or `{ "page": "<url, credentials stripped>" }`
 - `DELETE /api/cast/session` — operator: end the current cast
 - `POST /api/cast/pair` — request a pairing code (pairing mode only); the code is
   shown on the display and never returned in the response
 - `POST /api/cast/claim` — guest: check the code and reserve the session before
-  sharing; returns a ticket the WebSocket needs
+  sharing; returns a ticket the WebSocket needs. Takes
+  `{ mode: "cast" | "page" }`, defaulting to `cast` — the mode is settled here
+  because the display is pinned as soon as the socket connects
 - `DELETE /api/cast/claim` — give the reservation back
 
 `GET /api/cast/state` also carries a live pairing code and its remaining seconds

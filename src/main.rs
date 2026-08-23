@@ -3,6 +3,7 @@ mod handlers;
 mod models;
 mod browser;
 mod web;
+mod guest_page;
 mod managed_cert;
 mod tls;
 mod cast;

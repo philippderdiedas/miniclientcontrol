@@ -318,6 +318,36 @@ written `0600`.
 a C toolchain the armv7 `cross` image does not have. The same reasoning keeps
 `libpulse-binding` out of `src/audio.rs`.
 
+### Guest pages
+
+A guest may put a web page on the display instead of casting, when
+`guest_pages_enabled` says so. Why and what it costs:
+[docs/casting.md](docs/casting.md#a-guest-showing-a-page). The rules:
+
+- **The claim carries the mode** (`cast` or `page`), not the socket.
+  `register_peer` activates the display the moment a sender's socket arrives —
+  deliberately, so a sender whose socket fails never interrupts the playlist —
+  and a page-mode sender must not pin `cast_display.html` on its way to the
+  guest's URL. **`watch_display_arrival` must not run for a page** either: there
+  is no display peer coming, and it would tear the page down on its deadline.
+- **`authorize_sender` gates on the capability the mode asks for**, never on
+  `cast_enabled` alone. The two switches are independent, and a device too weak
+  for WebRTC can still render a page.
+- `activate_display`/`deactivate_display` take what they install. The
+  still-ours check on teardown compares against `session.showing`, not against
+  the cast page.
+- **Credentials in a guest URL reach the browser and nothing else.** Everything
+  that logs or displays one goes through `guest_page::redact`. Refusing them
+  outright would be theatre (`?token=` is equivalent) and would break the
+  internal-dashboard case that allowing LAN targets exists for.
+- The grace period follows what is showing: `PAGE_GRACE`, not `SENDER_GRACE`.
+  The keepalive is a protocol-level ping, so backgrounding a tab does not end a
+  session; discarding it does.
+- `is_active()` covers a page as well as a cast, which is what makes
+  `hide_during_cast` and the cast-QR drop apply to both. Do not narrow it.
+- The Python harness passes `--managed-cert off` and `--guest-pages off` by
+  default, so unrelated tests need neither the network nor this feature.
+
 ### Display limits
 
 `cast_display.html` measures `min(MAX_TEXTURE_SIZE, longest panel edge ×
@@ -391,6 +421,17 @@ boot. **The keys are merged into any existing `Preferences` rather than replacin
 the file**, so window bounds and zoom levels are not thrown away. Full account,
 including the three flags that look like they should work and do not:
 [docs/raspberry-pi.md](docs/raspberry-pi.md#the-translate-this-page-bubble).
+
+**Downloads are refused browser-wide.** `Browser.setDownloadBehavior` with
+`deny`, sent once per CDP connection in `browser_loop` beside the certificate
+decision. A URL need not be a page: anything served as an attachment would
+otherwise write a file, and enough of those fill an SD card and take the
+database, the certificate and the uploads with it. **Unconditional on purpose** —
+a guard against resource exhaustion must not depend on a setting, and a signage
+display never wanted a download. `eventsEnabled` is on so
+`Browser.downloadWillBegin` can tell a guest their link was a file rather than
+leaving them in front of a screen that did not change. Covered by case [12] of
+`tests/cast/test_browser.py`, which is the only Python test with a real browser.
 
 ### Invalid TLS certificates are accepted, on purpose
 

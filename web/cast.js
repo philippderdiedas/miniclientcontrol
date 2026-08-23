@@ -36,6 +36,7 @@
       else if (frame.type === 'signal') handlers.signal && handlers.signal(frame.data);
       else if (frame.type === 'pairing') handlers.pairing && handlers.pairing(frame);
       else if (frame.type === 'display_limits') handlers.limits && handlers.limits(frame);
+      else if (frame.type === 'presenting') handlers.presenting && handlers.presenting(frame);
       else if (frame.type === 'error') handlers.error && handlers.error(frame);
     };
 
@@ -51,6 +52,13 @@
       stop() {
         if (ws.readyState === WebSocket.OPEN)
           ws.send(JSON.stringify({ type: 'stop' }));
+      },
+      // Sender only, and only where the operator allowed it: show a web page
+      // instead of streaming. A second call replaces the address rather than
+      // being refused, so a typo does not cost the guest their slot.
+      present(url, scroll) {
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: 'present', url, scroll }));
       },
       // Display only: the largest frame this screen can show. The server refuses
       // this from a sender, which would otherwise be capping its own stream.

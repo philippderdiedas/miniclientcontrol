@@ -145,6 +145,47 @@ advertised *name*, and every QR code already printed or scanned would stop
 working; an expired certificate costs the same warning page the fallback would
 have shown anyway.
 
+## A guest showing a page
+
+Sharing a screen is more machinery than some moments need. A guest who wants the
+kiosk to show a menu, a schedule or a link somebody just mentioned can hand it
+the address instead, and the kiosk loads the page itself — no video codec, no
+laptop pinned to the room, and it looks better than a re-encoded picture of the
+same page would.
+
+It is off until an operator turns it on, and it is a switch of its own rather
+than a corner of casting. Rendering a page costs the device almost nothing while
+WebRTC costs it a great deal, so a display too weak to receive a cast can still
+be given a page — and a venue that wants the reverse can have that too.
+
+Everything else is the cast's: the same code, the slot claimed before anything
+happens, one guest at a time, and the operator's stop button. The guest holds a
+socket for as long as the page is up, and letting go hands the screen back after
+a grace period — thirty seconds here rather than the cast's five, because a phone
+whose tab was set aside is the expected case and not a fault. The keepalive
+itself survives backgrounding: it is a protocol-level ping the browser answers
+without waking any JavaScript, so what the longer grace covers is a tab the
+system actually discarded.
+
+Only `http` and `https`. Addresses on the local network are allowed
+deliberately, because a venue may want its own dashboard on the screen.
+Credentials in an address are accepted for that same reason, but they are
+stripped everywhere the address is logged or displayed — so a guest's password
+does not end up in the journal or on the operator's screen, and
+`http://google.com@evil.test` is shown as the `evil.test` it is rather than as
+the Google it pretends to be.
+
+A page a guest puts up counts as a cast wherever that matters: the overlay
+respects `hide_during_cast`, and a cast-sourced QR code disappears, because the
+slot is taken and whoever scanned it would be turned away.
+
+**Note what a guest can see this way.** With operator authentication switched
+off, a guest can point the kiosk at its own admin page and read the cast code off
+the screen. They cannot operate it — a kiosk has no keyboard — but it is legible.
+Turning authentication on is the answer. Carving out one address would half
+retract the decision to allow local addresses, and would leave every other
+internal page reachable anyway.
+
 ## Port 443, when it can be had
 
 With no `--cast-tls-port`, the listener tries 443 first and drops to 3443 and

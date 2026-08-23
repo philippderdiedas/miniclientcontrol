@@ -4,7 +4,10 @@ The sender shares a synthetic camera rather than a screen, because a headless
 Chrome has no desktop to pick. Everything after the getMedia call -- addTrack,
 offer, relay, answer, ontrack, playback -- is the identical code path.
 """
-import asyncio, json, os, shutil, subprocess, sys, time, urllib.request
+import asyncio, json, os, shutil, socketserver, subprocess, sys, threading, time, urllib.request
+# Not `import http.server`: that would bind the name `http` and shadow the
+# request helper imported from test_cast below.
+from http.server import BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cdp
 from test_cast import check, failures, http
@@ -24,8 +27,15 @@ def spawn(cmd):
     procs.append(p)
     return p
 
-def chrome(port, profile, *extra):
+def chrome(port, profile, *extra, prefs=None):
     shutil.rmtree(f"{SP}/{profile}", ignore_errors=True)
+    if prefs:
+        # Written after the wipe and before the launch. The controller only
+        # writes Preferences for a browser it starts itself, and here Chrome is
+        # already listening, so it connects instead and leaves these alone.
+        os.makedirs(f"{SP}/{profile}/Default", exist_ok=True)
+        with open(f"{SP}/{profile}/Default/Preferences", "w") as fh:
+            json.dump(prefs, fh)
     return spawn([CHROME, "--headless=new", f"--remote-debugging-port={port}",
                   f"--user-data-dir={SP}/{profile}", "--no-first-run", "--no-sandbox",
                   "--disable-gpu", "--window-size=1280,720", *extra, "about:blank"])
@@ -45,7 +55,13 @@ def wait_for(fn, timeout=30, interval=0.3):
 async def main():
     print(f"\n[10] real WebRTC through two Chrome instances (LAN {LAN})")
 
-    chrome(9222, "display-profile")
+    shutil.rmtree(f"{SP}/downloads", ignore_errors=True)
+    os.makedirs(f"{SP}/downloads", exist_ok=True)
+    chrome(9222, "display-profile", prefs={
+        # Somewhere checkable, so case [12] can assert nothing was written.
+        "download": {"default_directory": f"{SP}/downloads", "prompt_for_download": False},
+        "savefile": {"default_directory": f"{SP}/downloads"},
+    })
     check("display chrome up", wait_for(lambda: cdp.targets(9222)) is not None)
 
     spawn([BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
@@ -156,6 +172,36 @@ async def main():
         recovered = wait_for(lambda: "empty_playlist" in (cdp.page_ws(9222)[1] or {}).get("url", ""), 40)
         check("display browser returned to the playlist", recovered is not None,
               (cdp.page_ws(9222)[1] or {}).get("url"))
+
+    print("\n[12] a URL that is a file downloads nothing")
+    # A URL need not be a page. Left alone, Chromium writes the file, and enough
+    # of those fill an SD card and take the database and the certificate with it.
+    blob = b"x" * 200_000
+
+    class Attachment(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="blob.bin"')
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+
+        def log_message(self, *a):
+            pass
+
+    blobsrv = socketserver.TCPServer(("127.0.0.1", 0), Attachment)
+    threading.Thread(target=blobsrv.serve_forever, daemon=True).start()
+    try:
+        http("POST", "/api/override",
+             {"url": f"http://127.0.0.1:{blobsrv.server_address[1]}/blob.bin"}, port=HTTP)
+        # Long enough that a download would have finished: 200 KB over loopback.
+        time.sleep(8)
+        written = os.listdir(f"{SP}/downloads")
+        check("nothing was written to disk", written == [], written)
+    finally:
+        blobsrv.shutdown()
+        http("DELETE", "/api/override", port=HTTP)
 
 try:
     asyncio.run(main())

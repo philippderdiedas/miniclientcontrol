@@ -15,8 +15,12 @@ python3 test_reserve.py     # the claim step: reserve before sharing
 python3 test_basicauth.py   # credentials from the admin panel, CLI as the way back in
 python3 test_port.py        # TLS port clash: fatal when explicit, next free otherwise
 python3 test_public.py      # --public-url modes and the QR endpoint
+python3 test_guestpage.py   # a guest showing a web page instead of casting (~45s)
 python3 test_browser.py     # real WebRTC between two Chrome instances
 ```
+
+`test_guestpage.py` is slow on purpose: the last case waits out the guest page's
+thirty-second grace period, which is the whole liveness contract of that feature.
 
 `test_browser.py` needs `google-chrome-stable` and uses `--use-fake-device-for-media-stream`,
 so it shares a synthetic camera rather than a screen — a headless Chrome has no

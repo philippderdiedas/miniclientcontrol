@@ -45,6 +45,24 @@ this controller. It needs root, at
 Verify with `chrome://policy`: the row must read
 `TranslateEnabled / false / Platform / Machine / Mandatory / OK`.
 
+## Downloads
+
+The controller refuses downloads over CDP for the browser it drives, so a URL
+that turns out to be a file writes nothing. This matters more here than on a
+desktop: the filesystem is an SD card, and filling it takes the database, the
+certificate and the uploads with it.
+
+For a browser started **outside** this controller the managed policy is the
+equivalent, and needs root at
+`/etc/chromium/policies/managed/no-downloads.json`:
+
+```json
+{ "DownloadRestrictions": 3 }
+```
+
+`3` is "block all downloads". Same shape and the same caveats as the
+no-translate policy above.
+
 ## What a Pi 2 cannot do: 1080p WebRTC
 
 A cast of 1920x1080 to a Pi 2 Model B behaves like this:
