@@ -86,8 +86,23 @@ the page down after its deadline for a peer that was never coming.
 ## Flow
 
 1. Guest picks **Webseite zeigen**, types a URL, chooses scrolling.
-2. `POST /api/cast/claim` — unchanged. The code is validated and the slot
-   reserved before anything else, for the same reason it is for a cast.
+2. `POST /api/cast/claim` — now carries `{"mode": "cast" | "page"}`, defaulting
+   to `"cast"` so existing callers are unaffected. The code is validated and the
+   slot reserved before anything else, for the same reason it is for a cast.
+
+   **The mode has to be known this early**, which is not obvious. `register_peer`
+   calls `activate_display` the moment the sender's socket connects — that is
+   what puts the cast page on screen, deliberately placed there so a sender who
+   fails to establish a socket never interrupts the playlist. A page-mode sender
+   must *not* trigger that, or the display visibly bounces through
+   `cast_display.html` on its way to the guest's URL and `watch_display_arrival`
+   starts ticking for a peer that is never coming. The reservation therefore
+   carries the mode, `consume_reservation` moves it onto the session, and
+   `register_peer` branches on it.
+
+   It is also the right place for the refusals: `authorize_sender` gates on
+   `cast_enabled` today and becomes mode-aware, checking `guest_pages_enabled`
+   instead for a page.
 3. The socket opens with the ticket, then carries one new frame:
    `{"type":"present","url":"…","scroll":"none"|"slow"}`. A **second `present`
    frame on the same socket replaces the URL** rather than being refused: the
@@ -99,7 +114,16 @@ the page down after its deadline for a peer that was never coming.
 
 **The grace period is longer than the cast's.** A cast uses five seconds, enough
 to survive a page reload. Here the expected normal case is a phone whose tab is
-backgrounded, so the page comes down too eagerly at that setting. Thirty seconds.
+backgrounded, so the page comes down too eagerly at that setting. Thirty seconds,
+as a second constant beside `SENDER_GRACE`, chosen by what the session is
+showing.
+
+Worth recording, because it bounds how bad the background-tab problem actually
+is: the keepalive is a **protocol-level** `Message::Ping`, and the browser's
+network stack answers it without waking any JavaScript. Timer throttling in a
+backgrounded tab therefore cannot starve it. What does end the session is the
+tab being *discarded* — Safari and Android under memory pressure — and that is
+what the longer grace is for.
 
 ## URL handling
 
