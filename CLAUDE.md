@@ -392,6 +392,17 @@ the file**, so window bounds and zoom levels are not thrown away. Full account,
 including the three flags that look like they should work and do not:
 [docs/raspberry-pi.md](docs/raspberry-pi.md#the-translate-this-page-bubble).
 
+**Downloads are refused browser-wide.** `Browser.setDownloadBehavior` with
+`deny`, sent once per CDP connection in `browser_loop` beside the certificate
+decision. A URL need not be a page: anything served as an attachment would
+otherwise write a file, and enough of those fill an SD card and take the
+database, the certificate and the uploads with it. **Unconditional on purpose** —
+a guard against resource exhaustion must not depend on a setting, and a signage
+display never wanted a download. `eventsEnabled` is on so
+`Browser.downloadWillBegin` can tell a guest their link was a file rather than
+leaving them in front of a screen that did not change. Covered by case [12] of
+`tests/cast/test_browser.py`, which is the only Python test with a real browser.
+
 ### Invalid TLS certificates are accepted, on purpose
 
 `browser_loop` connects with `ignore_https_errors: true`. Signage points at

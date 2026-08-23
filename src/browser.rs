@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
+use chromiumoxide::cdp::browser_protocol::browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams};
 use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams};
 use chromiumoxide::cdp::browser_protocol::target::{EventAttachedToTarget, SetAutoAttachParams, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::EnableParams as RuntimeEnableParams;
@@ -58,6 +59,34 @@ pub async fn browser_loop(state: AppState) {
                 }
             }
         });
+
+        // A URL need not be a page. Anything served with `Content-Disposition:
+        // attachment` -- or any type Chromium will not render -- becomes a
+        // *download*, and enough of those fill an SD card and take the database,
+        // the certificate and the uploads with it. A guest who can set a URL
+        // could do that on purpose.
+        //
+        // Browser-wide rather than per page, so it covers every target we ever
+        // navigate, and unconditional rather than tied to any setting: a guard
+        // against exhaustion that depends on a switch has the wrong shape, and a
+        // signage display never wanted a download in the first place.
+        //
+        // `events_enabled` is what lets a guest be told their link was a file
+        // rather than watching the screen not change.
+        match SetDownloadBehaviorParams::builder()
+            .behavior(SetDownloadBehaviorBehavior::Deny)
+            .events_enabled(true)
+            .build()
+        {
+            Ok(params) => {
+                if let Err(e) = browser.execute(params).await {
+                    // Not fatal: a browser that will not take the command is
+                    // still better off running than not running.
+                    warn!("Could not disable downloads: {}", e);
+                }
+            }
+            Err(e) => warn!("Could not build the download-behavior command: {}", e),
+        }
 
         let mut attached_events = match browser.event_listener::<EventAttachedToTarget>().await {
             Ok(stream) => stream,
