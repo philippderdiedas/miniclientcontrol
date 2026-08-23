@@ -45,7 +45,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::models::{AppState, CastAuth, OverrideItem, ScrollMode};
+use url::Url;
+
+use crate::guest_page::redact;
+use crate::models::{AppState, CastAuth, OverrideItem, ScrollMode, ScrollOptions};
 
 /// Code alphabet without I/O/0/1, so a code read off a screen cannot be mistyped.
 const CODE_CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -56,6 +59,13 @@ const PAIRING_TTL: Duration = Duration::from_secs(30);
 /// Grace period after the sender's socket drops, so a page reload does not end
 /// the cast and bounce the display back to the playlist for two seconds.
 const SENDER_GRACE: Duration = Duration::from_secs(5);
+/// Grace for a guest page, rather than the cast's five seconds.
+///
+/// The expected case here is a phone whose tab was backgrounded, not a page
+/// reload. The keepalive itself survives that -- it is a protocol-level ping the
+/// browser's network stack answers without waking any JavaScript -- so what this
+/// covers is a tab the OS *discarded*, which takes longer to come back.
+const PAGE_GRACE: Duration = Duration::from_secs(30);
 /// How long a claimed session is held before streaming starts. Has to cover the
 /// guest reading the code, clicking share, and picking a window in the browser's
 /// own dialog -- all of which is unhurried human time.
@@ -98,6 +108,36 @@ struct Reservation {
     ticket: String,
     addr: IpAddr,
     expires_at: Instant,
+    mode: ClaimMode,
+}
+
+/// What a guest said they were going to do, decided at claim time.
+///
+/// It has to be known this early. `register_peer` activates the display the
+/// moment a sender's socket arrives -- deliberately there, so a sender whose
+/// socket fails never interrupts the playlist -- and a page-mode sender must not
+/// pin `cast_display.html` on its way to the guest's URL. Nor may
+/// `watch_display_arrival` start, since a page has no display peer coming.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimMode {
+    #[default]
+    Cast,
+    Page,
+}
+
+/// What the session has put on the display.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Showing {
+    #[default]
+    Nothing,
+    Cast,
+    Page {
+        /// Full, including any credentials -- the browser needs them. Anything
+        /// that logs or displays this goes through `guest_page::redact`.
+        url: Url,
+        scroll: ScrollMode,
+    },
 }
 
 struct Attempts {
@@ -145,6 +185,12 @@ pub struct CastSession {
     previous_override: Option<OverrideItem>,
     /// True while the override on screen is the one we installed.
     holding_override: bool,
+    /// What we put there, which decides how teardown checks "is it still ours"
+    /// and which grace period applies.
+    showing: Showing,
+    /// The mode of the reservation the current sender consumed, read by
+    /// `register_peer` before the guest has said anything on the socket.
+    pending_mode: ClaimMode,
     pairing: Option<Pairing>,
     reservation: Option<Reservation>,
     attempts: HashMap<IpAddr, Attempts>,
@@ -159,6 +205,18 @@ pub struct CastSession {
 }
 
 impl CastSession {
+    /// What is on screen, for the operator's view.
+    ///
+    /// The URL is redacted: this is rendered into the admin page and can end up
+    /// in a log, and a guest may have typed credentials into it.
+    pub fn showing_json(&self) -> serde_json::Value {
+        match &self.showing {
+            Showing::Nothing => serde_json::Value::Null,
+            Showing::Cast => json!("cast"),
+            Showing::Page { url, .. } => json!({ "page": redact(url) }),
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.holding_override || self.sender.is_some()
     }
@@ -350,14 +408,19 @@ fn codes_match(expected: &str, provided: &str) -> bool {
 
 // --------------------------------------------------------------- override
 
-/// Pin the display to the cast page, remembering whatever was there before.
-async fn activate_display(state: &AppState) {
+/// Pin the display to whatever this session is showing, remembering what was
+/// there before.
+async fn activate_display(state: &AppState, showing: Showing) {
     let mut session = state.cast.lock().await;
     if session.holding_override {
         return;
     }
 
-    let url = cast_display_url(state.args.port);
+    let (url, scroll) = match &showing {
+        Showing::Cast => (cast_display_url(state.args.port), ScrollMode::None),
+        Showing::Page { url, scroll } => (url.to_string(), scroll.clone()),
+        Showing::Nothing => return,
+    };
     {
         let mut current = state.override_item.lock().await;
         session.previous_override = current.clone();
@@ -366,9 +429,10 @@ async fn activate_display(state: &AppState) {
             url: Some(url),
             local_path: None,
             mimetype: None,
-            scroll_config: ScrollMode::None,
+            scroll_config: scroll,
         });
     }
+    session.showing = showing.clone();
     session.holding_override = true;
     session.started_at = Some(chrono::Utc::now());
     session.epoch += 1;
@@ -376,8 +440,17 @@ async fn activate_display(state: &AppState) {
     drop(session);
 
     state.override_signal.notify_one();
-    info!("Cast: display pinned to the cast page");
-    watch_display_arrival(state.clone(), epoch);
+    match &showing {
+        Showing::Cast => {
+            info!("Cast: display pinned to the cast page");
+            // Only a cast has a display peer to wait for. A page has none, and
+            // this watchdog would tear it down after its deadline for a peer
+            // that was never coming.
+            watch_display_arrival(state.clone(), epoch);
+        }
+        Showing::Page { url, .. } => info!("Cast: guest page pinned to {}", redact(url)),
+        Showing::Nothing => {}
+    }
 }
 
 /// Release the display and let the playlist pick up where it left off.
@@ -387,21 +460,27 @@ async fn deactivate_display(state: &AppState) {
         return;
     }
 
-    let ours = cast_display_url(state.args.port);
+    let ours = match &session.showing {
+        Showing::Cast => Some(cast_display_url(state.args.port)),
+        Showing::Page { url, .. } => Some(url.to_string()),
+        Showing::Nothing => None,
+    };
     {
         let mut current = state.override_item.lock().await;
         // Only restore if what is on screen is still the override we installed.
-        // An operator who set a different one mid-cast made a newer decision, and
-        // silently reverting it would look like the UI ignoring them.
-        let still_ours = current.as_ref().and_then(|item| item.url.as_deref()) == Some(ours.as_str());
+        // An operator who set a different one mid-session made a newer decision,
+        // and silently reverting it would look like the UI ignoring them.
+        let still_ours = ours.is_some()
+            && current.as_ref().and_then(|item| item.url.as_deref()) == ours.as_deref();
         if still_ours {
             *current = session.previous_override.take();
         } else {
-            debug!("Cast: override changed during the cast, leaving it alone");
+            debug!("Cast: override changed during the session, leaving it alone");
         }
     }
     session.previous_override = None;
     session.holding_override = false;
+    session.showing = Showing::Nothing;
     session.started_at = None;
     session.sender_addr = None;
     session.pairing = None;
@@ -433,9 +512,9 @@ pub async fn end_session(state: &AppState) {
 
 /// The sender's socket went away. Wait out a short grace period before ending the
 /// cast, so a page reload does not bounce the display back to the playlist.
-fn watch_sender_grace(state: AppState, epoch: u64) {
+fn watch_sender_grace(state: AppState, epoch: u64, grace: Duration) {
     tokio::spawn(async move {
-        tokio::time::sleep(SENDER_GRACE).await;
+        tokio::time::sleep(grace).await;
         let stale = {
             let session = state.cast.lock().await;
             session.epoch == epoch && session.sender.is_none() && session.holding_override
@@ -493,12 +572,24 @@ async fn authorize_sender(
     state: &AppState,
     addr: IpAddr,
     provided: Option<&str>,
+    mode: ClaimMode,
 ) -> Result<(), String> {
     let settings = {
         let settings = state.settings.read().await;
-        (settings.cast_enabled, settings.cast_auth, settings.cast_code.clone())
+        (
+            settings.cast_enabled,
+            settings.guest_pages_enabled,
+            settings.cast_auth,
+            settings.cast_code.clone(),
+        )
     };
-    let (enabled, auth_mode, configured_code) = settings;
+    let (cast_enabled, pages_enabled, auth_mode, configured_code) = settings;
+    // The two capabilities are independent: a device too weak for WebRTC can
+    // still render a page, so refusing one must not refuse the other.
+    let enabled = match mode {
+        ClaimMode::Cast => cast_enabled,
+        ClaimMode::Page => pages_enabled,
+    };
 
     let mut session = state.cast.lock().await;
 
@@ -511,7 +602,10 @@ async fn authorize_sender(
     }
 
     if !enabled {
-        return Err("Übertragung ist derzeit deaktiviert.".to_string());
+        return Err(match mode {
+            ClaimMode::Cast => "Übertragung ist derzeit deaktiviert.".to_string(),
+            ClaimMode::Page => "Webseiten sind derzeit nicht erlaubt.".to_string(),
+        });
     }
 
     let outcome = match auth_mode {
@@ -789,6 +883,58 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             }
             true
         }
+        // Only a sender may say this, for the same reason only a display may
+        // send `limits`: it is a statement about what the guest wants shown.
+        Some("present") if role == Role::Sender => {
+            let allowed = state.settings.read().await.guest_pages_enabled;
+            let refuse = |reason: &'static str| async move {
+                let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
+                if let Some(tx) = tx {
+                    let _ = tx.send(error_frame("page", reason));
+                }
+            };
+            if !allowed {
+                refuse("Webseiten sind derzeit nicht erlaubt.").await;
+                return true;
+            }
+
+            let raw = value.get("url").and_then(|u| u.as_str()).unwrap_or_default();
+            let parsed = match crate::guest_page::parse_guest_url(raw) {
+                Ok(parsed) => parsed,
+                Err(reason) => {
+                    refuse(reason).await;
+                    return true;
+                }
+            };
+
+            let scroll = match value.get("scroll").and_then(|s| s.as_str()) {
+                // The operator UI's own defaults, so a guest page behaves like a
+                // playlist item rather than like a separate feature.
+                Some("slow") => ScrollMode::Continuous(ScrollOptions {
+                    speed: 2.0,
+                    top_delay: 2000,
+                    return_delay: 2000,
+                }),
+                _ => ScrollMode::None,
+            };
+
+            // A second `present` replaces the first rather than being refused:
+            // mistyping an address must not cost the guest their slot and a
+            // fresh claim. Releasing first keeps `previous_override` pointing at
+            // the playlist rather than at the guest's own previous page.
+            deactivate_display(state).await;
+            activate_display(state, Showing::Page { url: parsed.clone(), scroll }).await;
+
+            let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
+            if let Some(tx) = tx {
+                let _ = tx.send(Message::Text(
+                    json!({"type": "presenting", "url": redact(&parsed)})
+                        .to_string()
+                        .into(),
+                ));
+            }
+            true
+        }
         Some("stop") => {
             info!("Cast: {:?} asked to stop", role);
             let state = state.clone();
@@ -827,6 +973,12 @@ async fn consume_reservation(
         return Err("Die Reservierung ist abgelaufen. Bitte neu beginnen.".to_string());
     }
 
+    // Carried onto the session so `register_peer` knows, before the guest has
+    // said anything on the socket, whether to pin the cast page.
+    session.pending_mode = session
+        .reservation
+        .as_ref()
+        .map_or(ClaimMode::Cast, |held| held.mode);
     session.reservation = None;
     Ok(())
 }
@@ -895,18 +1047,25 @@ async fn register_peer(
 
     info!("Cast: {:?} connected from {}", role, addr);
 
-    // The sender arriving is what puts the cast page on screen. Doing it here
-    // rather than at the HTTP upgrade means a sender that fails to establish its
-    // socket never interrupts the playlist.
+    // The sender arriving is what puts something on screen. Doing it here rather
+    // than at the HTTP upgrade means a sender that fails to establish its socket
+    // never interrupts the playlist.
+    //
+    // A page-mode sender activates nothing yet: it has not said *what* to show.
+    // Its `present` frame does that. Pinning the cast page here would make the
+    // display visibly bounce through it on the way to the guest's URL.
     if role == Role::Sender {
-        activate_display(state).await;
+        let mode = state.cast.lock().await.pending_mode;
+        if mode == ClaimMode::Cast {
+            activate_display(state, Showing::Cast).await;
+        }
     }
 
     true
 }
 
 async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) {
-    let (counterpart, epoch, holding) = {
+    let (counterpart, epoch, holding, grace) = {
         let mut session = state.cast.lock().await;
         match role {
             Role::Sender => session.sender = None,
@@ -916,7 +1075,13 @@ async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) {
             Role::Sender => session.display.as_ref().map(|peer| peer.tx.clone()),
             Role::Display => session.sender.as_ref().map(|peer| peer.tx.clone()),
         };
-        (counterpart, session.epoch, session.holding_override)
+        // A page gets a longer leash than a cast: the expected case is a phone
+        // whose tab was discarded, not a page reload.
+        let grace = match session.showing {
+            Showing::Page { .. } => PAGE_GRACE,
+            _ => SENDER_GRACE,
+        };
+        (counterpart, session.epoch, session.holding_override, grace)
     };
 
     if let Some(other) = counterpart {
@@ -928,7 +1093,7 @@ async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) {
     info!("Cast: {:?} at {} disconnected", role, addr);
 
     if role == Role::Sender && holding {
-        watch_sender_grace(state.clone(), epoch);
+        watch_sender_grace(state.clone(), epoch, grace);
     }
 }
 
@@ -1026,6 +1191,10 @@ pub async fn cast_info(
 pub struct ClaimRequest {
     #[serde(default)]
     code: Option<String>,
+    /// What the guest intends to do. Defaults to `cast`, so an older page that
+    /// does not send it behaves exactly as before.
+    #[serde(default)]
+    mode: ClaimMode,
 }
 
 /// Validate the code and hold the session for this guest.
@@ -1067,7 +1236,7 @@ pub async fn claim_session(
         }
     }
 
-    if let Err(message) = authorize_sender(&state, addr, payload.code.as_deref()).await {
+    if let Err(message) = authorize_sender(&state, addr, payload.code.as_deref(), payload.mode).await {
         return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
     }
 
@@ -1078,6 +1247,7 @@ pub async fn claim_session(
             ticket: ticket.clone(),
             addr,
             expires_at: Instant::now() + RESERVATION_TTL,
+            mode: payload.mode,
         });
     }
     info!("Cast: session reserved by {}", addr);
@@ -1221,7 +1391,9 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
         session.display.as_ref().map(|peer| peer.tx.clone())
     };
 
-    activate_display(&state).await;
+    // The pairing code is drawn by the cast page, so this is a cast even though
+    // nobody is streaming yet.
+    activate_display(&state, Showing::Cast).await;
 
     if let Some(tx) = display_tx {
         let _ = tx.send(Message::Text(
