@@ -129,6 +129,10 @@ Three properties worth knowing:
   `*.clientctrl.cc` name. This is the same arrangement `traefik.me` and
   `local.gd` use. The trade is deliberate: the names only ever point into
   somebody's LAN, and the alternative is a warning page for every guest.
+- **The device checks its own name at startup** and logs whether the local
+  resolver answers with the address it should. That catches the common shape of
+  the rebinding problem below — device and guest behind the same router — but it
+  measures *this* machine's resolver, not the guest's, so it only ever warns.
 - **It can fail, and failure is quiet.** No network, no private address, or an
   API that will not answer, and the device falls back to the self-signed
   certificate and the bare address. `--managed-cert off` makes that the

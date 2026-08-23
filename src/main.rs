@@ -212,6 +212,8 @@ async fn main() -> Result<()> {
                 // Log the mapping, not just the name: when a guest's resolver refuses
                 // it, the first question is always which address it should answer with.
                 tracing::info!("Advertising this device as {} -> {}", name.host, name.addr);
+                // A hint, not a verdict -- see the note on the function.
+                tls::check_managed_name(&name).await;
                 managed_cert::obtain(&args.cast_cert_path, &name.host)
                     .await
                     .map(|bundle| (name, bundle))

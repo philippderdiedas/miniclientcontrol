@@ -64,11 +64,24 @@ reports itself unavailable, and the panel stays hidden on purpose.
 **Guests get "server not found" for a `.clientctrl.cc` name.**
 That name is public DNS pointing at a private address, which is exactly the
 pattern DNS-rebinding protection blocks — dnsmasq's `stop-dns-rebind`, Pi-hole,
-some OpenWRT builds and a fair number of consumer routers. It is the *guest's*
-resolver doing it, so nothing on this device can detect or fix it. The startup
-log prints the name and the address it should answer with, which is the first
-thing to compare against what the guest's machine resolves. `--managed-cert off`
-falls back to the bare address, which no resolver can object to.
+some OpenWRT builds and a fair number of consumer routers.
+
+Start with the line the controller logs at startup:
+
+```
+10-206-211-199.clientctrl.cc resolves to 10.206.211.199 here      good
+10-206-211-199.clientctrl.cc does not resolve on this device      the resolver refuses it
+```
+
+The warning is a strong hint when the device and the guest sit behind the same
+router, which is the usual arrangement — the same resolver is filtering for both.
+It is not proof either way, because it measures *this* machine's resolver: a
+device with its own upstream can pass while guests fail, and a guest whose phone
+uses DNS-over-HTTPS bypasses the router and works even when the warning fired.
+
+If it is really the guest's resolver, nothing on the device can fix it. Point
+that resolver's rebinding exception at `clientctrl.cc`, or use `--managed-cert
+off` and hand out the bare address, which no resolver objects to.
 
 **The URL still has `:3443` in it.**
 The listener could not bind 443 and fell back, which is silent by design. Either

@@ -480,6 +480,69 @@ pub fn public_base_url(setting: &str, tls_port: u16) -> String {
     }
 }
 
+/// Warn when this machine's own resolver will not answer for the managed name.
+///
+/// A public name that answers with a private address is the exact pattern
+/// DNS-rebinding protection blocks, and a guest whose resolver does that gets
+/// "server not found" rather than anything we could explain.
+///
+/// **This measures our resolver, not theirs**, so it is a hint and never a
+/// verdict. It is right in the common case -- device and guest on the same
+/// router, handed the same DNS by DHCP -- and wrong in both directions
+/// otherwise: a device with its own upstream will pass while guests fail, and a
+/// guest on DNS-over-HTTPS bypasses the router and succeeds while we warn.
+///
+/// So it only ever warns. Falling back on this signal would strand every
+/// DoH-using guest on a self-signed certificate to avoid a problem they do not
+/// have.
+/// What the local resolver had to say about our own name.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// It answered with the address we expect.
+    Correct,
+    /// It answered with nothing -- the rebinding-protection case.
+    Refused,
+    /// It answered with something else, so an answer is being rewritten.
+    Rewritten,
+}
+
+fn judge_resolution(expected: IpAddr, resolved: &[IpAddr]) -> Resolution {
+    if resolved.contains(&expected) {
+        Resolution::Correct
+    } else if resolved.is_empty() {
+        Resolution::Refused
+    } else {
+        Resolution::Rewritten
+    }
+}
+
+pub async fn check_managed_name(name: &ManagedName) {
+    let resolved: Vec<IpAddr> = tokio::net::lookup_host((name.host.as_str(), 443))
+        .await
+        .map(|addrs| addrs.map(|addr| addr.ip()).collect())
+        .unwrap_or_default();
+
+    if judge_resolution(name.addr, &resolved) == Resolution::Correct {
+        info!("{} resolves to {} here", name.host, name.addr);
+    } else if judge_resolution(name.addr, &resolved) == Resolution::Refused {
+        warn!(
+            "{} does not resolve on this device. The usual cause is DNS-rebinding \
+             protection refusing a public name that answers with a private address \
+             (dnsmasq's stop-dns-rebind, Pi-hole, many consumer routers). Guests \
+             using the same resolver will not reach this device either; guests on \
+             their own resolver still might. --managed-cert off falls back to the \
+             bare address.",
+            name.host
+        );
+    } else {
+        warn!(
+            "{} resolves to {:?} on this device, not {}. Something between here and \
+             the zone is rewriting the answer.",
+            name.host, resolved, name.addr
+        );
+    }
+}
+
 /// Warn early if `--public-url=mdns` was asked for but nothing can resolve it.
 ///
 /// Silent failure here is nasty: the display shows an address that simply does
@@ -573,6 +636,20 @@ mod tests {
             public_base_url("https://signage.example.com:8443", 443),
             "https://signage.example.com:8443/"
         );
+    }
+
+    #[test]
+    fn the_resolver_verdict() {
+        let ours: IpAddr = "192.168.178.15".parse().unwrap();
+        let other: IpAddr = "10.0.0.1".parse().unwrap();
+
+        assert_eq!(judge_resolution(ours, &[ours]), Resolution::Correct);
+        // Several answers are fine as long as ours is among them.
+        assert_eq!(judge_resolution(ours, &[other, ours]), Resolution::Correct);
+        // Nothing at all is what rebinding protection looks like.
+        assert_eq!(judge_resolution(ours, &[]), Resolution::Refused);
+        // An answer that is not ours means something rewrote it.
+        assert_eq!(judge_resolution(ours, &[other]), Resolution::Rewritten);
     }
 
     #[test]

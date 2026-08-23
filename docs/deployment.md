@@ -183,11 +183,33 @@ sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443   # /etc/sysctl.d to pers
 # 3. run it as a system service with AmbientCapabilities=CAP_NET_BIND_SERVICE
 ```
 
-**A capability set with `setcap` does not survive a deploy.** It is an attribute
-of the inode, and the update procedure above renames a new file over the old one,
-so the new binary has no capability and quietly lands on 3443 — while the short
-URL that was handed out, printed or scanned still points at 443. Re-run `setcap`
-after every update, or use one of the other two.
+### Why `setcap` needs redoing after every update
+
+`setcap` does not mark a *path*. It writes an extended attribute onto the
+**inode** — the file object itself. The update procedure above deliberately
+replaces that object:
+
+```bash
+scp <binary> device:~/miniclientcontrol/miniclientcontrol.new   # a new inode
+ssh device 'cd ~/miniclientcontrol && mv miniclientcontrol.new miniclientcontrol'
+```
+
+After the `mv` the name points at the file that was just copied over, and nothing
+ever ran `setcap` on *that* one. The capability is gone.
+
+Nothing complains. The controller tries 443, is refused, and falls back to 3443
+exactly as designed — while every QR code already printed, scanned or written
+down says `https://<name>/` with no port. Guests reach nothing, and the logs read
+like an ordinary startup.
+
+So either re-run `setcap` as part of the deploy:
+
+```bash
+ssh device 'sudo setcap cap_net_bind_service=+ep ~/miniclientcontrol/miniclientcontrol'
+```
+
+or use one of the other two options, which are properties of the machine or the
+unit rather than of the file, and therefore survive.
 
 A systemd **user** service cannot be given `AmbientCapabilities`: the user
 manager has no capabilities to hand out. That leaves options 1 and 2 for the
