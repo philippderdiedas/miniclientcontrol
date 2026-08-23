@@ -87,6 +87,10 @@
         <span class="lock" id="lockEnabled" hidden>per Kommandozeile festgelegt</span>
       </p>
       <p>
+        <label><input type="checkbox" id="setGuestPages" /> Gäste dürfen Webseiten zeigen</label>
+        <span class="lock" id="lockGuestPages" hidden>per Kommandozeile festgelegt</span>
+      </p>
+      <p>
         <label for="setAuth">Zugang:</label>
         <select id="setAuth">
           <option value="none">Offen — jeder im Netz kann übertragen</option>
@@ -336,10 +340,17 @@
         const since = cast.started_at
           ? new Date(cast.started_at).toLocaleTimeString(uiLocale || undefined)
           : '?';
-        status.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
-        hint.textContent = cast.display_connected
-          ? 'Display ist verbunden. Playlist pausiert.'
-          : 'Warte auf das Display…';
+        const page = cast.showing && cast.showing.page;
+        if (page) {
+          // textContent throughout: a guest supplied this address.
+          status.textContent = `▶ Gast zeigt eine Webseite seit ${since}`;
+          hint.textContent = `Auf dem Bildschirm: ${page}`;
+        } else {
+          status.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
+          hint.textContent = cast.display_connected
+            ? 'Display ist verbunden. Playlist pausiert.'
+            : 'Warte auf das Display…';
+        }
         stop.hidden = false;
       } catch (_) {
         card.hidden = true;
@@ -353,6 +364,7 @@
     // (Same reason playlist.html never re-renders its cards on a tick.)
     const LOCK_FIELDS = {
       cast_enabled: ['setEnabled', 'lockEnabled'],
+      guest_pages: ['setGuestPages', 'lockGuestPages'],
       cast_auth: ['setAuth', 'lockAuth'],
       cast_code: ['setCode', 'lockCode'],
       locale: ['setLocale', 'lockLocale'],
@@ -374,6 +386,7 @@
 
     function applySettings(settings) {
       document.getElementById('setEnabled').checked = settings.cast_enabled;
+      document.getElementById('setGuestPages').checked = settings.guest_pages_enabled;
       document.getElementById('setAuth').value = settings.cast_auth;
       document.getElementById('setCode').value = settings.cast_code || '';
       document.getElementById('authEnabled').checked = settings.auth_enabled;
@@ -435,6 +448,7 @@
       const password = document.getElementById('authPassword').value;
       const body = {
         cast_enabled: document.getElementById('setEnabled').checked,
+        guest_pages_enabled: document.getElementById('setGuestPages').checked,
         cast_auth: document.getElementById('setAuth').value,
         cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
         locale: document.getElementById('setLocale').value.trim(),

@@ -1116,6 +1116,8 @@ pub struct CastStateResponse {
     /// never from `/api/cast/info`.
     code: String,
     active: bool,
+    /// What is on screen: `null`, `"cast"`, or `{ "page": "<redacted url>" }`.
+    showing: serde_json::Value,
     /// Somebody passed the code and is in their browser's screen picker.
     reserved: bool,
     sender: Option<String>,
@@ -1145,6 +1147,9 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
         auth: settings.cast_auth,
         code: settings.cast_code.clone(),
         active: session.is_active(),
+        // Redacted inside `showing_json`: a guest may have typed credentials
+        // into that address, and this is rendered into the admin page.
+        showing: session.showing_json(),
         reserved: session.live_reservation().is_some(),
         sender: session.sender_addr.map(|addr| addr.to_string()),
         display_connected: session.display.is_some(),
@@ -1176,6 +1181,10 @@ pub async fn cast_info(
     // Never the code itself: this endpoint is reachable without credentials.
     Json(json!({
         "enabled": settings.cast_enabled,
+        // Its own switch, not a detail of `enabled`: a device too weak for
+        // WebRTC can still render a page, so the guest page shows one control
+        // and not the other.
+        "page_enabled": settings.guest_pages_enabled,
         "auth": settings.cast_auth,
         "busy": session.taken_by_other(peer.ip()),
         // What the display can show. The sender needs this *before* it calls
