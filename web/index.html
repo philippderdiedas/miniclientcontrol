@@ -105,7 +105,28 @@
     <div id="shareBlock">
       <button class="primary" id="shareScreen">Bildschirm teilen</button>
       <button id="shareCamera">Kamera teilen</button>
+      <button id="showPage" hidden>Webseite zeigen</button>
       <p class="muted" id="reservation" hidden></p>
+    </div>
+
+    <div id="pageBlock" hidden>
+      <label for="pageUrl">Adresse der Seite</label>
+      <input id="pageUrl" type="url" inputmode="url" placeholder="https://…"
+             autocomplete="off" spellcheck="false" />
+      <div class="qrow">
+        <button type="button" id="pageScrollNone" class="qbtn">Nicht scrollen</button>
+        <button type="button" id="pageScrollSlow" class="qbtn">Langsam scrollen</button>
+      </div>
+      <button class="primary" id="pageGo">Auf dem Bildschirm zeigen</button>
+      <button type="button" id="pageBack">Zurück</button>
+      <p class="warn" id="pageError"></p>
+    </div>
+
+    <div id="pageLiveBlock" hidden>
+      <p class="status" id="pageLiveUrl"></p>
+      <p class="muted">Diese Seite offen lassen — sonst kehrt der Bildschirm
+        nach kurzer Zeit zur Anzeige zurück.</p>
+      <button id="pageStop">Beenden</button>
     </div>
 
     <div id="liveBlock" hidden>
@@ -258,12 +279,18 @@
     }
 
     // Returns true once the session belongs to us.
-    async function claim(code) {
+    async function claim(code, mode) {
       try {
+        const payload = {};
+        if (code) payload.code = code;
+        // Told at claim time, not on the socket: the server pins the display the
+        // moment a sender connects, and a page must not flash the cast page on
+        // its way to the guest's address.
+        if (mode) payload.mode = mode;
         const res = await fetch('/api/cast/claim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(code ? { code } : {}),
+          body: JSON.stringify(payload),
         });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -340,7 +367,7 @@
     // --- streaming --------------------------------------------------------
 
     function showLive(live) {
-      el('shareBlock').hidden = live;
+      el('shareBlock').hidden = live || !el('pageBlock').hidden;
       el('liveBlock').hidden = !live;
       el('codeBlock').hidden = live || authMode === 'none';
       el('pairingBlock').hidden = live || authMode !== 'pairing';
@@ -510,7 +537,22 @@
           else teardown('Das Display hat die Verbindung beendet.');
         },
         signal: (data) => { onSignal(data).catch(console.error); },
-        error: (frame) => teardown(frame.message || 'Fehler', true),
+        presenting: (frame) => {
+          el('pageBlock').hidden = true;
+          el('pageLiveBlock').hidden = false;
+          // textContent, not innerHTML: a guest typed this.
+          el('pageLiveUrl').textContent = 'Auf dem Bildschirm: ' + frame.url;
+          el('pageError').textContent = '';
+        },
+        error: (frame) => {
+          // A refused address keeps the slot, so the guest can correct a typo
+          // rather than starting over.
+          if (frame.code === 'page') {
+            el('pageError').textContent = frame.message || 'Adresse abgelehnt.';
+            return;
+          }
+          teardown(frame.message || 'Fehler', true);
+        },
         closed: () => teardown('Verbindung zum Server verloren.', true),
       });
     }
@@ -629,6 +671,70 @@
       return false;
     }
 
+    // --- showing a web page instead of streaming ---------------------------
+
+    let pageScroll = 'none';
+
+    function selectScroll(which) {
+      pageScroll = which;
+      el('pageScrollNone').classList.toggle('on', which === 'none');
+      el('pageScrollSlow').classList.toggle('on', which === 'slow');
+    }
+
+    el('pageScrollNone').onclick = () => selectScroll('none');
+    el('pageScrollSlow').onclick = () => selectScroll('slow');
+    selectScroll('none');
+
+    el('showPage').onclick = () => {
+      el('shareBlock').hidden = true;
+      el('pageBlock').hidden = false;
+      el('pageUrl').focus();
+    };
+
+    el('pageBack').onclick = () => {
+      el('pageBlock').hidden = true;
+      el('shareBlock').hidden = false;
+      el('pageError').textContent = '';
+    };
+
+    el('pageGo').onclick = async () => {
+      el('pageError').textContent = '';
+      const url = el('pageUrl').value.trim();
+      if (!url) {
+        el('pageError').textContent = 'Bitte eine Adresse eingeben.';
+        return;
+      }
+      // Claim first, exactly like sharing: the code is checked and the slot
+      // taken before anything else, so nobody is turned away after committing.
+      if (!ticket) {
+        const result = await claim(authMode === 'none' ? null : getCode(), 'page');
+        if (!result.ok) {
+          el('pageError').textContent = result.error;
+          return;
+        }
+      }
+      if (!socket || !socket.ready) connect();
+      // The socket needs a moment before the first frame will go out.
+      for (let i = 0; i < 40 && !(socket && socket.ready); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      if (!socket || !socket.ready) {
+        el('pageError').textContent = 'Keine Verbindung zum Controller.';
+        return;
+      }
+      socket.present(url, pageScroll);
+    };
+
+    el('pageStop').onclick = () => {
+      if (socket) socket.stop();
+      el('pageLiveBlock').hidden = true;
+      el('pageBlock').hidden = true;
+      el('shareBlock').hidden = false;
+      dropReservation();
+    };
+
+    // A guest who wanders off should not hold the screen; the server's grace
+    // period covers a tab that merely went to the background.
     fetch('/api/cast/info')
       .then((res) => res.json())
       .then((info) => {
@@ -645,10 +751,18 @@
         authMode = info.auth || 'none';
         showLive(false);
 
-        if (!info.enabled) {
+        el('showPage').hidden = !info.page_enabled;
+        // Two independent switches: a device too weak for WebRTC may still be
+        // allowed to show a page, so one being off must not hide the other.
+        if (!info.enabled && !info.page_enabled) {
           el('setup').hidden = true;
           setStatus('Übertragung ist auf diesem Gerät deaktiviert.', true);
           return;
+        }
+        if (!info.enabled) {
+          el('shareScreen').hidden = true;
+          el('shareCamera').hidden = true;
+          setStatus('Bildschirmübertragung ist deaktiviert. Eine Webseite geht.');
         }
         if (!checkSecureContext()) return;
 
