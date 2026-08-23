@@ -120,6 +120,46 @@ reserialised.
 
 Parsing uses the `url` crate, already in the tree via `chromiumoxide`.
 
+## Downloads are refused, browser-wide
+
+A URL need not be a page. Point Chromium at a large binary, or at anything
+served with `Content-Disposition: attachment`, and it starts a **download**
+instead of navigating. Repeat that on a device whose storage is an SD card and
+the filesystem fills, which takes the database, the certificate and the uploads
+with it. A guest who can set a URL can do this deliberately; nothing in the rest
+of this design stops them.
+
+The fix is `Browser.setDownloadBehavior` with `deny`, sent **once per CDP
+connection** in `browser_loop`, next to where `ignore_https_errors` is already
+decided. It is browser-wide rather than per page, so it covers every target the
+controller ever navigates. `chromiumoxide 0.9` exposes it as
+`cdp::browser_protocol::browser::SetDownloadBehaviorParams`.
+
+**This is unconditional, not tied to the guest-page setting.** A guard against
+resource exhaustion that depends on a switch has the wrong shape, and a download
+was never the intent on a signage display anyway — an operator's playlist URL
+that quietly downloads is equally a bug. Nothing existing regresses: our own
+assets render inline, and Chromium shows a remote PDF in its viewer rather than
+saving it unless the server insists on `attachment`.
+
+Set `eventsEnabled: true` at the same time. `Browser.downloadWillBegin` then
+tells us a URL was a file, and the guest can be told *that link is a file, not a
+page* — otherwise a denied download looks like nothing happening at all, since
+the display simply stays where it was.
+
+The equivalent for a browser this controller did not start is the managed policy
+`DownloadRestrictions: 3` in `/etc/chromium/policies/managed/`, the same shape
+and the same caveats as the existing no-translate policy.
+
+### Exhaustion this does not solve
+
+Named rather than hidden. A page that burns CPU or memory cannot be configured
+away; it is bounded by the session, since the guest holds the socket and the
+operator can end it at any time. And where the display browser runs with
+`--autoplay-policy=no-user-gesture-required`, which is recommended so a cast has
+sound, a guest page can play audio unasked. The room-audio panel is the existing
+answer to that.
+
 ## Settings
 
 New `guest_pages_enabled`, default **off**, edited in the admin UI beside the
@@ -173,6 +213,8 @@ browser-bound string keeps it.
 - a cast and a page cannot hold the slot at once, in both orders
 - `cast_enabled` off with guest pages on still works end to end
 - a `present` frame from a display-role socket is refused
+- a URL that serves `Content-Disposition: attachment` does not write a file
+  anywhere, and the guest is told it was a file rather than a page
 
 ## Known consequences
 
