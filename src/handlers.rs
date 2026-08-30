@@ -357,12 +357,12 @@ pub async fn add_to_playlist(
     let scroll_config = payload.scroll_config.unwrap_or(ScrollMode::None);
     let keep_loaded = payload.keep_loaded.unwrap_or(false);
     let enabled = payload.enabled.unwrap_or(true);
-    // `null` unless it would actually draw something, so the read paths never
-    // have to tell "switched off" from "empty".
+    // `null` unless it would draw something *or* recolour the box it lands in,
+    // so the read paths never have to tell "switched off" from "empty".
     let overlay = payload
         .overlay
         .map(|overlay| overlay.sanitized())
-        .filter(|overlay| overlay.draws())
+        .filter(|overlay| overlay.matters())
         .map(sqlx::types::Json);
 
     if let Err(e) = sqlx::query(
@@ -516,9 +516,9 @@ pub async fn update_playlist_item(
                 return (StatusCode::BAD_REQUEST, Json(ApiError { error: message })).into_response();
             }
         }
-        // Stored as `null` when it draws nothing, so the read paths do not have to
-        // tell "switched off" from "empty".
-        let stored = overlay.draws().then(|| sqlx::types::Json(overlay));
+        // Stored as `null` when it neither draws nor recolours, so the read paths
+        // do not have to tell "switched off" from "empty".
+        let stored = overlay.matters().then(|| sqlx::types::Json(overlay));
         if let Err(e) = sqlx::query("UPDATE playlist_items SET overlay_config = ? WHERE id = ?")
             .bind(stored)
             .bind(id)

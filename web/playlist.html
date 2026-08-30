@@ -291,9 +291,11 @@
     }
 
     // --- per-item overlay editor ---------------------------------------------
-    // Content and a corner only. Colours, sizes and opacity come from the global
-    // overlay in the admin page, so a display keeps one look across items and this
-    // fieldset stays small enough to sit in every card.
+    // Content, a corner, and the text colour. Sizes and opacity come from the
+    // global overlay in the admin page, so a display keeps one look across items
+    // and this fieldset stays small enough to sit in every card. The colour is
+    // the one exception, because one bright page in a dark playlist makes the
+    // global white clock unreadable and nothing else can answer that.
     function overlayEditor(initial, assets) {
       const cfg = initial || {};
 
@@ -324,16 +326,31 @@
         el('option', { value: 'top-center', text: 'oben mittig' }));
       position.value = cfg.position || '';
 
+      // A colour input has no empty state, so the checkbox is what expresses
+      // "use the global colour" -- without it there is no way back once a colour
+      // has been picked. Same shape as the admin page's QR choice `keiner`,
+      // which is a UI value with no server-side counterpart.
+      const ownColor = el('input', { type: 'checkbox' });
+      ownColor.checked = !!cfg.color;
+      const color = el('input', { type: 'color', value: cfg.color || '#000000' });
+      const colorRow = el('label', { class: 'inline' }, ownColor,
+        el('span', { text: 'eigene Textfarbe' }), color);
+
       const rows = el('div', {},
         el('div', { class: 'grid' }, field('Text', text)),
         el('div', { class: 'grid' }, field('QR-Code für', qrText), field('QR-Beschriftung', qrLabel)),
-        el('div', { class: 'grid' }, field('Bild', image), field('Ecke', position)));
+        el('div', { class: 'grid' }, field('Bild', image), field('Ecke', position)),
+        colorRow);
+
+      const syncColor = () => { color.disabled = !ownColor.checked || rows.hidden; };
+      ownColor.addEventListener('change', syncColor);
 
       const sync = () => {
         rows.hidden = !enabled.checked;
         // Disabled as well as hidden, like the scroll editor: a control that does
         // not apply should not be reachable by keyboard either.
         for (const input of rows.querySelectorAll('input, select')) input.disabled = rows.hidden;
+        syncColor();
       };
       enabled.addEventListener('change', sync);
       sync();
@@ -353,6 +370,8 @@
             qr_label: qrLabel.value,
             image_asset_id: image.value ? Number(image.value) : null,
             position: position.value,
+            // Empty means "the global colour", which is what the server reads it as.
+            color: ownColor.checked ? color.value : '',
           };
         },
       };

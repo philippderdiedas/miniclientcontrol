@@ -141,6 +141,27 @@ Layers naming the same corner share one box and the first of them decides how it
 looks, so the style is not per layer. An item that names no corner joins the
 global box.
 
+**The one exception is `ItemOverlay::color`, and it recolours the box rather
+than the layer.** One bright page in a dark playlist makes the *global*
+overlay's white clock unreadable, so an override reaching only the item's own
+text would miss the thing that prompted it. Resolved entirely in
+`settings::overlay_payload`, which stamps the colour onto the first layer of the
+target box — `overlay.js` needs no notion of it, and style resolution stays in
+one place. Three rules hold it together:
+
+- **`draws()` and `recolours()` are separate predicates.** A colour with no text
+  or QR beside it is valid — a bright page often wants a readable house clock
+  and no badge — and must not push an empty layer. `matters()` is the pair, and
+  it is what the two storage sites filter on: an item overlay is SQL `null`
+  unless it would draw *or* recolour.
+- **A colour-only item recolours the global box whatever corner it names.** With
+  nothing drawn it has no box of its own, so its `position` is meaningless and
+  honouring it would be a stored setting that silently does nothing.
+- **Only the hue is negotiable.** `color_alpha`, the background and the sizes
+  stay global; an item that could restyle the box completely is the display
+  changing character item by item, which the global-only style was protecting.
+  An unparseable colour falls back to inherit, like an unknown corner.
+
 The global QR has a **source**, not just a text: `qr_source` is `text` (use
 `qr_text`) or `cast` (resolve the guest URL when drawing). With casting switched
 off the `cast` source draws nothing — advertising a way to share a screen that

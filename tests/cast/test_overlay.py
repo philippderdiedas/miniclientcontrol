@@ -82,6 +82,22 @@ STYLED = """(() => {
 })()"""
 
 
+COLOURS = """(() => {
+  const hosts = [...document.querySelectorAll('[id^="__mcc_overlay"]')];
+  return JSON.stringify({
+    count: hosts.length,
+    boxes: hosts.map((h) => {
+      const box = h.shadowRoot && h.shadowRoot.querySelector('.box');
+      return {
+        id: h.id,
+        color: box ? getComputedStyle(box).color : null,
+        text: box ? box.textContent : '',
+      };
+    }),
+  });
+})()"""
+
+
 def put(overlay, port=None):
     return http("PUT", "/api/settings", {"overlay": overlay}, port=port)
 
@@ -513,6 +529,93 @@ async def browser_flow():
             await asyncio.sleep(0.5)
         check("an edit reaches a standing override without re-navigating", updated is True)
         http("DELETE", "/api/override", port=HTTP)
+
+        print("\n[45c] a bright item can recolour the box it sits in")
+        # One bright page in an otherwise dark playlist: the global overlay's
+        # white clock is the thing that becomes unreadable, so the override has
+        # to reach the *global* layer and not only the item's own.
+        put({"enabled": True, "text": "Haus", "show_clock": True,
+             "position": "top-center", "color": "#ffffff"}, port=HTTP)
+        current = http("GET", "/api/control/current", port=HTTP)[1]["item_id"]
+
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Item", "position": "",
+                          "color": "#101010"}}, port=HTTP)
+        shared = {}
+        for _ in range(40):
+            shared = json.loads(await page.eval(COLOURS))
+            if shared["count"] == 1 and shared["boxes"][0]["color"] == "rgb(16, 16, 16)":
+                break
+            await asyncio.sleep(0.5)
+        check("the item's colour reaches the shared box",
+              shared["count"] == 1 and shared["boxes"][0]["color"] == "rgb(16, 16, 16)", shared)
+        check("and it took the global clock with it, which is the whole point",
+              "Haus" in shared["boxes"][0]["text"] and "Item" in shared["boxes"][0]["text"],
+              shared)
+
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Item", "position": "bottom-left",
+                          "color": "#101010"}}, port=HTTP)
+        split = {}
+        for _ in range(40):
+            split = json.loads(await page.eval(COLOURS))
+            if split["count"] == 2:
+                break
+            await asyncio.sleep(0.5)
+        by_id = {b["id"]: b for b in split.get("boxes", [])}
+        check("an item in its own corner recolours only its own box",
+              by_id.get("__mcc_overlay_bottom-left", {}).get("color") == "rgb(16, 16, 16)",
+              split)
+        check("and the global box keeps the colour it was given",
+              by_id.get("__mcc_overlay_top-center", {}).get("color") == "rgb(255, 255, 255)",
+              split)
+
+        # A bright page often wants no badge of its own -- only a readable clock.
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "", "qr_text": "",
+                          "position": "bottom-left", "color": "#204060"}}, port=HTTP)
+        only = {}
+        for _ in range(40):
+            only = json.loads(await page.eval(COLOURS))
+            if only["count"] == 1 and only["boxes"][0]["color"] == "rgb(32, 64, 96)":
+                break
+            await asyncio.sleep(0.5)
+        check("a colour with no content draws no box of its own",
+              only["count"] == 1, only)
+        check("and recolours the global box, whatever corner it named",
+              only["boxes"][0]["color"] == "rgb(32, 64, 96)"
+              and only["boxes"][0]["id"] == "__mcc_overlay_top-center", only)
+        stored = [i for i in http("GET", "/api/playlist", port=HTTP)[1]
+                  if i["id"] == current]
+        check("a colour-only overlay is stored rather than dropped as empty",
+              bool(stored) and (stored[0].get("overlay_config") or {}).get("color") == "#204060",
+              stored[:1])
+
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Item", "position": "",
+                          "color": "keine farbe"}}, port=HTTP)
+        bad = {}
+        for _ in range(40):
+            bad = json.loads(await page.eval(COLOURS))
+            if bad["count"] == 1 and "Item" in bad["boxes"][0]["text"]:
+                break
+            await asyncio.sleep(0.5)
+        check("a colour that is not one falls back to inherit, not to nothing",
+              bad["count"] == 1 and bad["boxes"][0]["color"] == "rgb(255, 255, 255)", bad)
+
+        http("PUT", f"/api/playlist/{current}",
+             {"overlay": {"enabled": True, "text": "Item", "position": "",
+                          "color": ""}}, port=HTTP)
+        cleared = {}
+        for _ in range(40):
+            cleared = json.loads(await page.eval(COLOURS))
+            if cleared["count"] == 1 and cleared["boxes"][0]["color"] == "rgb(255, 255, 255)":
+                break
+            await asyncio.sleep(0.5)
+        check("clearing it puts the global colour back",
+              cleared["count"] == 1 and cleared["boxes"][0]["color"] == "rgb(255, 255, 255)",
+              cleared)
+        http("PUT", f"/api/playlist/{current}", {"overlay": {"enabled": False}}, port=HTTP)
 
         print("\n[46] on a page from a genuinely foreign origin nothing is fetched")
         # Reached by the LAN address on purpose. Chromium's Local Network Access

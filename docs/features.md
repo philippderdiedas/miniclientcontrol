@@ -52,6 +52,18 @@ item may add **its own** on top of it. The item's layer is deliberately smaller 
 scope (text, image, QR, position) so a display does not change character item by
 item while the playlist runs.
 
+An item may also **override the text colour**, which is the one piece of the look
+it can reach. The case is a single bright page in an otherwise dark playlist:
+white text that reads everywhere else disappears there, and the global setting
+cannot fix one item without breaking the rest. The override recolours the whole
+box it lands in — including the clock the global overlay draws, which is usually
+the thing that became unreadable. An item that shares the global corner
+recolours that shared box; one with a corner of its own recolours only its own.
+
+A colour needs no text or QR beside it: a bright page often wants no badge of its
+own, only a readable house clock. Everything else about the look — background,
+opacity, sizes — stays global on purpose.
+
 The QR code either encodes a fixed string or **the screen-share address**,
 resolved at the moment it is drawn. That indirection matters: the address is not
 stable — `--public-url` decides its shape, an occupied TLS port moves it, and a

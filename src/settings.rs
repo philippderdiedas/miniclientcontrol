@@ -174,12 +174,31 @@ pub struct ItemOverlay {
     pub qr_label: String,
     /// Empty means "wherever the global overlay is", which puts both in one box.
     pub position: String,
+    /// Text colour for the box this item lands in, overriding the global one.
+    ///
+    /// Empty means "the global overlay's colour", the same way an empty
+    /// `position` means "wherever the global overlay is".
+    ///
+    /// It recolours the *box*, not this layer: the case it exists for is one
+    /// bright page in an otherwise dark playlist, where what becomes unreadable
+    /// is the global overlay's white clock. Reaching only the item's own text
+    /// would leave the thing that prompted it untouched. Only the colour is
+    /// negotiable -- an item that could restyle the box completely would let the
+    /// display change character item by item, which is what a global-only style
+    /// was protecting.
+    pub color: String,
 }
 
 impl ItemOverlay {
     pub fn sanitized(mut self) -> Self {
         if !self.position.is_empty() && !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
             self.position = String::new();
+        }
+        // Falls back to the global colour rather than being refused: the same
+        // call an unknown corner gets. A stored colour that is ignored is better
+        // than an error on a screen nobody is standing in front of.
+        if !self.color.is_empty() && !is_hex_colour(&self.color) {
+            self.color = String::new();
         }
         self.text = self.text.chars().take(500).collect();
         self.qr_text = self.qr_text.chars().take(500).collect();
@@ -193,8 +212,23 @@ impl ItemOverlay {
             && self.qr_text.trim().is_empty()
     }
 
+    /// Whether this item contributes a layer of its own.
     pub fn draws(&self) -> bool {
         self.enabled && !self.is_empty()
+    }
+
+    /// Whether this item overrides the colour of the box it lands in.
+    ///
+    /// Apart from `draws` on purpose: a colour with no text or QR beside it is a
+    /// bright page asking for a readable house clock and nothing else, and
+    /// answering that with an empty box would be worse than answering nothing.
+    pub fn recolours(&self) -> bool {
+        self.enabled && !self.color.is_empty()
+    }
+
+    /// Whether this is worth storing at all.
+    pub fn matters(&self) -> bool {
+        self.draws() || self.recolours()
     }
 }
 
@@ -694,6 +728,22 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
         return json!({ "locale": "de-DE", "layers": layers });
     }
 
+    // Which box the item recolours, and to what. Resolved before the layers are
+    // built so the global layer can be stamped on its way out: `overlay.js`
+    // styles a box from its *first* layer, so handing it a first layer that
+    // already carries the effective colour keeps style resolution in one place.
+    // An item that draws nothing has no box of its own, so the corner it names
+    // says nothing and it recolours the global one -- the alternative is a
+    // stored setting that silently does nothing.
+    let recolour = item.filter(|item| item.recolours()).map(|item| {
+        let target = if item.draws() && !item.position.is_empty() {
+            item.position.clone()
+        } else {
+            overlay.position.clone()
+        };
+        (target, item.color.clone())
+    });
+
     if overlay.enabled && !overlay.is_empty() {
         let mut layer = serde_json::to_value(&overlay).unwrap_or_else(|_| json!({}));
         if let Some(object) = layer.as_object_mut() {
@@ -712,6 +762,11 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
                 _ => overlay.qr_text.clone(),
             };
             object.insert("qr_modules".to_string(), json!(qr_modules(&qr_target)));
+            if let Some((target, color)) = recolour.as_ref() {
+                if *target == overlay.position {
+                    object.insert("color".to_string(), json!(color));
+                }
+            }
         }
         layers.push(layer);
     }
@@ -740,7 +795,10 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
             "background_alpha": overlay.background_alpha,
             "plain": overlay.plain,
             "background_css": overlay.background_css,
-            "color": overlay.color,
+            // The item's own colour when it set one, the global one otherwise.
+            // Only the hue is negotiable: the global opacity still applies, so
+            // an operator cannot make an item's text quietly disappear.
+            "color": if item.recolours() { item.color.clone() } else { overlay.color.clone() },
             "color_alpha": overlay.color_alpha,
         }));
     }
