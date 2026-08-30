@@ -150,11 +150,23 @@ is **not a server-side value**; it clears `qr_text` with source `text`.
 The code-level rules:
 
 **There is no CDP command that draws over a page.** An overlay is always DOM in
-the target document, which is what the four defences are for — remove one and the
+the target document, which is what the five defences are for — remove one and the
 failure is silent:
 
 - **Shadow DOM plus `all: initial`**, or the target page's CSS decides how the
   notice looks and a stray `div { display: none }` makes it vanish.
+- **The rules travel as a constructable stylesheet** (`new CSSStyleSheet()` +
+  `shadow.adoptedStyleSheets`), never a `<style>` element. **A shadow root is not
+  a CSP boundary.** A nonce-based `style-src` with no `'unsafe-inline'` — what
+  Next.js sends by default — drops an appended `<style>` while leaving the
+  element in the DOM: `styleEl.sheet` is `null`, the text is still on screen and
+  every rule is gone, so the badge reads as unstyled on that one playlist item
+  and nowhere else. CSP governs style elements and style attributes, not the
+  object model, so CSSOM gets through. `host.style.cssText` in `ensureHost` is
+  CSSOM for the same reason and was never affected — which is why the box stayed
+  put while its contents lost everything. Covered by case [46a] of
+  `tests/cast/test_overlay.py`, which asserts the *computed* style: the `<style>`
+  node was present the whole time the bug existed.
 - **The top layer, via `popover="manual"`.** A fullscreen element covers every
   z-index there is. `manual` and not `auto`: an auto popover closes on the next
   Escape or outside click, and this one is not the page's to dismiss. The

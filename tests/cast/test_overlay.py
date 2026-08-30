@@ -65,6 +65,23 @@ BOXES = """(() => {
 })()"""
 
 
+STYLED = """(() => {
+  const hosts = [...document.querySelectorAll('[id^="__mcc_overlay"]')];
+  const box = hosts.map((h) => h.shadowRoot && h.shadowRoot.querySelector('.box'))
+                   .find(Boolean);
+  if (!box) return JSON.stringify({box: false});
+  const cs = getComputedStyle(box);
+  return JSON.stringify({
+    box: true,
+    text: box.textContent,
+    position: cs.position,
+    background: cs.backgroundColor,
+    fontSize: parseFloat(cs.fontSize),
+    host: location.host,
+  });
+})()"""
+
+
 def put(overlay, port=None):
     return http("PUT", "/api/settings", {"overlay": overlay}, port=port)
 
@@ -533,6 +550,47 @@ async def browser_flow():
         # `<img>` both fail), so pinning it would make the suite depend on the
         # permission UI rather than on our code. What is asserted is the part we
         # control: the payload names no controller URL, and the QR needs none.
+        http("DELETE", "/api/override", port=HTTP)
+
+        print("\n[46a] a page whose CSP forbids inline styles is still styled")
+        # A nonce-based `style-src` with no 'unsafe-inline' -- what Next.js sends,
+        # and what wom.i.fll.sh sends. A <style> element the overlay appends
+        # carries no nonce, so the page's policy drops the *sheet* while leaving
+        # the element in the DOM: `styleEl.sheet` is null, the text is still on
+        # screen, and every rule is gone. It reads as "the overlay lost its CSS",
+        # and only on that one playlist item.
+        #
+        # Asserted on the computed style, not on the presence of a <style> node:
+        # the node was there the whole time the bug existed.
+        strict = subprocess.Popen([sys.executable, f"{SP}/foreign_page.py", "3062", "csp"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        procs.append(strict)
+        strict_url = f"http://{LAN}:3062/"
+        check("the strict-CSP origin is serving", wait_for(
+            lambda: urllib.request.urlopen(strict_url, timeout=2).status == 200, 15) is not None)
+
+        put({"enabled": True, "text": "Streng", "position": "bottom-right",
+             "size": 3.0, "background_color": "#000000", "background_alpha": 0.65},
+            port=HTTP)
+        http("POST", "/api/override", {"url": strict_url}, port=HTTP)
+
+        info = {}
+        for _ in range(60):
+            info = json.loads(await page.eval(STYLED))
+            if info.get("box") and "Streng" in (info.get("text") or ""):
+                break
+            await asyncio.sleep(0.5)
+        check("the badge reached the strict-CSP page at all",
+              info.get("box") and "Streng" in (info.get("text") or ""), info)
+        check("the page really is the strict-CSP origin",
+              info.get("host") == f"{LAN}:3062", info)
+        # The three the dropped sheet took with it.
+        check("it is still positioned by our own rules",
+              info.get("position") == "fixed", info)
+        check("it still has its box background",
+              info.get("background") not in (None, "rgba(0, 0, 0, 0)"), info)
+        check("and it is still sized in vmin, not the page default 16px",
+              isinstance(info.get("fontSize"), float) and info["fontSize"] != 16.0, info)
         http("DELETE", "/api/override", port=HTTP)
 
         print("\n[46b] a connection code makes the overlay stand down")

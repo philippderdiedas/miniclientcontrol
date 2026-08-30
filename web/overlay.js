@@ -8,11 +8,16 @@
 // rule is what lets "clock, always" and "QR for this item" coexist without
 // anybody computing offsets by hand.
 //
-// This is injected into *foreign* pages, so it defends itself on three fronts
+// This is injected into *foreign* pages, so it defends itself on five fronts
 // that a normal widget never has to think about:
 //
 //  * **The page's CSS.** A shadow root plus `all: initial` on the container, so
 //    a dashboard's `div { display: none }` or its font stack cannot reach in.
+//  * **The page's CSP.** A shadow root is not a CSP boundary: a nonce-based
+//    `style-src` with no 'unsafe-inline' drops a `<style>` we append while
+//    leaving the element in the DOM, so the badge keeps its text and loses every
+//    rule -- unpositioned, unstyled, 16px. Our rules therefore travel as a
+//    *constructable* stylesheet, which is CSSOM and not governed by `style-src`.
 //  * **The top layer.** An element in fullscreen (a video, some dashboards)
 //    covers *every* z-index there is. A manual popover is in the top layer, so
 //    it stays visible; the z-index below is only the fallback for browsers
@@ -317,6 +322,26 @@
     return group;
   }
 
+  // Our rules, in a form the page's CSP cannot drop. `new CSSStyleSheet()` plus
+  // `adoptedStyleSheets` is CSSOM, and CSP governs style *elements* and style
+  // *attributes*, not the object model -- so this lands on a page whose
+  // `style-src` would refuse the equivalent `<style>`. Returns null where the
+  // constructor is missing, leaving the caller its old path, which is no worse
+  // than what it replaces.
+  function adoptSheet(shadow, css) {
+    if (typeof CSSStyleSheet !== 'function' || !('adoptedStyleSheets' in shadow)) {
+      return null;
+    }
+    try {
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(css);
+      shadow.adoptedStyleSheets = [sheet];
+      return sheet;
+    } catch (_) {
+      return null;
+    }
+  }
+
   function render() {
     const active = suspended ? [] : layers().filter(hasContent);
     if (!active.length) {
@@ -345,15 +370,21 @@
 
     for (const [position, group] of grouped) {
       const { shadow } = ensureHost(position);
-      const style = document.createElement('style');
-      style.textContent = styles(group[0], position);
+      const css = styles(group[0], position);
 
       const box = document.createElement('div');
       box.className = 'box' + (group[0].plain ? ' plain' : '');
       for (const layer of group) {
         box.appendChild(renderLayer(layer));
       }
-      shadow.replaceChildren(style, box);
+
+      if (adoptSheet(shadow, css)) {
+        shadow.replaceChildren(box);
+      } else {
+        const style = document.createElement('style');
+        style.textContent = css;
+        shadow.replaceChildren(style, box);
+      }
     }
 
     tick();
