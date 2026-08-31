@@ -78,8 +78,8 @@ CREATE TABLE IF NOT EXISTS webhooks (
     url          TEXT NOT NULL,
     method       TEXT NOT NULL DEFAULT 'POST',
     is_enabled   BOOLEAN DEFAULT 1,
-    events       TEXT NOT NULL DEFAULT '[]', -- JSON array of event names
-    headers      TEXT NOT NULL DEFAULT '{}', -- JSON object; values are templates
+    events       TEXT DEFAULT '[]', -- JSON array of event names
+    headers      TEXT DEFAULT '{}', -- JSON object; values are templates
     body         TEXT,                       -- minijinja template; NULL means the default envelope
     insecure_tls BOOLEAN DEFAULT 0,
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
