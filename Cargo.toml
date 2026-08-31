@@ -50,6 +50,8 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # Webhook body templates. Pure Rust with serde as its only required dependency,
 # so it cross-compiles to armv7 without a C toolchain -- unlike the aws-lc-rs
 # path that keeps reqwest out of this tree. Verified with `cross build`.
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+# The `json` feature is what provides the `tojson` filter, which is the escape
+# every JSON body template depends on; it pulls in serde_json, already here.
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json"] }
 # already in the tree via rustls/rcgen; used directly for PBKDF2 password hashing
 ring = "0.17"

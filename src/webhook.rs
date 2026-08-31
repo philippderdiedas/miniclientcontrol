@@ -4,6 +4,7 @@
 //! processes and is dead because both sides live in one binary now; this tells
 //! a *third party*, and nothing on the display path waits for it.
 
+use minijinja::{AutoEscape, Environment, UndefinedBehavior};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tracing::error;
@@ -213,6 +214,64 @@ pub async fn load_enabled(pool: &sqlx::SqlitePool) -> Vec<Target> {
         .collect()
 }
 
+/// A target's payload, ready to send.
+#[derive(Debug)]
+pub struct Rendered {
+    pub body: String,
+    /// Lower-cased header names, so the content-type default cannot end up
+    /// duplicated by a target that spelled it differently.
+    pub headers: BTreeMap<String, String>,
+}
+
+/// A minijinja environment with this project's two non-default decisions.
+fn environment() -> Environment<'static> {
+    let mut env = Environment::new();
+    // minijinja escapes for HTML by default, which turns `&` into `&amp;`
+    // inside a JSON string. Nothing here is ever HTML.
+    env.set_auto_escape_callback(|_| AutoEscape::None);
+    // A field missing from *this* event must not fail the delivery -- a
+    // template written for one event is routinely subscribed to another, and a
+    // missing title cannot be allowed to silence a display-disconnected notice.
+    env.set_undefined_behavior(UndefinedBehavior::Lenient);
+    env
+}
+
+/// Compile a template without rendering it, for validation on save.
+///
+/// The only check possible up front: a template valid for one event and
+/// nonsense for another is what the test send is for.
+pub fn compile_check(template: &str) -> Result<(), String> {
+    environment()
+        .template_from_str(template)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Render a target's body and headers against one event.
+pub fn render(target: &Target, context: &Value) -> Result<Rendered, String> {
+    let env = environment();
+
+    let body = match &target.body {
+        Some(template) => env
+            .render_str(template, context)
+            .map_err(|e| format!("body template: {e}"))?,
+        None => context.to_string(),
+    };
+
+    let mut headers = BTreeMap::new();
+    for (name, template) in &target.headers {
+        let value = env
+            .render_str(template, context)
+            .map_err(|e| format!("header {name}: {e}"))?;
+        headers.insert(name.to_ascii_lowercase(), value);
+    }
+    headers
+        .entry("content-type".to_string())
+        .or_insert_with(|| "application/json".to_string());
+
+    Ok(Rendered { body, headers })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +411,91 @@ mod tests {
         assert_eq!(targets.len(), 1, "the COALESCE on the read path is missing");
         assert!(targets[0].events.is_empty());
         assert!(targets[0].headers.is_empty());
+    }
+
+    fn ctx() -> serde_json::Value {
+        envelope(
+            &Event::GuestPageShown {
+                url: "https://dash.example.test/a?x=1&y=2".into(),
+                sender_ip: "192.168.1.44".into(),
+            },
+            "foyer-pi",
+            false,
+        )
+    }
+
+    #[test]
+    fn no_template_sends_the_envelope_as_json() {
+        let target = target_wanting(&["guest_page.shown"]);
+        let rendered = render(&target, &ctx()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered.body).unwrap();
+        assert_eq!(parsed["event"], "guest_page.shown");
+        assert_eq!(
+            rendered.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn tojson_escapes_a_value_into_valid_json() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        // A title with a quote in it is what breaks the naive "{{ x }}" form.
+        target.body = Some(r#"{"text": {{ data.url | tojson }}}"#.into());
+        let rendered = render(&target, &ctx()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered.body)
+            .expect("tojson must produce parseable JSON");
+        assert_eq!(parsed["text"], "https://dash.example.test/a?x=1&y=2");
+    }
+
+    #[test]
+    fn autoescape_is_off_so_an_ampersand_survives() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body = Some("{{ data.url }}".into());
+        let rendered = render(&target, &ctx()).unwrap();
+        assert!(
+            rendered.body.contains("x=1&y=2"),
+            "HTML escaping turned & into &amp;: {}",
+            rendered.body
+        );
+    }
+
+    #[test]
+    fn an_undefined_field_renders_empty_instead_of_failing() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body = Some("title=[{{ data.title }}]".into());
+        let rendered = render(&target, &ctx()).expect("a missing field must not fail the delivery");
+        assert_eq!(rendered.body, "title=[]");
+    }
+
+    #[test]
+    fn header_values_are_templates_too() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.headers.insert("X-Event".into(), "{{ event }}".into());
+        target.headers.insert("Authorization".into(), "Bearer static-token".into());
+        let rendered = render(&target, &ctx()).unwrap();
+        assert_eq!(rendered.headers.get("x-event").map(String::as_str), Some("guest_page.shown"));
+        assert_eq!(
+            rendered.headers.get("authorization").map(String::as_str),
+            Some("Bearer static-token")
+        );
+    }
+
+    #[test]
+    fn a_target_setting_its_own_content_type_keeps_it() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body = Some("plain words".into());
+        target.headers.insert("Content-Type".into(), "text/plain".into());
+        let rendered = render(&target, &ctx()).unwrap();
+        assert_eq!(rendered.headers.get("content-type").map(String::as_str), Some("text/plain"));
+    }
+
+    #[test]
+    fn a_broken_template_is_an_error_with_a_position_not_a_panic() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body = Some("{{ unclosed ".into());
+        let error = render(&target, &ctx()).unwrap_err();
+        assert!(!error.is_empty());
+        assert!(compile_check("{{ unclosed ").is_err());
+        assert!(compile_check("{{ data.url | tojson }}").is_ok());
     }
 }
