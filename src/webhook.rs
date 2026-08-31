@@ -8,11 +8,12 @@ use http_body_util::{BodyExt, Limited};
 use hyper_util::rt::TokioIo;
 use minijinja::{AutoEscape, Environment, UndefinedBehavior};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, Semaphore};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
-use tracing::error;
+use tracing::{debug, error, warn};
 
 /// Every event name the catalogue offers, in the order the admin page shows them.
 ///
@@ -495,10 +496,6 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerification
     }
 }
 
-use std::collections::HashMap;
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{debug, warn};
-
 /// How many deliveries may be in flight at once, across all targets.
 ///
 /// Past this an event is dropped rather than queued. The alternative is
@@ -574,9 +571,16 @@ impl Dispatcher {
                 let context = context.clone();
                 let last = last.clone();
                 tokio::spawn(async move {
+                    // Bound to the delivery, and the FIRST statement so that
+                    // nothing appended later can shorten its life. `let _ =
+                    // permit;` at the end would not do: a wildcard `let` is not
+                    // a read, so under 2021 disjoint capture the block never
+                    // captures the permit at all -- it would drop at the end of
+                    // this loop iteration, before the future is first polled,
+                    // and the bound would be silently inert.
+                    let _permit = permit;
                     let outcome = run(&target, &context).await;
                     record(&last, &target, name, &outcome).await;
-                    let _ = permit;
                 });
             }
         });
@@ -1189,5 +1193,119 @@ mod tests {
             ),
             other => panic!("expected a render error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_delivery_in_flight_holds_its_semaphore_permit() {
+        // `MAX_INFLIGHT` bounds nothing unless a permit outlives the loop
+        // iteration that acquired it. Binding it at the *end* of the delivery
+        // block does not: a wildcard `let` is not a read, so under 2021
+        // disjoint capture the block never captures the permit and it drops one
+        // line after `spawn` returns, before the future is first polled. Then
+        // `try_acquire_owned` can never fail, the drop path is unreachable, and
+        // the source reads as though a ceiling exists while `fire` spawns
+        // without one. So this asserts the permits are actually checked out.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept every connection and answer none, so a delivery that has
+        // started is still running when the assertion looks at the semaphore.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                held.push(socket);
+            }
+        });
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        for name in ["One", "Two", "Three"] {
+            sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
+                .bind(name)
+                .bind(format!("http://127.0.0.1:{port}/hook"))
+                .bind(r#"["playback.playlist_empty"]"#)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let dispatcher = Dispatcher::new(pool);
+        dispatcher.fire(Event::PlaylistEmpty);
+
+        // The deliveries start on the runtime's own schedule -- a DB read stands
+        // between `fire` and the first `try_acquire_owned` -- so wait for them
+        // rather than guess a number of yields.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while dispatcher.inflight.available_permits() > MAX_INFLIGHT - 3
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            dispatcher.inflight.available_permits(),
+            MAX_INFLIGHT - 3,
+            "three deliveries are hanging, so three permits must still be checked out"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_reaches_every_subscribed_target_and_nobody_else() {
+        // The timing test above says only that `fire` returns; a body that did
+        // nothing at all would pass it. This one says it fans out, and that
+        // `wants` filters inside `fire` and not only in isolation.
+        let (url_a, handle_a) =
+            one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
+        let (url_b, handle_b) =
+            one_shot("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+        // Bound and listening like the others, so its absence from the results
+        // is the subscription filter and not a URL nobody could have reached.
+        let (url_c, handle_c) =
+            one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        for (name, url, events) in [
+            ("Subscribed A", url_a, r#"["playback.playlist_empty"]"#),
+            ("Subscribed B", url_b, r#"["cast.started","playback.playlist_empty"]"#),
+            ("Elsewhere", url_c, r#"["cast.started"]"#),
+        ] {
+            sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
+                .bind(name)
+                .bind(url)
+                .bind(events)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let dispatcher = Dispatcher::new(pool);
+        dispatcher.fire(Event::PlaylistEmpty);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let last = loop {
+            let last = dispatcher.last_results().await;
+            if last.len() >= 2 || std::time::Instant::now() >= deadline {
+                break last;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        let a = last.get(&1).expect("the first subscribed target recorded nothing");
+        assert!(a.ok, "{a:?}");
+        assert_eq!(a.event, "playback.playlist_empty");
+        let b = last.get(&2).expect("the second subscribed target recorded nothing");
+        assert!(b.ok, "{b:?}");
+        assert!(
+            !last.contains_key(&3),
+            "a target subscribed only to cast.started was delivered to"
+        );
+        assert!(
+            !handle_c.is_finished(),
+            "the unsubscribed receiver was contacted"
+        );
+
+        assert!(handle_a.await.unwrap().contains("playback.playlist_empty"));
+        assert!(handle_b.await.unwrap().contains("playback.playlist_empty"));
+        handle_c.abort();
     }
 }
