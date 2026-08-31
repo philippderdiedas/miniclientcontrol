@@ -66,6 +66,10 @@
     Ereignis, keine Wiederholung.
   </p>
 
+  <p class="err" id="loadError" hidden>Webhooks konnten nicht geladen werden – Server nicht erreichbar.</p>
+  <p class="err" id="catalogueError" hidden>
+    Ereignis-Katalog konnte nicht geladen werden – Ereignisse und Platzhalter fehlen, bis die Seite neu geladen wird.
+  </p>
   <div id="list"></div>
   <p class="muted" id="emptyHint" hidden>Noch keine Webhooks.</p>
   <button type="button" class="primary" id="addBtn">Webhook hinzufügen</button>
@@ -89,6 +93,22 @@
 
     const field = (labelText, input) =>
       el('label', { class: 'f' }, el('span', { text: labelText }), input);
+
+    // Lifted from playlist.html so both pages report success/failure the same way:
+    // a success message clears itself, an error one sits until the next attempt.
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+      if (!isError) setTimeout(() => { if (node.textContent === message) node.textContent = ''; }, 2500);
+    }
+
+    async function readError(res, fallback) {
+      try {
+        const body = await res.json();
+        if (body && body.error) return body.error;
+      } catch (_) { /* not a JSON error body */ }
+      return fallback;
+    }
 
     // The event catalogue comes from the server and is never written into this
     // page: a UI offering placeholders the server does not send is a display bug
@@ -117,8 +137,9 @@
     const insertAtCursor = (textarea, snippet) => {
       const start = textarea.selectionStart ?? textarea.value.length;
       const end = textarea.selectionEnd ?? textarea.value.length;
-      textarea.value = textarea.value.slice(0, start) + snippet + textarea.value.slice(end);
-      textarea.selectionStart = textarea.selectionEnd = start + snippet.length;
+      // setRangeText inserts at the selection and preserves the native undo stack;
+      // assigning textarea.value wipes it, so Ctrl-Z could not take a chip back.
+      textarea.setRangeText(snippet, start, end, 'end');
       textarea.focus();
       textarea.dispatchEvent(new Event('input'));
     };
@@ -196,7 +217,14 @@
       const headerRows = el('div', { class: 'headers' });
       const addHeaderRow = (key = '', value = '') => {
         const k = el('input', { value: key, placeholder: 'Header', style: 'width:180px', oninput: markDirty });
-        const v = el('input', { value: value, placeholder: 'Wert oder {{ event }}', style: 'width:320px', oninput: markDirty });
+        // The example is composed from the catalogue's own envelope rather than
+        // spelling out a field name here; with no envelope loaded (yet) it just
+        // says "Wert" instead of guessing.
+        const v = el('input', {
+          value: value,
+          placeholder: CATALOGUE.envelope[0] ? `Wert oder ${envelopePlaceholder(CATALOGUE.envelope[0])}` : 'Wert',
+          style: 'width:320px', oninput: markDirty,
+        });
         const row = el('div', { class: 'headerRow' }, k, v,
           el('button', { type: 'button', text: '−', onclick: () => { row.remove(); markDirty(); } }));
         row.dataset.header = '1';
@@ -215,7 +243,11 @@
           if (k.value.trim()) headers[k.value.trim()] = v.value;
         }
         return {
-          name: name.value.trim() || 'Webhook',
+          // Sent verbatim, including empty: the server's own rejection ("Der Name
+          // darf nicht leer sein.") is the message the operator should see, not a
+          // client-side substitute that would let several targets share "Webhook"
+          // — the one identifier every log line has for a target.
+          name: name.value.trim(),
           url: url.value.trim(),
           method: method.value,
           is_enabled: enabled.checked,
@@ -227,8 +259,7 @@
       };
 
       const save = async () => {
-        feedback.className = 'feedback';
-        feedback.textContent = 'Speichern…';
+        flash(feedback, 'Speichern…', false);
         const payload = collect();
         const target = state.id === null ? '/api/webhooks' : `/api/webhooks/${state.id}`;
         const response = await fetch(target, {
@@ -236,48 +267,56 @@
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-          feedback.className = 'feedback err';
-          feedback.textContent = data.error || 'Fehler beim Speichern.';
+          flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
           return;
         }
+        const data = await response.json().catch(() => ({}));
         if (state.id === null && data.id) {
           state.id = data.id;
           cards.set(state.id, card);
         }
         dirty.delete(state.id);
         card.classList.remove('dirty');
-        feedback.className = 'feedback';
-        feedback.textContent = 'Gespeichert.';
+        flash(feedback, 'Gespeichert.', false);
       };
 
       const test = async () => {
         if (state.id === null) {
-          feedback.className = 'feedback err';
-          feedback.textContent = 'Erst speichern.';
+          flash(feedback, 'Erst speichern.', true);
           return;
         }
-        feedback.className = 'feedback';
-        feedback.textContent = 'Sende…';
-        const event = [...state.events][0] || 'playback.item_changed';
+        flash(feedback, 'Sende…', false);
+        // No event name is hardcoded here: the catalogue is the only source. With
+        // nothing checked, the field is omitted and the server applies its own
+        // default (TestRequest.event is Option<String> with #[serde(default)]).
+        const event = [...state.events][0];
         const response = await fetch(`/api/webhooks/${state.id}/test`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ event }),
+          body: JSON.stringify(event ? { event } : {}),
         });
         const data = await response.json().catch(() => ({}));
-        feedback.className = data.ok ? 'feedback' : 'feedback err';
-        feedback.textContent = data.outcome || data.error || 'Keine Antwort.';
+        flash(feedback, data.outcome || data.error || 'Keine Antwort.', !data.ok);
       };
 
       const remove = async () => {
+        const label = name.value.trim() || 'diesen Webhook';
+        if (!confirm(`„${label}“ wirklich löschen?`)) return;
         if (state.id !== null) {
-          await fetch(`/api/webhooks/${state.id}`, { method: 'DELETE' });
+          const response = await fetch(`/api/webhooks/${state.id}`, { method: 'DELETE' });
+          if (!response.ok) {
+            // A failed delete keeps the row: the alternative is a page that shows
+            // the target as gone while it keeps firing, with the divergence
+            // invisible until a reload.
+            flash(feedback, await readError(response, 'Löschen fehlgeschlagen.'), true);
+            return;
+          }
           cards.delete(state.id);
           dirty.delete(state.id);
         }
         card.remove();
+        if (cards.size === 0) document.getElementById('emptyHint').hidden = false;
       };
 
       card.append(
@@ -317,23 +356,48 @@
         return;
       }
       line.className = result.ok ? 'last ok' : 'last bad';
-      line.textContent = `${result.ok ? '✓' : '✗'} ${result.outcome} · ${relative(result.at)} · ${result.event}`;
+      // `test` marks a manually triggered send so it can never be mistaken for
+      // live traffic the target actually received.
+      const suffix = result.test ? ' · Testsendung' : '';
+      line.textContent = `${result.ok ? '✓' : '✗'} ${result.outcome} · ${relative(result.at)} · ${result.event}${suffix}`;
     }
 
+    // Distinguishes "nothing configured" from "cannot talk to the server" — a
+    // non-2xx response or a thrown network error both mean the latter, and
+    // rendering an empty list for it would read as the affirmative "Noch keine
+    // Webhooks."
     async function loadAll() {
       const list = document.getElementById('list');
-      const hooks = await fetch('/api/webhooks').then((r) => r.json()).catch(() => []);
+      const loadError = document.getElementById('loadError');
+      const emptyHint = document.getElementById('emptyHint');
+      let hooks;
+      try {
+        const res = await fetch('/api/webhooks');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        hooks = await res.json();
+      } catch (_) {
+        loadError.hidden = false;
+        emptyHint.hidden = true;
+        return;
+      }
+      loadError.hidden = true;
       list.replaceChildren();
       cards.clear();
       for (const hook of hooks) list.append(buildCard(hook));
-      document.getElementById('emptyHint').hidden = hooks.length > 0;
+      emptyHint.hidden = hooks.length > 0;
     }
 
     // Polling updates the last-result line and nothing else. The cards are the
     // edit form; re-rendering one would eat whatever is being typed into it.
     async function poll() {
-      const hooks = await fetch('/api/webhooks').then((r) => r.json()).catch(() => null);
-      if (!hooks) return;
+      let hooks;
+      try {
+        const res = await fetch('/api/webhooks');
+        if (!res.ok) return;
+        hooks = await res.json();
+      } catch (_) {
+        return;
+      }
       for (const hook of hooks) {
         if (dirty.has(hook.id)) continue;
         const card = cards.get(hook.id);
@@ -349,9 +413,17 @@
     });
 
     (async () => {
-      CATALOGUE = await fetch('/api/webhooks/events')
-        .then((r) => r.json())
-        .catch(() => CATALOGUE);
+      // A failed catalogue fetch must not fall back to empty arrays silently: that
+      // renders cards with no event checkboxes and no chips and no message
+      // anywhere. Show the error and leave CATALOGUE at its safe empty default.
+      try {
+        const res = await fetch('/api/webhooks/events');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        CATALOGUE = await res.json();
+        document.getElementById('catalogueError').hidden = true;
+      } catch (_) {
+        document.getElementById('catalogueError').hidden = false;
+      }
       await loadAll();
       setInterval(poll, 2000);
     })();
