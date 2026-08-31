@@ -6,28 +6,61 @@
 //! `cast::is_cast_public_path` (which would open them to every guest): a
 //! target's headers are where an API token lives.
 
-use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use super::{compile_check, ALL_EVENTS};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post, put},
+    Json, Router,
+};
+use serde_json::{json, Value};
+use tracing::error;
+
+use crate::models::AppState;
+use super::{compile_check, load_enabled, Event, ALL_EVENTS};
 
 /// Methods a webhook may use. `GET` is excluded because a `GET` with a body is
 /// a contradiction, and every target here sends one.
 const METHODS: [&str; 3] = ["POST", "PUT", "PATCH"];
 
+/// A template -- the body or a header value -- comfortably above any real
+/// use. The ceiling exists only so a pathological request cannot grow the
+/// `webhooks` row without bound on a device where the SD card is the
+/// component that dies; it is not a limit anyone should ever bump into.
+const MAX_TEMPLATE_BYTES: usize = 16 * 1024;
+
+/// Length-cap and compile-check one template, `label` naming it in the error
+/// so a header failure says which header rather than just "a header".
+fn check_template(label: &str, template: &str) -> Result<(), String> {
+    if template.len() > MAX_TEMPLATE_BYTES {
+        return Err(format!(
+            "{label} ist zu groß (maximal {} KB).",
+            MAX_TEMPLATE_BYTES / 1024
+        ));
+    }
+    compile_check(template).map_err(|e| format!("{label}: {e}"))
+}
+
 /// Reject what could not work, before it is stored.
 pub fn validate(
+    name: &str,
     url: &str,
     method: &str,
     events: &[String],
+    headers: &BTreeMap<String, String>,
     body: Option<&str>,
 ) -> Result<(), String> {
+    // `record` and every log line identify a target by `name` alone -- a URL
+    // may carry a token in its query string -- so an empty one leaves nothing
+    // to trace a failure back to.
+    if name.trim().is_empty() {
+        return Err("Der Name darf nicht leer sein.".to_string());
+    }
     let parsed = url::Url::parse(url).map_err(|e| format!("Ungültige URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("Nicht unterstütztes Schema: {}", parsed.scheme()));
-    }
-    if parsed.host_str().is_none() {
-        return Err("Die URL hat keinen Host.".to_string());
     }
     if !METHODS.contains(&method) {
         return Err(format!(
@@ -39,9 +72,21 @@ pub fn validate(
             return Err(format!("Unbekanntes Ereignis: {event}"));
         }
     }
+    // `render` (in `mod.rs`) treats every header *value* as a minijinja
+    // template just like the body, so a value that cannot compile must be
+    // rejected here too -- otherwise it saves with a 200 and then fails on
+    // every delivery at send time. The *name* is never templated, but hyper
+    // rejects a malformed one at send time regardless, so check it here where
+    // the operator gets a readable message instead of a cryptic dispatch log.
+    for (header_name, value) in headers {
+        if hyper::header::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
+            return Err(format!("Ungültiger Header-Name: {header_name}"));
+        }
+        check_template(&format!("Header '{header_name}'"), value)?;
+    }
     if let Some(template) = body {
         if !template.is_empty() {
-            compile_check(template).map_err(|e| format!("Vorlage: {e}"))?;
+            check_template("Vorlage", template)?;
         }
     }
     Ok(())
@@ -123,17 +168,21 @@ pub fn catalogue() -> Vec<Value> {
     ]
 }
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::{get, post, put},
-    Json, Router,
-};
-use tracing::error;
-
-use crate::models::AppState;
-use super::{load_enabled, Event};
+/// The full `/api/webhooks/events` payload: the catalogue plus how to turn one
+/// of its entries into a placeholder, so the admin page never has to
+/// hard-code the `data.` prefix or the envelope fields itself -- both are
+/// facts about `envelope()` and `render()` in `mod.rs`, not about the UI.
+///
+/// `test` is deliberately not offered here: minijinja renders a bare boolean
+/// Jinja2-style (`True`), which is invalid JSON, so a placeholder chip for it
+/// would hand the operator something that only works with `| tojson`.
+fn events_payload() -> Value {
+    json!({
+        "events": catalogue(),
+        "envelope": ["event", "timestamp", "device"],
+        "field_prefix": "data.",
+    })
+}
 
 /// Operator-only, all four. See the module docs: nothing here may be added to
 /// `is_display_path` or to `cast::is_cast_public_path`.
@@ -148,8 +197,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/webhooks/{id}/test", post(test_send))
 }
 
+/// Not `pub`: `routes()` is the module's entire interface, and nothing
+/// outside it constructs one of these directly.
 #[derive(serde::Deserialize)]
-pub struct WebhookRequest {
+struct WebhookRequest {
     name: String,
     url: String,
     #[serde(default = "default_method")]
@@ -177,6 +228,17 @@ fn bad(message: String) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
 }
 
+/// A DB failure, not a rejected request -- the operator did nothing wrong, so
+/// this must not read like `bad()`. The body shape still matches
+/// `src/settings.rs`'s tone; only the status differs.
+fn server_error() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "Interner Fehler, bitte erneut versuchen." })),
+    )
+        .into_response()
+}
+
 fn missing() -> Response {
     (
         StatusCode::NOT_FOUND,
@@ -186,7 +248,7 @@ fn missing() -> Response {
 }
 
 async fn events() -> Response {
-    Json(catalogue()).into_response()
+    Json(events_payload()).into_response()
 }
 
 async fn list(State(state): State<AppState>) -> Response {
@@ -233,9 +295,11 @@ async fn list(State(state): State<AppState>) -> Response {
 
 async fn create(State(state): State<AppState>, Json(payload): Json<WebhookRequest>) -> Response {
     if let Err(message) = validate(
+        &payload.name,
         &payload.url,
         &payload.method,
         &payload.events,
+        &payload.headers,
         payload.body.as_deref(),
     ) {
         return bad(message);
@@ -259,7 +323,7 @@ async fn create(State(state): State<AppState>, Json(payload): Json<WebhookReques
         Ok(id) => Json(json!({ "id": id })).into_response(),
         Err(e) => {
             error!("Failed to create webhook: {}", e);
-            bad("Konnte nicht gespeichert werden.".to_string())
+            server_error()
         }
     }
 }
@@ -270,9 +334,11 @@ async fn update(
     Json(payload): Json<WebhookRequest>,
 ) -> Response {
     if let Err(message) = validate(
+        &payload.name,
         &payload.url,
         &payload.method,
         &payload.events,
+        &payload.headers,
         payload.body.as_deref(),
     ) {
         return bad(message);
@@ -299,24 +365,32 @@ async fn update(
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => {
             error!("Failed to update webhook {}: {}", id, e);
-            bad("Konnte nicht gespeichert werden.".to_string())
+            server_error()
         }
     }
 }
 
 async fn remove(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    if let Err(e) = sqlx::query("DELETE FROM webhooks WHERE id = ?")
+    // Consistent with `update`: a DB failure here must not tell the operator
+    // the row is gone when it is not, the same way a failed UPDATE does not
+    // claim success. A missing row is still `{"ok":true}` -- deletion is
+    // idempotent by design, so "no such row" and "deleted it" look the same.
+    match sqlx::query("DELETE FROM webhooks WHERE id = ?")
         .bind(id)
         .execute(&state.pool)
         .await
     {
-        error!("Failed to delete webhook {}: {}", id, e);
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => {
+            error!("Failed to delete webhook {}: {}", id, e);
+            server_error()
+        }
     }
-    Json(json!({ "ok": true })).into_response()
 }
 
+/// Not `pub`, for the same reason as `WebhookRequest`.
 #[derive(serde::Deserialize)]
-pub struct TestRequest {
+struct TestRequest {
     #[serde(default)]
     event: Option<String>,
 }
@@ -405,40 +479,157 @@ fn sample_event(name: &str) -> Event {
 mod tests {
     use super::*;
 
-    #[test]
-    fn validation_rejects_what_cannot_work() {
-        assert!(validate("https://example.test/h", "POST", &["cast.started".into()], None).is_ok());
-        assert!(
-            validate("ftp://example.test/h", "POST", &[], None).is_err(),
-            "only http and https can be delivered to"
-        );
-        assert!(
-            validate("https://example.test/h", "GET", &[], None).is_err(),
-            "a GET webhook with a body is a contradiction"
-        );
-        assert!(
-            validate("https://example.test/h", "POST", &["nope.invented".into()], None).is_err(),
-            "an unknown event name would silently never fire"
-        );
-        assert!(
-            validate("https://example.test/h", "POST", &[], Some("{{ unclosed ")).is_err(),
-            "a template that cannot compile must not be storable"
-        );
-        assert!(validate("https://example.test/h", "PUT", &[], Some("{{ event }}")).is_ok());
-        assert!(validate("https://example.test/h", "PATCH", &[], None).is_ok());
+    fn headers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
 
     #[test]
-    fn the_catalogue_describes_every_event_and_its_fields() {
-        let catalogue = catalogue();
-        let names: Vec<&str> = catalogue
-            .iter()
-            .map(|e| e["name"].as_str().unwrap())
-            .collect();
+    fn validation_rejects_what_cannot_work() {
+        assert!(validate(
+            "Test",
+            "https://example.test/h",
+            "POST",
+            &["cast.started".into()],
+            &BTreeMap::new(),
+            None
+        )
+        .is_ok());
+        assert!(
+            validate("Test", "ftp://example.test/h", "POST", &[], &BTreeMap::new(), None).is_err(),
+            "only http and https can be delivered to"
+        );
+        assert!(
+            validate("Test", "https://example.test/h", "GET", &[], &BTreeMap::new(), None).is_err(),
+            "a GET webhook with a body is a contradiction"
+        );
+        assert!(
+            validate(
+                "Test",
+                "https://example.test/h",
+                "POST",
+                &["nope.invented".into()],
+                &BTreeMap::new(),
+                None
+            )
+            .is_err(),
+            "an unknown event name would silently never fire"
+        );
+        assert!(
+            validate(
+                "Test",
+                "https://example.test/h",
+                "POST",
+                &[],
+                &BTreeMap::new(),
+                Some("{{ unclosed ")
+            )
+            .is_err(),
+            "a template that cannot compile must not be storable"
+        );
+        assert!(validate(
+            "Test",
+            "https://example.test/h",
+            "PUT",
+            &[],
+            &BTreeMap::new(),
+            Some("{{ event }}")
+        )
+        .is_ok());
+        assert!(validate("Test", "https://example.test/h", "PATCH", &[], &BTreeMap::new(), None).is_ok());
+    }
+
+    #[test]
+    fn an_empty_or_blank_name_is_rejected() {
+        assert!(
+            validate("", "https://example.test/h", "POST", &[], &BTreeMap::new(), None).is_err(),
+            "an empty name leaves nothing for a log line to identify the target by"
+        );
+        assert!(
+            validate("   ", "https://example.test/h", "POST", &[], &BTreeMap::new(), None).is_err(),
+            "whitespace-only is empty in every way that matters"
+        );
+    }
+
+    #[test]
+    fn a_header_value_that_cannot_compile_is_rejected_by_name() {
+        let err = validate(
+            "Test",
+            "https://example.test/h",
+            "POST",
+            &[],
+            &headers(&[("X-Sig", "{{ unclosed ")]),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("X-Sig"),
+            "the error must name the offending header, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_bad_header_name_is_rejected() {
+        // A space is not a valid HTTP field-name character.
+        let err = validate(
+            "Test",
+            "https://example.test/h",
+            "POST",
+            &[],
+            &headers(&[("X Sig", "static")]),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("X Sig"), "got: {err}");
+    }
+
+    #[test]
+    fn a_good_header_name_and_value_pass() {
+        assert!(validate(
+            "Test",
+            "https://example.test/h",
+            "POST",
+            &[],
+            &headers(&[("X-Event", "{{ event }}"), ("Authorization", "Bearer static")]),
+            None
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn an_oversized_body_template_is_rejected() {
+        let huge = "x".repeat(MAX_TEMPLATE_BYTES + 1);
+        assert!(
+            validate("Test", "https://example.test/h", "POST", &[], &BTreeMap::new(), Some(&huge)).is_err()
+        );
+    }
+
+    #[test]
+    fn an_oversized_header_value_is_rejected() {
+        let huge = "x".repeat(MAX_TEMPLATE_BYTES + 1);
+        let err = validate(
+            "Test",
+            "https://example.test/h",
+            "POST",
+            &[],
+            &headers(&[("X-Big", huge.as_str())]),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("X-Big"), "got: {err}");
+    }
+
+    #[test]
+    fn the_events_payload_describes_how_to_build_a_placeholder() {
+        let payload = events_payload();
+        assert_eq!(payload["envelope"], json!(["event", "timestamp", "device"]));
+        assert_eq!(payload["field_prefix"], "data.");
+
+        let events = payload["events"].as_array().unwrap();
+        let names: Vec<&str> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
         for name in ALL_EVENTS {
             assert!(names.contains(&name), "{name} is missing from the catalogue");
         }
-        let item = catalogue
+        let item = events
             .iter()
             .find(|e| e["name"] == "playback.item_changed")
             .unwrap();
@@ -458,5 +649,54 @@ mod tests {
             item["chatty"], true,
             "the UI warns beside this one specifically"
         );
+        assert!(
+            payload["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["name"] != "test"),
+            "`test` renders Jinja2-style as a bare boolean and must not be offered as a placeholder"
+        );
+    }
+
+    #[test]
+    fn the_catalogue_matches_all_events_exactly_in_both_directions() {
+        let catalogue = catalogue();
+
+        // No entry describes an event that does not exist.
+        for entry in &catalogue {
+            let name = entry["name"].as_str().unwrap();
+            assert!(
+                ALL_EVENTS.contains(&name),
+                "{name} is in the catalogue but not in ALL_EVENTS"
+            );
+        }
+
+        // Every event's actual `data()` keys match what the catalogue
+        // advertises, in both directions -- a field rename in `mod.rs` that
+        // forgets to update this file must fail a test, not ship silently.
+        for name in ALL_EVENTS {
+            let entry = catalogue
+                .iter()
+                .find(|e| e["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is missing from the catalogue"));
+            let advertised: std::collections::BTreeSet<String> = entry["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f.as_str().unwrap().to_string())
+                .collect();
+            let actual: std::collections::BTreeSet<String> = sample_event(name)
+                .data()
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(
+                advertised, actual,
+                "{name}: catalogue fields and Event::data() keys disagree"
+            );
+        }
     }
 }
