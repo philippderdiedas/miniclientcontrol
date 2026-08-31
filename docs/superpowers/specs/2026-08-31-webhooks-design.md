@@ -257,6 +257,11 @@ Three rules keep this from emitting broken JSON:
   }}"}` breaks the moment a URL contains a quote; `{"text": {{ data.url |
   tojson }}}` cannot. The placeholder chips in the UI insert the `| tojson`
   form, so what an operator gets by clicking is the correct shape.
+- **A bare boolean placeholder renders `True`, not `true`.** minijinja follows
+  Jinja2's `Display` for booleans, so `{"flag": {{ data.reconnect }}}` produces
+  invalid JSON while `{"flag": {{ data.reconnect | tojson }}}` is correct. This is
+  the second reason the admin page's chips insert the `| tojson` form for every
+  `data.*` field rather than only for strings — it is not merely about quoting.
 - **Autoescape is off, unconditionally.** minijinja defaults to HTML escaping,
   which turns `&` into `&amp;` inside a JSON string.
   `Environment::set_auto_escape_callback` returns `AutoEscape::None`.
