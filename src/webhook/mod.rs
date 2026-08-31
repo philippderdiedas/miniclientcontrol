@@ -519,6 +519,12 @@ pub struct LastResult {
     pub event: String,
     pub outcome: String,
     pub ok: bool,
+    /// Whether this was an operator pressing "Testen" rather than something
+    /// that actually happened. Recorded because the map keeps only the latest
+    /// result per target: without the flag a test send would overwrite the
+    /// live traffic the admin page reports, indistinguishably from it, and the
+    /// page would quietly lie about what the receiver is doing.
+    pub test: bool,
 }
 
 pub struct Dispatcher {
@@ -584,7 +590,7 @@ impl Dispatcher {
                     // and the bound would be silently inert.
                     let _permit = permit;
                     let outcome = run(&target, &context).await;
-                    record(&last, &target, name, &outcome).await;
+                    record(&last, &target, name, &outcome, false).await;
                 });
             }
         });
@@ -595,7 +601,7 @@ impl Dispatcher {
     pub async fn deliver_one(&self, target: &Target, event: &Event, test: bool) -> Outcome {
         let context = envelope(event, &self.device, test);
         let outcome = run(target, &context).await;
-        record(&self.last, target, event.name(), &outcome).await;
+        record(&self.last, target, event.name(), &outcome, test).await;
         outcome
     }
 
@@ -617,6 +623,7 @@ async fn record(
     target: &Target,
     event: &str,
     outcome: &Outcome,
+    test: bool,
 ) {
     // Named by `name`, never by URL: a URL may carry a token in its query.
     if outcome.ok() {
@@ -631,6 +638,7 @@ async fn record(
             event: event.to_string(),
             outcome: outcome.describe(),
             ok: outcome.ok(),
+            test,
         },
     );
 }
