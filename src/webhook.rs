@@ -495,6 +495,138 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for NoVerification
     }
 }
 
+use std::collections::HashMap;
+use tokio::sync::{Mutex, Semaphore};
+use tracing::{debug, warn};
+
+/// How many deliveries may be in flight at once, across all targets.
+///
+/// Past this an event is dropped rather than queued. The alternative is
+/// unbounded `spawn` on a Pi, and `playback.item_changed` against a receiver
+/// that has begun to hang is exactly the shape that produces thousands of
+/// parked tasks holding sockets. Dropping is honest: the contract is already
+/// best-effort.
+const MAX_INFLIGHT: usize = 8;
+
+/// What the admin page shows beside a target.
+///
+/// In memory only. Persisting it would put an SD-card write on the path of
+/// every event, on a device where the card is the component that dies.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LastResult {
+    pub at: String,
+    pub event: String,
+    pub outcome: String,
+    pub ok: bool,
+}
+
+pub struct Dispatcher {
+    pool: sqlx::SqlitePool,
+    device: String,
+    inflight: Arc<Semaphore>,
+    last: Arc<Mutex<HashMap<i64, LastResult>>>,
+}
+
+impl Dispatcher {
+    pub fn new(pool: sqlx::SqlitePool) -> Self {
+        Self {
+            pool,
+            device: device_name(),
+            inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
+            last: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Tell every interested target about an event.
+    ///
+    /// **Never blocks, never fails, never awaits the network.** This is called
+    /// from inside the control loop in `browser.rs`; a version that could wait
+    /// would put a stranger's HTTP server in the path of what is on the screen.
+    pub fn fire(&self, event: Event) {
+        let pool = self.pool.clone();
+        let device = self.device.clone();
+        let inflight = self.inflight.clone();
+        let last = self.last.clone();
+
+        tokio::spawn(async move {
+            let name = event.name();
+            let targets: Vec<Target> = load_enabled(&pool)
+                .await
+                .into_iter()
+                .filter(|t| t.wants(name))
+                .collect();
+            if targets.is_empty() {
+                return;
+            }
+
+            let context = envelope(&event, &device, false);
+            for target in targets {
+                let permit = match inflight.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "Webhook '{}': {} dropped, {} deliveries already in flight",
+                            target.name, name, MAX_INFLIGHT
+                        );
+                        continue;
+                    }
+                };
+                let context = context.clone();
+                let last = last.clone();
+                tokio::spawn(async move {
+                    let outcome = run(&target, &context).await;
+                    record(&last, &target, name, &outcome).await;
+                    let _ = permit;
+                });
+            }
+        });
+    }
+
+    /// Render and deliver one target synchronously, for the test-send endpoint
+    /// and for the unit tests. Records the result like a real delivery.
+    pub async fn deliver_one(&self, target: &Target, event: &Event, test: bool) -> Outcome {
+        let context = envelope(event, &self.device, test);
+        let outcome = run(target, &context).await;
+        record(&self.last, target, event.name(), &outcome).await;
+        outcome
+    }
+
+    pub async fn last_results(&self) -> HashMap<i64, LastResult> {
+        self.last.lock().await.clone()
+    }
+}
+
+/// Render then deliver. A render error never reaches the network.
+async fn run(target: &Target, context: &Value) -> Outcome {
+    match render(target, context) {
+        Ok(rendered) => deliver(target, &rendered).await,
+        Err(message) => Outcome::Error(message),
+    }
+}
+
+async fn record(
+    last: &Arc<Mutex<HashMap<i64, LastResult>>>,
+    target: &Target,
+    event: &str,
+    outcome: &Outcome,
+) {
+    // Named by `name`, never by URL: a URL may carry a token in its query.
+    if outcome.ok() {
+        debug!("Webhook '{}': {} -> {}", target.name, event, outcome.describe());
+    } else {
+        error!("Webhook '{}': {} -> {}", target.name, event, outcome.describe());
+    }
+    last.lock().await.insert(
+        target.id,
+        LastResult {
+            at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            event: event.to_string(),
+            outcome: outcome.describe(),
+            ok: outcome.ok(),
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,5 +1108,86 @@ mod tests {
         let outcome = deliver(&target, &rendered).await;
         assert!(matches!(outcome, Outcome::Error(_)), "{outcome:?}");
         assert!(!outcome.describe().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_returns_immediately_even_when_the_receiver_hangs() {
+        // The single property the whole design rests on: `fire` is called from
+        // inside the control loop, so it must not wait for anybody's server.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Accept and then never answer.
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        });
+
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
+            .bind("Hangs")
+            .bind(format!("http://127.0.0.1:{port}/hook"))
+            .bind(r#"["playback.playlist_empty"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let dispatcher = Dispatcher::new(pool);
+        let before = std::time::Instant::now();
+        dispatcher.fire(Event::PlaylistEmpty);
+        assert!(
+            before.elapsed() < Duration::from_millis(50),
+            "fire blocked for {:?}",
+            before.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_records_its_result_for_the_admin_page() {
+        let (url, handle) = one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        let mut target = target_wanting(&["playback.playlist_empty"]);
+        target.url = url;
+
+        let dispatcher = Dispatcher::new(pool);
+        let outcome = dispatcher
+            .deliver_one(&target, &Event::PlaylistEmpty, false)
+            .await;
+        assert!(outcome.ok());
+
+        let last = dispatcher.last_results().await;
+        let entry = last.get(&target.id).expect("no result was recorded");
+        assert!(entry.ok);
+        assert_eq!(entry.event, "playback.playlist_empty");
+        assert!(entry.outcome.contains("204"));
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_render_error_is_recorded_and_never_reaches_the_network() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        let mut target = target_wanting(&["playback.playlist_empty"]);
+        // Port 1 refuses instantly, so if this were sent the outcome would be a
+        // connection error rather than a template one.
+        target.url = "http://127.0.0.1:1/hook".into();
+        target.body = Some("{{ unclosed ".into());
+
+        let dispatcher = Dispatcher::new(pool);
+        let outcome = dispatcher
+            .deliver_one(&target, &Event::PlaylistEmpty, false)
+            .await;
+
+        match outcome {
+            Outcome::Error(message) => assert!(
+                message.contains("body template"),
+                "the failure should name the template, got: {message}"
+            ),
+            other => panic!("expected a render error, got {other:?}"),
+        }
     }
 }

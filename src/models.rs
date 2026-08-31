@@ -344,4 +344,7 @@ pub struct AppState {
     pub browser_pid: Arc<Mutex<Option<u32>>>,
     /// Screen-cast session. A running cast owns `override_item`; see `cast.rs`.
     pub cast: crate::cast::SharedCastSession,
+    /// Outbound webhooks. `fire` is synchronous and infallible, which is what
+    /// lets the control loop call it.
+    pub webhooks: Arc<crate::webhook::Dispatcher>,
 }

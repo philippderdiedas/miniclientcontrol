@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
         browser_pid: Arc::new(Mutex::new(None)),
+        webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 
     // A custom `.local` name has to be announced; Avahi only does the hostname.
