@@ -5,6 +5,8 @@
 //! a *third party*, and nothing on the display path waits for it.
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use tracing::error;
 
 /// Every event name the catalogue offers, in the order the admin page shows them.
 ///
@@ -144,6 +146,73 @@ pub fn device_name() -> String {
         .unwrap_or_default()
 }
 
+/// One configured receiver.
+///
+/// `headers` is a `BTreeMap` so the order a target sends its headers in is
+/// stable, which makes a test assertion possible and a log readable.
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub id: i64,
+    pub name: String,
+    pub url: String,
+    pub method: String,
+    pub events: Vec<String>,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<String>,
+    pub insecure_tls: bool,
+}
+
+impl Target {
+    pub fn wants(&self, event_name: &str) -> bool {
+        self.events.iter().any(|e| e == event_name)
+    }
+}
+
+/// The enabled targets, read fresh on every event.
+///
+/// Not cached: an operator who disables a target expects the *next* event to
+/// respect it, and this is a table with single-digit rows.
+///
+/// The JSON columns are `COALESCE`d because a real SQL `NULL` fails to decode
+/// and would take the whole query with it -- one hand-written row would
+/// otherwise silence every webhook.
+pub async fn load_enabled(pool: &sqlx::SqlitePool) -> Vec<Target> {
+    let rows = sqlx::query_as::<_, (i64, String, String, String, String, String, Option<String>, bool)>(
+        "SELECT id, name, url,
+                COALESCE(method, 'POST'),
+                COALESCE(events, '[]'),
+                COALESCE(headers, '{}'),
+                body,
+                COALESCE(insecure_tls, 0)
+         FROM webhooks
+         WHERE is_enabled = 1
+         ORDER BY id ASC",
+    )
+    .fetch_all(pool)
+    .await;
+
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("Failed to read webhook targets: {}", e);
+            return Vec::new();
+        }
+    };
+
+    rows.into_iter()
+        .map(|(id, name, url, method, events, headers, body, insecure_tls)| Target {
+            id,
+            name,
+            url,
+            method,
+            events: serde_json::from_str(&events).unwrap_or_default(),
+            headers: serde_json::from_str(&headers).unwrap_or_default(),
+            body,
+            insecure_tls,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +267,90 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), ALL_EVENTS.len(), "ALL_EVENTS has a duplicate");
         assert_eq!(ALL_EVENTS.len(), 10);
+    }
+
+    fn target_wanting(events: &[&str]) -> Target {
+        Target {
+            id: 1,
+            name: "Test".into(),
+            url: "https://example.test/hook".into(),
+            method: "POST".into(),
+            events: events.iter().map(|e| e.to_string()).collect(),
+            headers: Default::default(),
+            body: None,
+            insecure_tls: false,
+        }
+    }
+
+    #[test]
+    fn a_target_wants_only_the_events_it_subscribed_to() {
+        let target = target_wanting(&["cast.started", "cast.ended"]);
+        assert!(target.wants("cast.started"));
+        assert!(!target.wants("playback.item_changed"));
+        assert!(!target.wants("cast.startedX"), "matching must be exact, not a prefix");
+    }
+
+    #[test]
+    fn a_target_subscribed_to_nothing_wants_nothing() {
+        let target = target_wanting(&[]);
+        for name in ALL_EVENTS {
+            assert!(!target.wants(name));
+        }
+    }
+
+    #[tokio::test]
+    async fn load_enabled_skips_disabled_rows_and_decodes_json_columns() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO webhooks (name, url, events, headers, body, is_enabled)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind("Discord")
+        .bind("https://example.test/a")
+        .bind(r#"["cast.started"]"#)
+        .bind(r#"{"X-Token":"abc"}"#)
+        .bind("{{ event }}")
+        .bind(true)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO webhooks (name, url, is_enabled) VALUES (?, ?, ?)")
+            .bind("Switched off")
+            .bind("https://example.test/b")
+            .bind(false)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let targets = load_enabled(&pool).await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "Discord");
+        assert_eq!(targets[0].events, vec!["cast.started".to_string()]);
+        assert_eq!(targets[0].headers.get("X-Token").map(String::as_str), Some("abc"));
+        assert_eq!(targets[0].body.as_deref(), Some("{{ event }}"));
+        assert_eq!(targets[0].method, "POST", "the column default is POST");
+    }
+
+    #[tokio::test]
+    async fn a_null_json_column_does_not_take_the_whole_query_down() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        // A row written by hand, or by an older version, can hold a real NULL.
+        // One such row must not blank the whole list.
+        sqlx::query("INSERT INTO webhooks (name, url, events, headers) VALUES (?, ?, NULL, NULL)")
+            .bind("Hand-written")
+            .bind("https://example.test/c")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let targets = load_enabled(&pool).await;
+        assert_eq!(targets.len(), 1, "the COALESCE on the read path is missing");
+        assert!(targets[0].events.is_empty());
+        assert!(targets[0].headers.is_empty());
     }
 }

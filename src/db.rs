@@ -113,6 +113,26 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // 8. Webhook targets. A table rather than a settings key: these are rows
+    // with independent lifetimes, and the settings KV would have to rewrite the
+    // whole blob on every edit.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS webhooks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT NOT NULL,
+            url          TEXT NOT NULL,
+            method       TEXT NOT NULL DEFAULT 'POST',
+            is_enabled   BOOLEAN DEFAULT 1,
+            events       TEXT DEFAULT '[]',
+            headers      TEXT DEFAULT '{}',
+            body         TEXT,
+            insecure_tls BOOLEAN DEFAULT 0,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
