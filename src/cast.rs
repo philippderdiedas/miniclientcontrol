@@ -191,6 +191,16 @@ pub struct CastSession {
     /// The mode of the reservation the current sender consumed, read by
     /// `register_peer` before the guest has said anything on the socket.
     pending_mode: ClaimMode,
+    /// True once this session has told the world a cast started.
+    ///
+    /// `cast.started` names the moment a sender registers, not the moment the
+    /// display is pinned: in the pairing flow the display is pinned first, so
+    /// it can draw the code, and nobody is casting yet. Remembering the
+    /// announcement is what keeps two other cases honest. A sender whose socket
+    /// bounces and returns inside the grace period registers again, and must not
+    /// announce a second cast for one session; and a pairing code that expires
+    /// unused must not emit a `cast.ended` for a cast that never started.
+    cast_announced: bool,
     pairing: Option<Pairing>,
     reservation: Option<Reservation>,
     attempts: HashMap<IpAddr, Attempts>,
@@ -410,7 +420,12 @@ fn codes_match(expected: &str, provided: &str) -> bool {
 
 /// Pin the display to whatever this session is showing, remembering what was
 /// there before.
-async fn activate_display(state: &AppState, showing: Showing) {
+///
+/// `sender_ip` is a parameter rather than a read of `session.sender_addr`
+/// because a guest replacing their page releases the old one first, and
+/// `deactivate_display` clears that field on its way out -- reading it here
+/// would announce the second and every later page with no address at all.
+async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<IpAddr>) {
     let mut session = state.cast.lock().await;
     if session.holding_override {
         return;
@@ -441,20 +456,15 @@ async fn activate_display(state: &AppState, showing: Showing) {
 
     state.override_signal.notify_one();
 
-    // Read in a scope of its own: the session lock was dropped above, and
-    // re-taking it around the match would hold it across `watch_display_arrival`,
-    // which spawns.
-    let sender_ip = {
-        let session = state.cast.lock().await;
-        session.sender_addr.map(|a| a.to_string()).unwrap_or_default()
-    };
     match &showing {
         Showing::Cast => {
             info!("Cast: display pinned to the cast page");
-            state.webhooks.fire(crate::webhook::Event::CastStarted {
-                sender_ip,
-                mode: "cast".to_string(),
-            });
+            // Deliberately no `cast.started` here. This runs when the pairing
+            // code appears, which is a display being pinned and not a cast
+            // beginning, and by the time a guest types the code the early return
+            // above means it never runs a second time. `register_peer` announces
+            // the cast instead. `override.set` stays, because pinning the
+            // display is exactly what did happen.
             state.webhooks.fire(crate::webhook::Event::OverrideSet {
                 url: cast_display_url(state.args.port),
                 source: "cast",
@@ -468,7 +478,7 @@ async fn activate_display(state: &AppState, showing: Showing) {
             info!("Cast: guest page pinned to {}", redact(url));
             state.webhooks.fire(crate::webhook::Event::GuestPageShown {
                 url: redact(url),
-                sender_ip,
+                sender_ip: sender_ip.map(|addr| addr.to_string()).unwrap_or_default(),
             });
             state.webhooks.fire(crate::webhook::Event::OverrideSet {
                 url: redact(url),
@@ -511,6 +521,7 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
     // Captured before the fields are cleared: afterwards this is
     // `Showing::Nothing` with no start time, and the webhook would say nothing.
     let was = session.showing.clone();
+    let announced = session.cast_announced;
     let duration_secs = session
         .started_at
         .map(|started| (chrono::Utc::now() - started).num_seconds())
@@ -523,17 +534,28 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
     session.sender_addr = None;
     session.pairing = None;
     session.reservation = None;
+    session.cast_announced = false;
     session.epoch += 1;
     drop(session);
 
     state.override_signal.notify_one();
     info!("Cast: display released, playlist resumes");
 
+    // Both `override.cleared` fires sit outside the `still_ours` branch above,
+    // so the event goes out even when the override was left alone because an
+    // operator had replaced it mid-session. That is deliberate: the event says
+    // this session stopped holding the display, which is true either way, and it
+    // is what keeps every `override.set` paired with exactly one
+    // `override.cleared`. The asymmetry with `cast.ended` is also deliberate --
+    // that one describes a cast, so it is gated on one having been announced,
+    // while `override.cleared` describes the display and is not.
     match was {
         Showing::Cast => {
-            state
-                .webhooks
-                .fire(crate::webhook::Event::CastEnded { reason, duration_secs });
+            if announced {
+                state
+                    .webhooks
+                    .fire(crate::webhook::Event::CastEnded { reason, duration_secs });
+            }
             state
                 .webhooks
                 .fire(crate::webhook::Event::OverrideCleared { source: "cast" });
@@ -984,8 +1006,15 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             // mistyping an address must not cost the guest their slot and a
             // fresh claim. Releasing first keeps `previous_override` pointing at
             // the playlist rather than at the guest's own previous page.
+            //
+            // The address is read before the release, not after:
+            // `deactivate_display` clears `sender_addr`, so a `guest_page.shown`
+            // built from the field afterwards would announce the guest's second
+            // and every later page with no address at all.
+            let sender_ip = state.cast.lock().await.sender_addr;
             deactivate_display(state, "replaced").await;
-            activate_display(state, Showing::Page { url: parsed.clone(), scroll }).await;
+            activate_display(state, Showing::Page { url: parsed.clone(), scroll }, sender_ip)
+                .await;
 
             let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
             if let Some(tx) = tx {
@@ -1117,9 +1146,37 @@ async fn register_peer(
     // Its `present` frame does that. Pinning the cast page here would make the
     // display visibly bounce through it on the way to the guest's URL.
     if role == Role::Sender {
-        let mode = state.cast.lock().await.pending_mode;
+        // One acquisition for the mode, the flag and the re-stamp together:
+        // `activate_display` below takes the same lock, so the guard has to be
+        // gone before anything is fired. The start time is re-stamped here
+        // rather than left as `activate_display` set it, because in the pairing
+        // flow it was stamped when the code appeared and
+        // `cast.ended.duration_secs` would otherwise count however long the
+        // guest took to type it as time spent casting. Only on the announcing
+        // pass, so a socket that bounces mid-cast does not restart the clock.
+        let (mode, announce) = {
+            let mut session = state.cast.lock().await;
+            let mode = session.pending_mode;
+            let announce = mode == ClaimMode::Cast && !session.cast_announced;
+            if announce {
+                session.cast_announced = true;
+                session.started_at = Some(chrono::Utc::now());
+            }
+            (mode, announce)
+        };
+        // Before `activate_display`, so a receiver reading its log sees the cast
+        // start and then the display being pinned. Nothing depends on it --
+        // `fire` spawns per event, so delivery order is unordered anyway -- but
+        // the state the event describes is already settled here: the sender slot
+        // is filled and its address recorded.
+        if announce {
+            state.webhooks.fire(crate::webhook::Event::CastStarted {
+                sender_ip: addr.to_string(),
+                mode: "cast".to_string(),
+            });
+        }
         if mode == ClaimMode::Cast {
-            activate_display(state, Showing::Cast).await;
+            activate_display(state, Showing::Cast, Some(addr)).await;
         }
     }
 
@@ -1462,9 +1519,10 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
         session.display.as_ref().map(|peer| peer.tx.clone())
     };
 
-    // The pairing code is drawn by the cast page, so this is a cast even though
-    // nobody is streaming yet.
-    activate_display(&state, Showing::Cast).await;
+    // The pairing code is drawn by the cast page, so the display has to be
+    // pinned to it before anybody is streaming. No sender exists yet, which is
+    // also why no `cast.started` comes out of this -- see `register_peer`.
+    activate_display(&state, Showing::Cast, None).await;
 
     if let Some(tx) = display_tx {
         let _ = tx.send(Message::Text(
@@ -1485,3 +1543,290 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
 }
 
 pub type SharedCastSession = Arc<tokio::sync::Mutex<CastSession>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// A listener that answers every request and keeps the bodies it was sent.
+    ///
+    /// `Dispatcher::fire` spawns, so nothing about an emit site can be asserted
+    /// synchronously. Counting deliveries on a real socket is also the only way
+    /// "announced exactly once" means once rather than at least once: the
+    /// admin-page record the dispatcher keeps holds one result per target and
+    /// would look identical after a double fire.
+    struct Receiver {
+        url: String,
+        bodies: Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Receiver {
+        async fn count(&self, event: &str) -> usize {
+            let needle = format!("\"event\":\"{event}\"");
+            self.bodies.lock().await.iter().filter(|b| b.contains(&needle)).count()
+        }
+
+        /// Block until `event` has arrived at least `want` times, or give up.
+        ///
+        /// Used as a barrier before a negative assertion: an event that *should*
+        /// come out of the step under test proves the dispatcher got that far,
+        /// so a zero count for its sibling is a decision and not a race.
+        async fn wait_for(&self, event: &str, want: usize) -> usize {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let seen = self.count(event).await;
+                if seen >= want || std::time::Instant::now() >= deadline {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Long enough for a delivery already in flight to land. Only ever used
+        /// after `wait_for` has proven the dispatcher is running.
+        async fn settle(&self) {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    async fn receiver() -> Receiver {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bodies = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let sink = bodies.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 8192];
+                    // Read the header block, then whatever the declared length
+                    // still owes. A single `read` happens to be enough today and
+                    // nothing guarantees it stays that way.
+                    let header_end = loop {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                    };
+                    let length: usize = String::from_utf8_lossy(&buf[..header_end])
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().to_string())
+                        })
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < header_end + length {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
+                        .await;
+                    let _ = socket.flush().await;
+                    sink.lock().await
+                        .push(String::from_utf8_lossy(&buf[header_end..]).to_string());
+                });
+            }
+        });
+        Receiver { url: format!("http://127.0.0.1:{port}/hook"), bodies }
+    }
+
+    /// A state whose only webhook target is `receiver`, subscribed to every
+    /// event this module can emit.
+    async fn state_for(receiver: &Receiver) -> AppState {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
+            .bind("Counter")
+            .bind(&receiver.url)
+            .bind(r#"["cast.started","cast.ended","override.set","override.cleared"]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let args = crate::models::Args::parse_from(["miniclientcontrol"]);
+        let settings = crate::settings::load(&pool, &args).await;
+        AppState {
+            pool: pool.clone(),
+            args: Arc::new(args),
+            skip_signal: Default::default(),
+            playlist_signal: Default::default(),
+            override_signal: Default::default(),
+            overlay_signal: Default::default(),
+            current_item_id: Default::default(),
+            pending_jump: Default::default(),
+            override_item: Default::default(),
+            cast_tls_port: 0,
+            managed_cert: false,
+            settings: Arc::new(tokio::sync::RwLock::new(settings)),
+            locks: Default::default(),
+            auth_cache: Default::default(),
+            audio: Arc::new(crate::audio::Backend::Unavailable),
+            browser_pid: Default::default(),
+            cast: Default::default(),
+            webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
+        }
+    }
+
+    /// Stands in for the pairing request: `start_pairing` mints a code and pins
+    /// the display so the cast page can draw it. Everything else it does needs
+    /// an HTTP extractor and none of it touches what is under test here.
+    async fn pin_for_pairing(state: &AppState) {
+        state.cast.lock().await.pairing = Some(Pairing {
+            code: "ABCD".to_string(),
+            expires_at: Instant::now() + PAIRING_TTL,
+        });
+        activate_display(state, Showing::Cast, None).await;
+    }
+
+    fn sender_socket() -> mpsc::UnboundedSender<Message> {
+        // The receiving half is dropped: `register_peer` only ever `let _ =`s its
+        // sends, so a closed channel is indistinguishable from a guest who
+        // stopped reading.
+        mpsc::unbounded_channel().0
+    }
+
+    #[tokio::test]
+    async fn pairing_pins_the_display_without_announcing_a_cast() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+
+        pin_for_pairing(&state).await;
+
+        {
+            let session = state.cast.lock().await;
+            assert!(session.holding_override, "the display was not pinned");
+            assert!(
+                !session.cast_announced,
+                "a pairing code appearing is not a cast starting"
+            );
+        }
+        // `override.set` is what this step legitimately emits, so its arrival is
+        // the proof that a missing `cast.started` is a decision, not a race.
+        assert_eq!(receiver.wait_for("override.set", 1).await, 1);
+        assert_eq!(
+            receiver.count("cast.started").await,
+            0,
+            "cast.started went out while the display was only showing a code"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sender_registering_announces_the_cast_exactly_once() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+
+        pin_for_pairing(&state).await;
+        let pinned_at = state.cast.lock().await.started_at.expect("no start time");
+
+        let addr: IpAddr = "192.168.1.44".parse().unwrap();
+        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+
+        {
+            let session = state.cast.lock().await;
+            assert!(session.cast_announced, "the sender's arrival was not announced");
+            let started_at = session.started_at.expect("no start time");
+            // Without the re-stamp this would still be the pairing moment, and
+            // `cast.ended.duration_secs` would count however long the guest took
+            // to type the code as time spent casting.
+            assert!(
+                started_at > pinned_at,
+                "started_at still points at the pairing moment"
+            );
+        }
+
+        assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
+        let body = {
+            let bodies = receiver.bodies.lock().await;
+            bodies
+                .iter()
+                .find(|b| b.contains("\"event\":\"cast.started\""))
+                .cloned()
+                .expect("no cast.started body")
+        };
+        // The whole point of moving the fire: in `activate_display` there was no
+        // sender yet and this field was empty.
+        assert!(body.contains("192.168.1.44"), "the sender's address is missing: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_sender_reconnecting_inside_the_grace_period_announces_nothing_new() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+
+        pin_for_pairing(&state).await;
+        let addr: IpAddr = "192.168.1.44".parse().unwrap();
+        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
+
+        // The socket bounces. The session survives, because `unregister_peer`
+        // hands it to the grace watchdog rather than ending it.
+        unregister_peer(&state, Role::Sender, addr).await;
+        assert!(
+            state.cast.lock().await.holding_override,
+            "the grace period should still be holding the display"
+        );
+        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+
+        receiver.settle().await;
+        assert_eq!(
+            receiver.count("cast.started").await,
+            1,
+            "one session announced two casts"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unused_pairing_code_ends_without_a_cast_ended() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+
+        pin_for_pairing(&state).await;
+        assert_eq!(receiver.wait_for("override.set", 1).await, 1);
+
+        // What `watch_pairing_expiry` does when nobody types the code.
+        end_session(&state, "grace").await;
+
+        // The display was pinned and is released, so this one is owed.
+        assert_eq!(receiver.wait_for("override.cleared", 1).await, 1);
+        assert_eq!(
+            receiver.count("cast.started").await,
+            0,
+            "cast.started fired for a code nobody used"
+        );
+        assert_eq!(
+            receiver.count("cast.ended").await,
+            0,
+            "cast.ended has no cast.started to pair with"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_cast_ending_is_paired_and_the_flag_is_cleared() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+
+        pin_for_pairing(&state).await;
+        let addr: IpAddr = "192.168.1.44".parse().unwrap();
+        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
+
+        end_session(&state, "operator").await;
+
+        assert_eq!(receiver.wait_for("cast.ended", 1).await, 1);
+        assert_eq!(receiver.wait_for("override.cleared", 1).await, 1);
+        // Cleared on teardown, or the next session on this process would think it
+        // had already announced itself and stay silent.
+        assert!(!state.cast.lock().await.cast_announced);
+    }
+}

@@ -161,6 +161,14 @@ pub async fn browser_loop(state: AppState) {
         // display whose control page failed to initialise is not one anybody
         // would call connected. Reaching this line means the browser is set up
         // and about to be driven.
+        //
+        // `reconnect` means "again within this process", which is narrower than
+        // what an operator means by the word. `connected_before` starts false at
+        // every start, and `chromium.rs` deliberately leaves the browser running
+        // when the controller stops, so the first connect after a deploy or a
+        // crash reports `reconnect: false` while the browser it attached to never
+        // went anywhere. Widening it would mean persisting the flag, which is an
+        // SD-card write for a field nobody acts on.
         state.webhooks.fire(crate::webhook::Event::DisplayConnected {
             reconnect: connected_before,
         });
