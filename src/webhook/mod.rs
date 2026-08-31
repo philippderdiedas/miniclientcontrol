@@ -15,6 +15,10 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tracing::{debug, error, warn};
 
+/// The operator's CRUD surface, split out only for file size: `mod.rs` holds
+/// the machinery, `api.rs` the handlers over it.
+pub mod api;
+
 /// Every event name the catalogue offers, in the order the admin page shows them.
 ///
 /// The UI reads this through `GET /api/webhooks/events` and never hard-codes a
