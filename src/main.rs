@@ -11,6 +11,7 @@ mod settings;
 mod chromium;
 mod mdns;
 mod audio;
+mod webhook;
 
 use anyhow::Result;
 use axum::{
