@@ -123,10 +123,10 @@ per target and a template to put it in.
 | `playback.playlist_empty` | — | `browser.rs`, entering the idle screen |
 | `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) | `handlers.rs::set_override`, `cast.rs::activate_display` |
 | `override.cleared` | `source` | `handlers.rs::clear_override`, `cast.rs::deactivate_display` |
-| `cast.started` | `sender_ip`, `mode` | `cast.rs::activate_display` |
+| `cast.started` | `sender_ip`, `mode` | `cast.rs::register_peer` |
 | `cast.ended` | `reason` (`operator`/`sender`/`grace`/`disabled`/`replaced`), `duration_secs` | `cast.rs::deactivate_display` |
 | `guest_page.shown` | `url`, `sender_ip` | `cast.rs::activate_display` |
-| `guest_page.ended` | `reason`, `duration_secs` | `cast.rs::deactivate_display` |
+| `guest_page.ended` | `reason` (as above), `duration_secs` | `cast.rs::deactivate_display` |
 | `display.disconnected` | `error` | `browser.rs`, outer loop on `is_connection_lost` |
 | `display.connected` | `reconnect` (bool) | `browser.rs`, after a successful CDP attach |
 
@@ -136,6 +136,17 @@ Three properties of this table are deliberate:
   `override_item`, so without it a receiver cannot tell an operator's decision
   from a cast starting, and would see two events for one occurrence. The
   cast and page families stay separate regardless, because they carry a sender.
+- **`cast.started` is emitted where the sender registers, not where the display is
+  pinned.** `start_pairing` pins the cast page to show the code, so an emit inside
+  `activate_display` announces a cast when a *code* appeared — and then stays silent
+  for the real cast, because `activate_display` early-returns once it already holds
+  the override. A session-scoped `cast_announced` flag keeps it to exactly one per
+  cast across a sender reconnect inside the grace period, and gates `cast.ended` so
+  an unused pairing code does not emit an end with no beginning. `override.set`
+  stays in `activate_display`: it describes the display being pinned, which is
+  exactly what happened.
+- **`started_at` is re-stamped when the sender registers**, so `duration_secs`
+  measures the cast rather than the pairing wait that preceded it.
 - **Every URL goes through `guest_page::redact`.** Credentials in a guest URL
   reach the browser and nothing else; a webhook is "nothing else". Same
   function as the log and the admin page use, so the three cannot drift.
