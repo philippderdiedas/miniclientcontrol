@@ -635,6 +635,22 @@ async fn record(
 mod tests {
     use super::*;
 
+    /// A bare `sqlite::memory:` gives every pool connection its own anonymous
+    /// database; a second connection -- which a `fire` delivery opens from its
+    /// spawned task -- sees no `webhooks` table, `load_enabled` comes back
+    /// empty, and the delivery is silently dropped. That surfaces as a
+    /// `wait_for` timeout, not as an error naming the real cause. Capping the
+    /// pool at one connection is a simpler guarantee than `?cache=shared`, and
+    /// this is the one place every such test should get it from, so a test
+    /// copied from a neighbour inherits the safe form automatically.
+    async fn memory_pool() -> sqlx::SqlitePool {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap()
+    }
+
     #[test]
     fn an_event_names_itself() {
         assert_eq!(Event::PlaylistEmpty.name(), "playback.playlist_empty");
@@ -718,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_enabled_skips_disabled_rows_and_decodes_json_columns() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
 
         sqlx::query(
@@ -754,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_null_json_column_does_not_take_the_whole_query_down() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
 
         // A row written by hand, or by an older version, can hold a real NULL.
@@ -1127,7 +1143,7 @@ mod tests {
             drop(socket);
         });
 
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
         sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
             .bind("Hangs")
@@ -1150,7 +1166,7 @@ mod tests {
     #[tokio::test]
     async fn a_delivery_records_its_result_for_the_admin_page() {
         let (url, handle) = one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
 
         let mut target = target_wanting(&["playback.playlist_empty"]);
@@ -1172,7 +1188,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_render_error_is_recorded_and_never_reaches_the_network() {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
 
         let mut target = target_wanting(&["playback.playlist_empty"]);
@@ -1217,7 +1233,7 @@ mod tests {
             }
         });
 
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
         for name in ["One", "Two", "Three"] {
             sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
@@ -1262,7 +1278,7 @@ mod tests {
         let (url_c, handle_c) =
             one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
 
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = memory_pool().await;
         crate::db::run_migrations(&pool).await.unwrap();
         for (name, url, events) in [
             ("Subscribed A", url_a, r#"["playback.playlist_empty"]"#),

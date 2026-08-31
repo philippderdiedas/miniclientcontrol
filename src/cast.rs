@@ -1644,12 +1644,25 @@ mod tests {
     /// A state whose only webhook target is `receiver`, subscribed to every
     /// event this module can emit.
     async fn state_for(receiver: &Receiver) -> AppState {
-        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        // `max_connections(1)` rather than a bare `sqlite::memory:`: every test
+        // in this module fires webhooks, which deliver from a spawned task
+        // holding a second pool connection, and a second connection to a fresh
+        // anonymous in-memory database sees no `webhooks` table at all -- the
+        // delivery is silently dropped and the failure surfaces as a `wait_for`
+        // timeout, not as an error naming the real cause.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
         sqlx::query("INSERT INTO webhooks (name, url, events) VALUES (?, ?, ?)")
             .bind("Counter")
             .bind(&receiver.url)
-            .bind(r#"["cast.started","cast.ended","override.set","override.cleared"]"#)
+            .bind(
+                r#"["cast.started","cast.ended","override.set","override.cleared",
+                    "guest_page.shown","guest_page.ended"]"#,
+            )
             .execute(&pool)
             .await
             .unwrap();
@@ -1768,6 +1781,11 @@ mod tests {
         let addr: IpAddr = "192.168.1.44".parse().unwrap();
         assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
         assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
+        let started_at = state.cast.lock().await.started_at.expect("no start time");
+        // `activate_display` early-returns once the display is already pinned,
+        // so this session's only `override.set` came from `pin_for_pairing`;
+        // nothing between here and the bounce below fires another one.
+        let overrides_before = receiver.count("override.set").await;
 
         // The socket bounces. The session survives, because `unregister_peer`
         // hands it to the grace watchdog rather than ending it.
@@ -1783,6 +1801,23 @@ mod tests {
             receiver.count("cast.started").await,
             1,
             "one session announced two casts"
+        );
+        // Nothing reads `started_at` after a reconnect, but a stray re-stamp
+        // here is exactly the "a sender reconnect resets the cast clock"
+        // regression the `if announce` guard exists to prevent.
+        assert_eq!(
+            state.cast.lock().await.started_at,
+            Some(started_at),
+            "the reconnect re-stamped the cast's start time"
+        );
+        // Unlike `cast.started`, which is gated by `cast_announced`, this rests
+        // on a completely different guard: `activate_display` early-returns
+        // while `holding_override` is true. Checking it catches a regression in
+        // that guard even if the `cast_announced` flag were somehow fine.
+        assert_eq!(
+            receiver.count("override.set").await,
+            overrides_before,
+            "the reconnect re-pinned the display"
         );
     }
 
@@ -1828,5 +1863,49 @@ mod tests {
         // Cleared on teardown, or the next session on this process would think it
         // had already announced itself and stay silent.
         assert!(!state.cast.lock().await.cast_announced);
+    }
+
+    #[tokio::test]
+    async fn a_replacing_page_still_carries_the_guests_address() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+        let addr: IpAddr = "192.168.1.44".parse().unwrap();
+        let first: Url = "https://dash.example.test/a".parse().unwrap();
+        let second: Url = "https://dash.example.test/b".parse().unwrap();
+
+        activate_display(
+            &state,
+            Showing::Page { url: first, scroll: ScrollMode::None },
+            Some(addr),
+        )
+        .await;
+        assert_eq!(receiver.wait_for("guest_page.shown", 1).await, 1);
+
+        // Mirrors `handle_frame`'s "present" branch on a second `present`: the
+        // address is read into a local before `deactivate_display` runs, because
+        // that call clears `session.sender_addr` in its reset block. Passing the
+        // same captured address into the following `activate_display` is the fix
+        // under test -- before it, `activate_display` re-read the now-cleared
+        // field itself and every replacement page announced no address at all.
+        let sender_ip = Some(addr);
+        deactivate_display(&state, "replaced").await;
+        activate_display(
+            &state,
+            Showing::Page { url: second, scroll: ScrollMode::None },
+            sender_ip,
+        )
+        .await;
+
+        assert_eq!(receiver.wait_for("guest_page.shown", 2).await, 2);
+        let bodies = receiver.bodies.lock().await;
+        let shown: Vec<&String> = bodies
+            .iter()
+            .filter(|b| b.contains("\"event\":\"guest_page.shown\""))
+            .collect();
+        assert_eq!(shown.len(), 2, "expected one guest_page.shown per present");
+        assert!(
+            shown.iter().all(|b| b.contains("192.168.1.44")),
+            "a present announced the guest with no address: {shown:?}"
+        );
     }
 }
