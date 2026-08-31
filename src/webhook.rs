@@ -322,6 +322,12 @@ pub async fn deliver(target: &Target, rendered: &Rendered) -> Outcome {
 async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
     let url = url::Url::parse(&target.url).map_err(|e| format!("bad URL: {e}"))?;
     let host = url.host_str().ok_or("the URL has no host")?.to_string();
+    // `Url::host_str` returns an IPv6 literal wrapped in brackets (`[::1]`),
+    // which is exactly what the `Host` header wants but neither `IpAddr`
+    // parsing, DNS, nor `ServerName` accepts -- each of those needs the
+    // address bare. Keep `host` (bracketed) for the header and use this for
+    // everything that resolves or verifies a name.
+    let connect_host = host.trim_start_matches('[').trim_end_matches(']');
     let https = match url.scheme() {
         "https" => true,
         "http" => false,
@@ -335,22 +341,35 @@ async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
 
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
+        tokio::net::TcpStream::connect((connect_host, port)),
     )
     .await
-    .map_err(|_| format!("connecting to {host}:{port} timed out"))?
-    .map_err(|e| format!("connecting to {host}:{port}: {e}"))?;
+    .map_err(|_| format!("connecting to {connect_host}:{port} timed out"))?
+    .map_err(|e| format!("connecting to {connect_host}:{port}: {e}"))?;
+
+    // Merged into one map before anything is built, because
+    // `Request::builder().header()` *appends* rather than replaces: a target
+    // whose headers name `content-length` would otherwise put two conflicting
+    // ones on the wire, which is the request-smuggling shape if any proxy sits
+    // between us and the receiver. The target's own value wins for everything
+    // else, so a vhosted receiver can still be given the `host` it needs.
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    headers.insert("host".into(), format!("{host}:{port}"));
+    headers.insert(
+        "user-agent".into(),
+        concat!("miniclientcontrol/", env!("CARGO_PKG_VERSION")).to_string(),
+    );
+    for (name, value) in &rendered.headers {
+        headers.insert(name.clone(), value.clone());
+    }
+    // Last, and not overridable: it must describe the body we are actually
+    // sending, whatever the target asked for.
+    headers.insert("content-length".into(), rendered.body.len().to_string());
 
     let mut request = hyper::Request::builder()
         .method(target.method.as_str())
-        .uri(&path)
-        .header("host", format!("{host}:{port}"))
-        .header(
-            "user-agent",
-            concat!("miniclientcontrol/", env!("CARGO_PKG_VERSION")),
-        )
-        .header("content-length", rendered.body.len().to_string());
-    for (name, value) in &rendered.headers {
+        .uri(&path);
+    for (name, value) in &headers {
         request = request.header(name.as_str(), value.as_str());
     }
     let request = request
@@ -358,9 +377,6 @@ async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
         .map_err(|e| format!("building the request: {e}"))?;
 
     let response = if https {
-        let roots = RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
         let config = if target.insecure_tls {
             // Opt-in per target, never global: internal receivers on
             // self-signed certificates are this project's normal world, but a
@@ -370,15 +386,21 @@ async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
                 .with_custom_certificate_verifier(Arc::new(NoVerification))
                 .with_no_client_auth()
         } else {
+            // Built here, not above the branch: cloning the whole root set on
+            // every delivery just to discard it when `insecure_tls` is set
+            // would be wasted work on the far more common path.
+            let roots = RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
             ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth()
         };
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-        let server_name = host
-            .clone()
+        let server_name = connect_host
+            .to_string()
             .try_into()
-            .map_err(|_| format!("'{host}' is not a valid server name"))?;
+            .map_err(|_| format!("'{connect_host}' is not a valid server name"))?;
         let tls = connector
             .connect(server_name, tcp)
             .await
@@ -393,8 +415,7 @@ async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
         .headers()
         .get(hyper::header::LOCATION)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
+        .map(str::to_string);
 
     // Read and discard a bounded amount, so the socket is not left open for a
     // receiver that answers with an endless stream.
@@ -402,7 +423,10 @@ async fn send(target: &Target, rendered: &Rendered) -> Result<Outcome, String> {
         .collect()
         .await;
 
-    if (300..400).contains(&status) {
+    // A `3xx` with no `Location` has nowhere to send anyone, so it is not a
+    // redirect this code refused -- it is just a status, and reporting it as
+    // an empty-location "redirect" would read as a bug in the log.
+    if let (true, Some(location)) = ((300..400).contains(&status), location) {
         return Ok(Outcome::Redirect { status, location });
     }
     Ok(Outcome::Status(status))
@@ -701,19 +725,71 @@ mod tests {
     /// A one-shot HTTP server on an ephemeral port. Returns its URL, a handle
     /// that yields the request it received, and nothing else -- the tests that
     /// need a real listener over many requests live in the Python suite.
-    async fn one_shot(response: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+    ///
+    /// Takes the response by value rather than `&'static str` so a caller with
+    /// an owned, formatted string (say, one embedding another listener's URL)
+    /// does not have to `Box::leak` it just to satisfy the spawned task's
+    /// lifetime.
+    async fn one_shot(response: impl Into<String>) -> (String, tokio::task::JoinHandle<String>) {
+        one_shot_on("127.0.0.1:0", response)
+            .await
+            .expect("binding to IPv4 loopback must not fail")
+    }
+
+    /// The general form behind `one_shot`, parameterised on the bind address
+    /// so the IPv6-literal test can ask for `[::1]:0` and get `None` back
+    /// instead of a panic on a machine with no IPv6 loopback configured.
+    async fn one_shot_on(
+        bind_addr: &str,
+        response: impl Into<String>,
+    ) -> Option<(String, tokio::task::JoinHandle<String>)> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let response = response.into();
+        let listener = tokio::net::TcpListener::bind(bind_addr).await.ok()?;
+        let local = listener.local_addr().unwrap();
+        let port = local.port();
+        let url_host = if local.is_ipv6() {
+            format!("[{}]", local.ip())
+        } else {
+            local.ip().to_string()
+        };
         let handle = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = socket.read(&mut buf).await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            // Read until the header block is complete, then keep reading until
+            // the declared body length is satisfied. hyper happens to coalesce
+            // a small request into one write today, so a single `read` passes
+            // now, but nothing guarantees that stays true and a request that
+            // outgrows one segment would silently truncate what the caller
+            // asserts against.
+            let header_end = loop {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed before the headers arrived");
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let content_length: usize = String::from_utf8_lossy(&buf[..header_end])
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().to_string())
+                })
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            while buf.len() < header_end + content_length {
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "connection closed before the body arrived");
+                buf.extend_from_slice(&chunk[..n]);
+            }
             socket.write_all(response.as_bytes()).await.unwrap();
             let _ = socket.flush().await;
-            String::from_utf8_lossy(&buf[..n]).to_string()
+            String::from_utf8_lossy(&buf).to_string()
         });
-        (format!("http://127.0.0.1:{port}/hook"), handle)
+        Some((format!("http://{url_host}:{port}/hook"), handle))
     }
 
     #[tokio::test]
@@ -755,7 +831,10 @@ mod tests {
             other => panic!("a redirect must not be followed: {other:?}"),
         }
         assert!(!outcome.ok());
-        // Exactly one request was made: the body never went to the new location.
+        // Pins the reported status and the verbatim location string; it does
+        // not prove the body never reached that location -- the address does
+        // not resolve, so a follow attempt would surface as an error here
+        // rather than a second request. See the test below for that proof.
         let _ = handle.await.unwrap();
     }
 
@@ -767,11 +846,8 @@ mod tests {
         // refusal is proven by its silence.
         let (elsewhere, elsewhere_handle) =
             one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
-        let response: &'static str = Box::leak(
-            format!(
-                "HTTP/1.1 307 Temporary Redirect\r\nlocation: {elsewhere}\r\ncontent-length: 0\r\n\r\n"
-            )
-            .into_boxed_str(),
+        let response = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: {elsewhere}\r\ncontent-length: 0\r\n\r\n"
         );
         let (url, handle) = one_shot(response).await;
         let mut target = target_wanting(&["cast.started"]);
@@ -789,7 +865,8 @@ mod tests {
             first.to_lowercase().contains("authorization: bearer secret"),
             "the first hop should have had the header: {first}"
         );
-        // Still waiting to accept, so nothing ever connected to it.
+        // Exactly one request was made: the body never went to the new
+        // location. Still waiting to accept, so nothing ever connected to it.
         assert!(
             tokio::time::timeout(Duration::from_millis(250), elsewhere_handle)
                 .await
@@ -808,6 +885,86 @@ mod tests {
         assert!(matches!(outcome, Outcome::Status(500)), "{outcome:?}");
         assert!(!outcome.ok());
         let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_3xx_with_no_location_is_a_plain_status_not_an_empty_redirect() {
+        // A 304 legitimately carries no Location. Reporting it as
+        // `Redirect { location: "" }` reads as a bug in the log -- there is
+        // nowhere this could have redirected to.
+        let (url, handle) = one_shot("HTTP/1.1 304 Not Modified\r\ncontent-length: 0\r\n\r\n").await;
+        let mut target = target_wanting(&["cast.started"]);
+        target.url = url;
+        let rendered = render(&target, &ctx()).unwrap();
+        let outcome = deliver(&target, &rendered).await;
+        assert!(matches!(outcome, Outcome::Status(304)), "{outcome:?}");
+        assert!(!outcome.describe().contains("redirect"), "{}", outcome.describe());
+        let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_target_header_cannot_duplicate_or_override_the_real_content_length() {
+        let (url, handle) = one_shot("HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await;
+        let mut target = target_wanting(&["cast.started"]);
+        target.url = url;
+        // Both names collide with a header the builder already sets. The
+        // target's own value must win for `user-agent`; the real body length
+        // must win for `content-length`, whatever the target claims it to be.
+        target.headers.insert("user-agent".into(), "CustomAgent/1".into());
+        target.headers.insert("content-length".into(), "999999".into());
+
+        let rendered = render(&target, &ctx()).unwrap();
+        let body_len = rendered.body.len();
+        let outcome = deliver(&target, &rendered).await;
+        assert!(outcome.ok(), "{outcome:?}");
+
+        let request = handle.await.unwrap();
+        let lower = request.to_lowercase();
+        assert_eq!(
+            lower.matches("user-agent:").count(),
+            1,
+            "the target's header duplicated the builder's own instead of replacing it: {request}"
+        );
+        assert!(
+            lower.contains("user-agent: customagent/1"),
+            "the target's user-agent did not win: {request}"
+        );
+        assert_eq!(
+            lower.matches("content-length:").count(),
+            1,
+            "the target's header duplicated content-length: {request}"
+        );
+        assert!(
+            lower.contains(&format!("content-length: {body_len}")),
+            "the real body length did not win over the target's bogus one: {request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ipv6_literal_target_is_delivered_to() {
+        // `Url::host_str` hands back the literal with brackets ("[::1]"),
+        // which neither `TcpStream::connect` nor `ServerName` accepts bare.
+        // Not every sandbox has an IPv6 loopback configured, so a bind
+        // failure here is "this machine can't run the test", not "the fix is
+        // wrong" -- skip cleanly rather than fail.
+        let Some((url, handle)) =
+            one_shot_on("[::1]:0", "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n").await
+        else {
+            eprintln!("skipping an_ipv6_literal_target_is_delivered_to: no IPv6 loopback here");
+            return;
+        };
+        let mut target = target_wanting(&["cast.started"]);
+        target.url = url;
+
+        let rendered = render(&target, &ctx()).unwrap();
+        let outcome = deliver(&target, &rendered).await;
+        assert!(matches!(outcome, Outcome::Status(204)), "{outcome:?}");
+
+        let request = handle.await.unwrap();
+        assert!(
+            request.to_lowercase().contains("host: [::1]:"),
+            "the Host header must keep the brackets for an IPv6 literal: {request}"
+        );
     }
 
     #[tokio::test]
