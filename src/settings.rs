@@ -1132,7 +1132,7 @@ pub async fn update_settings(
     // would only apply to the next person.
     if cast_turned_off {
         tracing::info!("Cast: disabled by the operator, ending any running session");
-        crate::cast::end_session(&state).await;
+        crate::cast::end_session(&state, "disabled").await;
     }
 
     read_settings(State(state)).await.into_response()

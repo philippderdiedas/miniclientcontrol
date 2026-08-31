@@ -322,7 +322,7 @@ pub async fn get_playlist(State(state): State<AppState>) -> impl IntoResponse {
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.overlay_config, 'null') as overlay_config,
-            a.local_path, a.mimetype, a.duration as asset_duration
+            a.local_path, a.mimetype, a.duration as asset_duration, a.filename
         FROM playlist_items p
         LEFT JOIN assets a ON p.asset_id = a.id
         ORDER BY p.play_order ASC
@@ -718,6 +718,9 @@ pub async fn set_override(
         mimetype = Some(asset.mimetype);
     }
 
+    // Captured before `payload.url` is moved into the item below.
+    let announced_url = payload.url.clone().unwrap_or_default();
+
     let override_item = OverrideItem {
         asset_id: payload.asset_id,
         url: payload.url,
@@ -736,6 +739,14 @@ pub async fn set_override(
     // an unconsumed permit that cuts the next playlist item short.
     state.override_signal.notify_one();
 
+    // An asset override has no URL to announce, and inventing one would be a
+    // link to something the receiver cannot fetch. The `asset_id` in the
+    // operator's own request is the identifier; the empty string says "not a URL".
+    state.webhooks.fire(crate::webhook::Event::OverrideSet {
+        url: crate::browser::redact_str(&announced_url),
+        source: "operator",
+    });
+
     (StatusCode::OK, Json(OverrideResponse { active: true })).into_response()
 }
 
@@ -748,6 +759,10 @@ pub async fn clear_override(
     }
 
     state.override_signal.notify_one();
+
+    state
+        .webhooks
+        .fire(crate::webhook::Event::OverrideCleared { source: "operator" });
 
     (StatusCode::OK, Json(OverrideResponse { active: false }))
 }

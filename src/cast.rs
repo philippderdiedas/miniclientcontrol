@@ -440,21 +440,51 @@ async fn activate_display(state: &AppState, showing: Showing) {
     drop(session);
 
     state.override_signal.notify_one();
+
+    // Read in a scope of its own: the session lock was dropped above, and
+    // re-taking it around the match would hold it across `watch_display_arrival`,
+    // which spawns.
+    let sender_ip = {
+        let session = state.cast.lock().await;
+        session.sender_addr.map(|a| a.to_string()).unwrap_or_default()
+    };
     match &showing {
         Showing::Cast => {
             info!("Cast: display pinned to the cast page");
+            state.webhooks.fire(crate::webhook::Event::CastStarted {
+                sender_ip,
+                mode: "cast".to_string(),
+            });
+            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+                url: cast_display_url(state.args.port),
+                source: "cast",
+            });
             // Only a cast has a display peer to wait for. A page has none, and
             // this watchdog would tear it down after its deadline for a peer
             // that was never coming.
             watch_display_arrival(state.clone(), epoch);
         }
-        Showing::Page { url, .. } => info!("Cast: guest page pinned to {}", redact(url)),
+        Showing::Page { url, .. } => {
+            info!("Cast: guest page pinned to {}", redact(url));
+            state.webhooks.fire(crate::webhook::Event::GuestPageShown {
+                url: redact(url),
+                sender_ip,
+            });
+            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+                url: redact(url),
+                source: "guest_page",
+            });
+        }
         Showing::Nothing => {}
     }
 }
 
 /// Release the display and let the playlist pick up where it left off.
-async fn deactivate_display(state: &AppState) {
+///
+/// `reason` is what a webhook receiver is told about why the session ended, so
+/// it has to come from the caller: this function cannot tell an operator's stop
+/// from a watchdog's timeout from one guest page replacing another.
+async fn deactivate_display(state: &AppState, reason: &'static str) {
     let mut session = state.cast.lock().await;
     if !session.holding_override {
         return;
@@ -478,6 +508,14 @@ async fn deactivate_display(state: &AppState) {
             debug!("Cast: override changed during the session, leaving it alone");
         }
     }
+    // Captured before the fields are cleared: afterwards this is
+    // `Showing::Nothing` with no start time, and the webhook would say nothing.
+    let was = session.showing.clone();
+    let duration_secs = session
+        .started_at
+        .map(|started| (chrono::Utc::now() - started).num_seconds())
+        .unwrap_or(0);
+
     session.previous_override = None;
     session.holding_override = false;
     session.showing = Showing::Nothing;
@@ -490,10 +528,34 @@ async fn deactivate_display(state: &AppState) {
 
     state.override_signal.notify_one();
     info!("Cast: display released, playlist resumes");
+
+    match was {
+        Showing::Cast => {
+            state
+                .webhooks
+                .fire(crate::webhook::Event::CastEnded { reason, duration_secs });
+            state
+                .webhooks
+                .fire(crate::webhook::Event::OverrideCleared { source: "cast" });
+        }
+        Showing::Page { .. } => {
+            state
+                .webhooks
+                .fire(crate::webhook::Event::GuestPageEnded { reason, duration_secs });
+            state
+                .webhooks
+                .fire(crate::webhook::Event::OverrideCleared { source: "guest_page" });
+        }
+        Showing::Nothing => {}
+    }
 }
 
 /// Close both sockets and hand the screen back.
-pub async fn end_session(state: &AppState) {
+///
+/// The reason is threaded through rather than decided here, because the callers
+/// disagree about it: an operator's stop, a guest's own stop frame, three
+/// watchdogs giving up and the cast switch being turned off all end up here.
+pub async fn end_session(state: &AppState, reason: &'static str) {
     let (sender, display) = {
         let mut session = state.cast.lock().await;
         // Cleared here rather than only in `deactivate_display`, which returns
@@ -505,7 +567,7 @@ pub async fn end_session(state: &AppState) {
     for peer in [sender, display].into_iter().flatten() {
         let _ = peer.tx.send(Message::Close(None));
     }
-    deactivate_display(state).await;
+    deactivate_display(state, reason).await;
 }
 
 // -------------------------------------------------------------- watchdogs
@@ -521,7 +583,7 @@ fn watch_sender_grace(state: AppState, epoch: u64, grace: Duration) {
         };
         if stale {
             info!("Cast: sender did not return, ending session");
-            end_session(&state).await;
+            end_session(&state, "grace").await;
         }
     });
 }
@@ -544,7 +606,7 @@ fn watch_display_arrival(state: AppState, epoch: u64) {
             if let Some(tx) = sender_tx {
                 let _ = tx.send(error_frame("display", "Das Display hat sich nicht gemeldet."));
             }
-            end_session(&state).await;
+            end_session(&state, "grace").await;
         }
     });
 }
@@ -559,7 +621,7 @@ fn watch_pairing_expiry(state: AppState, epoch: u64) {
         };
         if unused {
             info!("Cast: pairing code expired unused");
-            end_session(&state).await;
+            end_session(&state, "grace").await;
         }
     });
 }
@@ -922,7 +984,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             // mistyping an address must not cost the guest their slot and a
             // fresh claim. Releasing first keeps `previous_override` pointing at
             // the playlist rather than at the guest's own previous page.
-            deactivate_display(state).await;
+            deactivate_display(state, "replaced").await;
             activate_display(state, Showing::Page { url: parsed.clone(), scroll }).await;
 
             let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
@@ -938,7 +1000,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
         Some("stop") => {
             info!("Cast: {:?} asked to stop", role);
             let state = state.clone();
-            tokio::spawn(async move { end_session(&state).await });
+            tokio::spawn(async move { end_session(&state, "sender").await });
             false
         }
         other => {
@@ -1363,7 +1425,7 @@ pub async fn control_audio(
 
 /// Operator override: cut the cast short and put the playlist back.
 pub async fn stop_cast(State(state): State<AppState>) -> impl IntoResponse {
-    end_session(&state).await;
+    end_session(&state, "operator").await;
     StatusCode::NO_CONTENT
 }
 

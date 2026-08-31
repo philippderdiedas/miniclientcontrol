@@ -294,6 +294,11 @@ pub struct PlaylistItemWithAsset {
     pub mimetype: Option<String>,
     #[sqlx(default)]
     pub asset_duration: Option<i64>,
+
+    /// The asset's original upload name, which is what a webhook calls the item.
+    /// `local_path` is a sanitised derivative and reads badly in a notification.
+    #[sqlx(default)]
+    pub filename: Option<String>,
 }
 
 // --- Application State ---
