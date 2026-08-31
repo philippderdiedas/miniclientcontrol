@@ -262,7 +262,7 @@ target and never reaches the control loop.
 ### The dependency
 
 ```toml
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json"] }
 ```
 
 Pure Rust, `serde` its only required dependency. **The plan verifies it with
