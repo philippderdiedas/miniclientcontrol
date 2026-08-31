@@ -173,14 +173,25 @@ pub fn catalogue() -> Vec<Value> {
 /// hard-code the `data.` prefix or the envelope fields itself -- both are
 /// facts about `envelope()` and `render()` in `mod.rs`, not about the UI.
 ///
-/// `test` is deliberately not offered here: minijinja renders a bare boolean
-/// Jinja2-style (`True`), which is invalid JSON, so a placeholder chip for it
-/// would hand the operator something that only works with `| tojson`.
+/// `placeholder_suffix` is `| tojson`, and it belongs on **every** field, not
+/// just the boolean one. A number happens to render as valid bare JSON and a
+/// string breaks only on quoting, but "happens to" is exactly the drift this
+/// endpoint exists to prevent, so the rule is published once rather than left
+/// for the UI to special-case per field type. A chip is composed as
+/// `{{ ` + `field_prefix` + field + `placeholder_suffix` + ` }}`, e.g.
+/// `{{ data.reconnect | tojson }}`.
+///
+/// `test` is deliberately not offered here: `envelope()` only ever sets
+/// `"test"` when it is `true`, so under `UndefinedBehavior::Lenient` a
+/// `{{ test }}` chip would render as the empty string on every real
+/// (non-test) delivery -- a placeholder that looks fine in the test send and
+/// silently disappears from every delivery that matters.
 fn events_payload() -> Value {
     json!({
         "events": catalogue(),
         "envelope": ["event", "timestamp", "device"],
         "field_prefix": "data.",
+        "placeholder_suffix": " | tojson",
     })
 }
 
@@ -294,6 +305,14 @@ async fn list(State(state): State<AppState>) -> Response {
 }
 
 async fn create(State(state): State<AppState>, Json(payload): Json<WebhookRequest>) -> Response {
+    // Trimmed once here so the stored row and every later log line
+    // (`Webhook '{name}'`) match what `validate` already treated as the name --
+    // otherwise "  Foo  " passes the emptiness check and then sits in the
+    // database and the logs with its padding intact.
+    let payload = WebhookRequest {
+        name: payload.name.trim().to_string(),
+        ..payload
+    };
     if let Err(message) = validate(
         &payload.name,
         &payload.url,
@@ -333,6 +352,11 @@ async fn update(
     Path(id): Path<i64>,
     Json(payload): Json<WebhookRequest>,
 ) -> Response {
+    // See `create`: trim before storing, not just before validating.
+    let payload = WebhookRequest {
+        name: payload.name.trim().to_string(),
+        ..payload
+    };
     if let Err(message) = validate(
         &payload.name,
         &payload.url,
@@ -623,6 +647,16 @@ mod tests {
         let payload = events_payload();
         assert_eq!(payload["envelope"], json!(["event", "timestamp", "device"]));
         assert_eq!(payload["field_prefix"], "data.");
+        assert_eq!(payload["placeholder_suffix"], " | tojson");
+
+        // The composed form a chip actually inserts, pinned exactly: this is
+        // the one place that proves `field_prefix` + field + `placeholder_suffix`
+        // produces something minijinja renders as valid JSON for a boolean,
+        // which a bare `{{ data.reconnect }}` does not.
+        let field_prefix = payload["field_prefix"].as_str().unwrap();
+        let placeholder_suffix = payload["placeholder_suffix"].as_str().unwrap();
+        let placeholder = format!("{{{{ {field_prefix}reconnect{placeholder_suffix} }}}}");
+        assert_eq!(placeholder, "{{ data.reconnect | tojson }}");
 
         let events = payload["events"].as_array().unwrap();
         let names: Vec<&str> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
@@ -655,7 +689,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|e| e["name"] != "test"),
-            "`test` renders Jinja2-style as a bare boolean and must not be offered as a placeholder"
+            "`test` is only ever present when true, so a lenient-undefined chip for it would render empty on every real delivery"
         );
     }
 
@@ -670,11 +704,24 @@ mod tests {
                 ALL_EVENTS.contains(&name),
                 "{name} is in the catalogue but not in ALL_EVENTS"
             );
+            assert!(
+                !entry["description"].as_str().unwrap().is_empty(),
+                "{name} has a blank description, which is the only text the UI shows for it"
+            );
         }
 
         // Every event's actual `data()` keys match what the catalogue
         // advertises, in both directions -- a field rename in `mod.rs` that
         // forgets to update this file must fail a test, not ship silently.
+        //
+        // `cast.ended` and `guest_page.ended` have identical `data()` shapes
+        // (`{reason, duration_secs}`), so the field comparison alone cannot
+        // catch two arms of `sample_event` being swapped -- it would still
+        // agree in both directions while a test send reported the wrong
+        // event. The `.name()` assertion below is what catches that, and it
+        // is also what makes the `_ =>` fallback arm in `sample_event`
+        // honest: a new `ALL_EVENTS` entry with no matching arm falls into
+        // `ItemChanged` and now fails loudly here instead of shipping quietly.
         for name in ALL_EVENTS {
             let entry = catalogue
                 .iter()
@@ -686,7 +733,13 @@ mod tests {
                 .iter()
                 .map(|f| f.as_str().unwrap().to_string())
                 .collect();
-            let actual: std::collections::BTreeSet<String> = sample_event(name)
+            let sample = sample_event(name);
+            assert_eq!(
+                sample.name(),
+                name,
+                "sample_event({name}) built the wrong Event -- a test send for this event would report the wrong name"
+            );
+            let actual: std::collections::BTreeSet<String> = sample
                 .data()
                 .as_object()
                 .unwrap()
