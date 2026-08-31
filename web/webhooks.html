@@ -135,10 +135,15 @@
     };
 
     const insertAtCursor = (textarea, snippet) => {
-      const start = textarea.selectionStart ?? textarea.value.length;
-      const end = textarea.selectionEnd ?? textarea.value.length;
-      // setRangeText inserts at the selection and preserves the native undo stack;
-      // assigning textarea.value wipes it, so Ctrl-Z could not take a chip back.
+      // No `??` fallback: selectionStart is null only for input types where
+      // selection does not apply, never for a textarea, so a never-focused one
+      // reports value.length -- the `value` setter moves the caret to the end.
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      // setRangeText is the scoped, spec'd insertion: it cannot desynchronise
+      // selection from value the way assigning textarea.value can. Whether it
+      // also registers a browser undo transaction is unmeasured and not a spec
+      // guarantee -- do not claim it does.
       textarea.setRangeText(snippet, start, end, 'end');
       textarea.focus();
       textarea.dispatchEvent(new Event('input'));
@@ -262,11 +267,20 @@
         flash(feedback, 'Speichern…', false);
         const payload = collect();
         const target = state.id === null ? '/api/webhooks' : `/api/webhooks/${state.id}`;
-        const response = await fetch(target, {
-          method: state.id === null ? 'POST' : 'PUT',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
+        let response;
+        try {
+          response = await fetch(target, {
+            method: state.id === null ? 'POST' : 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch (_) {
+          // The read side reports an unreachable server; the write side has to
+          // as well, or a save would end with the progress message quietly
+          // clearing itself and nothing said. The card keeps its dirty mark.
+          flash(feedback, 'Server nicht erreichbar.', true);
+          return;
+        }
         if (!response.ok) {
           flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
           return;
@@ -291,11 +305,17 @@
         // nothing checked, the field is omitted and the server applies its own
         // default (TestRequest.event is Option<String> with #[serde(default)]).
         const event = [...state.events][0];
-        const response = await fetch(`/api/webhooks/${state.id}/test`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(event ? { event } : {}),
-        });
+        let response;
+        try {
+          response = await fetch(`/api/webhooks/${state.id}/test`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(event ? { event } : {}),
+          });
+        } catch (_) {
+          flash(feedback, 'Server nicht erreichbar.', true);
+          return;
+        }
         const data = await response.json().catch(() => ({}));
         flash(feedback, data.outcome || data.error || 'Keine Antwort.', !data.ok);
       };
@@ -316,7 +336,11 @@
           dirty.delete(state.id);
         }
         card.remove();
-        if (cards.size === 0) document.getElementById('emptyHint').hidden = false;
+        // Counted from the DOM, not from `cards`: that map holds only saved
+        // targets, so an unsaved new card would otherwise sit beside the
+        // "nothing configured" hint.
+        document.getElementById('emptyHint').hidden =
+          document.getElementById('list').children.length > 0;
       };
 
       card.append(
