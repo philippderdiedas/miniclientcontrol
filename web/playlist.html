@@ -47,6 +47,17 @@
       background: var(--accent); display: inline-block; margin-right: .35rem;
     }
 
+    /* Scopes everything below it to one playlist. Not sticky like the status
+       bar -- it changes rarely, and two sticky bars would eat too much of a
+       small display's viewport. */
+    .playlistbar {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: .8rem;
+    }
+
     .block {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -117,6 +128,15 @@
   <h1>Playlist</h1>
   <nav><a href="/admin.html">Verwaltung</a> · <a href="/assets.html">Assets</a></nav>
 
+  <div class="playlistbar">
+    <strong>Playlist</strong>
+    <select id="playlistPick"></select>
+    <button id="playlistNewBtn" type="button">Neu</button>
+    <button id="playlistRenameBtn" type="button">Umbenennen</button>
+    <button id="playlistDeleteBtn" type="button" class="danger">Löschen</button>
+    <span class="feedback" id="playlistFeedback"></span>
+  </div>
+
   <div class="statusbar">
     <strong id="nowPlaying">läuft: –</strong>
     <span id="overrideState" class="muted"></span>
@@ -179,6 +199,7 @@
 
   <div id="list"></div>
   <p class="muted" id="emptyHint" hidden>Noch keine Items.</p>
+  <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
   <script>
     // Every node here is built with createElement/textContent. Filenames and URLs are
@@ -424,6 +445,104 @@
     const dirty = new Set();      // cards with unsaved edits, kept across reloads
     const cardNodes = new Map();  // id -> rendered card element
 
+    // --- playlist selector ------------------------------------------------------
+    // The selected playlist scopes everything below. Kept in the URL so a
+    // reload, or a link an operator sends a colleague, lands on the same one.
+    let currentPlaylist = null;
+
+    function setPlaylistParam(id) {
+      const params = new URLSearchParams(location.search);
+      if (id) params.set('playlist', id);
+      else params.delete('playlist');
+      const query = params.toString();
+      history.replaceState(null, '', location.pathname + (query ? `?${query}` : ''));
+    }
+
+    async function loadPlaylists() {
+      const lists = await fetch('/api/playlists').then((r) => r.json()).catch(() => []);
+      const pick = document.getElementById('playlistPick');
+      pick.replaceChildren();
+      for (const list of lists) {
+        pick.append(el('option', {
+          value: String(list.id),
+          text: `${list.name} (${list.items})`,
+        }));
+      }
+      const wanted = new URLSearchParams(location.search).get('playlist');
+      currentPlaylist = (wanted && lists.some((l) => String(l.id) === wanted))
+        ? wanted
+        : (lists[0] ? String(lists[0].id) : null);
+      if (currentPlaylist) pick.value = currentPlaylist;
+
+      // An item form with nowhere to put the item is a form that produces a 400
+      // for a reason the operator cannot see, so it is hidden rather than shown
+      // disabled.
+      const empty = lists.length === 0;
+      document.getElementById('addBlock').hidden = empty;
+      document.getElementById('list').hidden = empty;
+      document.getElementById('noPlaylistHint').hidden = !empty;
+      document.getElementById('playlistRenameBtn').disabled = empty;
+      document.getElementById('playlistDeleteBtn').disabled = empty;
+
+      return lists;
+    }
+
+    document.getElementById('playlistPick').addEventListener('change', async (e) => {
+      currentPlaylist = e.target.value || null;
+      setPlaylistParam(currentPlaylist);
+      await loadPlaylist();
+      await refreshStatus();
+    });
+
+    document.getElementById('playlistNewBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      const name = prompt('Name der neuen Playlist:');
+      if (name === null) return;
+      const res = await fetch('/api/playlists', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) { flash(feedback, await readError(res, 'Anlegen fehlgeschlagen'), true); return; }
+      const { id } = await res.json();
+      setPlaylistParam(String(id));
+      await loadPlaylists();
+      flash(feedback, 'angelegt ✓');
+      await loadPlaylist();
+    });
+
+    document.getElementById('playlistRenameBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      if (!currentPlaylist) return;
+      const pick = document.getElementById('playlistPick');
+      const currentName = pick.selectedOptions[0] ? pick.selectedOptions[0].text.replace(/\s\(\d+\)$/, '') : '';
+      const name = prompt('Neuer Name:', currentName);
+      if (name === null) return;
+      const res = await fetch(`/api/playlists/${currentPlaylist}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) { flash(feedback, await readError(res, 'Umbenennen fehlgeschlagen'), true); return; }
+      flash(feedback, 'umbenannt ✓');
+      await loadPlaylists();
+    });
+
+    document.getElementById('playlistDeleteBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      if (!currentPlaylist) return;
+      if (!confirm('Diese Playlist wirklich löschen?')) return;
+      const res = await fetch(`/api/playlists/${currentPlaylist}`, { method: 'DELETE' });
+      // The server counts the items and this is its own message -- do not
+      // pre-empt it here, or the page would have to count them again.
+      if (!res.ok) { flash(feedback, await readError(res, 'Löschen fehlgeschlagen'), true); return; }
+      flash(feedback, 'gelöscht ✓');
+      setPlaylistParam(null);
+      await loadPlaylists();
+      setPlaylistParam(currentPlaylist);
+      await loadPlaylist();
+    });
+
     async function loadAssets() {
       const res = await fetch('/api/assets');
       assets = res.ok ? await res.json() : [];
@@ -593,9 +712,19 @@
     }
 
     async function loadPlaylist() {
-      const res = await fetch('/api/playlist');
-      items = res.ok ? await res.json() : [];
       const list = document.getElementById('list');
+      // No playlist selected (none exist, or none picked yet): omitting
+      // `playlist_id` would fetch every item across every playlist, which is
+      // the legacy behaviour this page must never rely on.
+      if (!currentPlaylist) {
+        items = [];
+        list.textContent = '';
+        cardNodes.clear();
+        document.getElementById('emptyHint').hidden = true;
+        return;
+      }
+      const res = await fetch('/api/playlist?playlist_id=' + currentPlaylist);
+      items = res.ok ? await res.json() : [];
 
       // Cards with unsaved edits are carried over instead of re-rendered, so a save or
       // reorder elsewhere on the page does not silently throw away typed-in values.
@@ -656,6 +785,7 @@
       const feedback = document.getElementById('addFeedback');
       const assetVal = document.getElementById('addAsset').value;
       const urlVal = document.getElementById('addUrl').value.trim();
+      if (!currentPlaylist) { flash(feedback, 'Keine Playlist ausgewählt.', true); return; }
       if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
       if (assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
 
@@ -668,6 +798,7 @@
         start_date: toIso(document.getElementById('addStart').value),
         end_date: toIso(document.getElementById('addEnd').value),
         scroll_config: addScroll.read(),
+        playlist_id: Number(currentPlaylist),
       };
 
       const res = await fetch('/api/playlist', {
@@ -715,12 +846,14 @@
     });
 
     document.getElementById('reloadBtn').addEventListener('click', async () => {
+      await loadPlaylists();
       await loadAssets();
       await loadPlaylist();
       await refreshStatus();
     });
 
     (async function init() {
+      await loadPlaylists();
       await loadAssets();
       await loadPlaylist();
       await refreshStatus();
