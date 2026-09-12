@@ -23,6 +23,20 @@ LAN = subprocess.run(["python3", "-c",
 procs = []
 
 
+
+def a_playlist(port=None):
+    """The playlist items get added to, created on first use.
+
+    An item belongs to a playlist since playlists became objects, and a fresh
+    database has none -- the one-time backfill only fires for a database that
+    already had items. Without this the POST fails deserialisation and no item
+    is created, which reads as "the loop never picked it up".
+    """
+    rows = http("GET", "/api/playlists", port=port)[1] or []
+    if rows:
+        return rows[0]["id"]
+    return http("POST", "/api/playlists", {"name": "Test"}, port=port)[1]["id"]
+
 def spawn(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     procs.append(p)
@@ -217,7 +231,8 @@ async def settings_flow():
               and f"127.0.0.1:{CAST_HTTP}" not in json.dumps(payload), payload)
 
         print("\n[41b] a playlist item can add a layer of its own")
-        http("POST", "/api/playlist", {"url": "http://127.0.0.1:1/x", "duration": 60})
+        http("POST", "/api/playlist",
+             {"url": "http://127.0.0.1:1/x", "duration": 60, "playlist_id": a_playlist()})
         items = http("GET", "/api/playlist")[1]
         item_id = items[-1]["id"]
         status, _ = http("PUT", f"/api/playlist/{item_id}",
@@ -458,7 +473,9 @@ async def browser_flow():
         # Served by the controller itself: the device is often offline, and a test
         # that needs the internet fails for the wrong reason.
         page_url = f"http://127.0.0.1:{HTTP}/empty_playlist.html"
-        http("POST", "/api/playlist", {"url": page_url, "duration": 600}, port=HTTP)
+        http("POST", "/api/playlist",
+             {"url": page_url, "duration": 600, "playlist_id": a_playlist(port=HTTP)},
+             port=HTTP)
         item = wait_for(lambda: http("GET", "/api/control/current", port=HTTP)[1].get("item_id"), 40)
         check("the loop picked the item up", item is not None)
 

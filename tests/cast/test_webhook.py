@@ -241,9 +241,24 @@ def add_item(url="http://127.0.0.1:9/x", duration=LONG):
     back. The URL is never reachable; the loop navigates, fails, and moves on,
     which is enough -- `item_changed` fires before the navigation.
     """
-    http("POST", "/api/playlist", {"url": url, "duration": duration})
+    http("POST", "/api/playlist",
+         {"url": url, "duration": duration, "playlist_id": a_playlist()})
     rows = http("GET", "/api/playlist")[1] or []
     return rows[-1]["id"] if rows else None
+
+
+def a_playlist():
+    """The playlist items get added to, created on first use.
+
+    An item belongs to a playlist since playlists became objects, and a fresh
+    database has none -- the one-time backfill only fires for a database that
+    already had items. Without this every POST here would fail deserialisation
+    and no item would ever be created, which reads as "the loop never ran".
+    """
+    rows = http("GET", "/api/playlists")[1] or []
+    if rows:
+        return rows[0]["id"]
+    return http("POST", "/api/playlists", {"name": "Test"})[1]["id"]
 
 
 AUTH = ("ops", "hunter2!!")
