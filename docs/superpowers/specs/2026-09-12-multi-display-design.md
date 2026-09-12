@@ -282,7 +282,7 @@ display-scoped, which is why this belongs in the envelope rather than in each
 event's `data`. `api::catalogue()`'s `envelope` array gains it, so the admin
 page's placeholder chips offer it without being told — the catalogue is the only
 source, as
-[CLAUDE.md](../../../CLAUDE.md#webhooks-srcwebhook-1) requires.
+[CLAUDE.md](../../../CLAUDE.md#webhooks-srcwebhook) requires.
 
 ## Not in scope
 
