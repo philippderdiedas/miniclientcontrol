@@ -279,18 +279,31 @@ async fn main() -> Result<()> {
     let mdns_args = state.args.clone();
     tokio::spawn(async move { mdns::supervise(mdns_args).await });
 
-    // Keep a browser alive on the CDP port. Skipped when something else manages
-    // it (an existing sway `exec` line), which the supervisor detects by finding
-    // the port already answering.
+    // Keep a browser alive on each display's CDP port. Skipped when something
+    // else manages them (an existing sway `exec` line), which the supervisor
+    // detects by finding the port already answering.
     if !args.no_launch_browser {
-        let browser_args = state.args.clone();
-        // One display for now, so the primary is the only one; Task 6 spawns a
-        // supervisor per declared display.
-        let pid_slot = state.primary().browser_pid.clone();
-        tokio::spawn(async move { chromium::supervise(browser_args, pid_slot).await });
+        for (config, display) in configured.iter().zip(state.displays.iter()) {
+            let browser_args = state.args.clone();
+            let config = config.clone();
+            let pid_slot = display.browser_pid.clone();
+            tokio::spawn(async move { chromium::supervise(browser_args, config, pid_slot).await });
+        }
     }
 
     // 4. Spawn Browser Controller Task
+    //
+    // Still one loop, so only the primary display is actually played. Every
+    // declared display gets a browser above, which makes the startup banner's
+    // count true of the browsers but not yet of playback -- said out loud here,
+    // because a screen sitting on `about:blank` with no explanation is exactly
+    // the silent-black-panel failure `display::configure` refuses to allow.
+    if state.displays.len() > 1 {
+        tracing::warn!(
+            "Only display '{}' is played for now; the others have a browser but no playlist.",
+            state.primary().name
+        );
+    }
     let browser_state = state.clone();
     tokio::spawn(async move {
         browser_loop(browser_state).await;

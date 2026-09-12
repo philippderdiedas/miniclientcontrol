@@ -20,16 +20,10 @@ pub struct DisplayConfig {
     pub cdp_url: String,
     /// Becomes the Wayland `app_id`, which is how the window manager tells two
     /// of our windows apart and puts each on the right output.
-    ///
-    /// No reader yet: `chromium::spawn` still derives both of these from `Args`,
-    /// and the task that gives each display its own browser is what makes them
-    /// live. Allowed by field rather than for the module, so everything else
-    /// here keeps its dead-code check.
-    ///
-    /// REMOVE these two allows in the commit that first reads them.
-    #[allow(dead_code)]
     pub window_class: String,
-    #[allow(dead_code)]
+    /// One profile per display. Two Chromiums sharing a profile directory
+    /// corrupt it, so this is the field that makes several browsers possible at
+    /// all.
     pub user_data_dir: PathBuf,
 }
 
@@ -69,6 +63,20 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
             window_class: crate::chromium::window_class(args, port),
             user_data_dir: crate::chromium::user_data_dir(args, port),
         }]);
+    }
+
+    // Both flags pin one value for the whole process, which with several screens
+    // would point every browser at the same profile directory and give every
+    // window the same `app_id`. A shared profile is not a cosmetic clash: two
+    // Chromiums on one corrupt it.
+    if args.display.len() > 1
+        && (args.chromium_class.is_some() || args.chromium_user_data_dir.is_some())
+    {
+        return Err(
+            "--chromium-class und --chromium-user-data-dir gelten für alle Displays und \
+             würden sie kollidieren lassen. Mit mehreren --display weglassen."
+                .to_string(),
+        );
     }
 
     let mut out: Vec<DisplayConfig> = Vec::new();
@@ -171,6 +179,24 @@ mod tests {
         // through this, so which one is primary is not an implementation detail.
         let configured = configure(&args_with(vec!["foyer".into(), "werkstatt".into()])).unwrap();
         assert_eq!(configured[0].name, "foyer");
+    }
+
+    #[test]
+    fn a_pinned_class_or_profile_collides_with_several_displays() {
+        let mut args = args_with(vec!["a".into(), "b".into()]);
+        args.chromium_class = Some("fest".into());
+        assert!(configure(&args).is_err());
+
+        let mut args = args_with(vec!["a".into(), "b".into()]);
+        args.chromium_user_data_dir = Some(std::path::PathBuf::from("/tmp/fest"));
+        assert!(configure(&args).is_err());
+
+        // One display is fine: there is nothing to collide with, and this is the
+        // deployment that has always been allowed to pin them.
+        let mut single = args_with(vec![]);
+        single.chromium_class = Some("fest".into());
+        assert!(configure(&single).is_ok());
+        assert_eq!(configure(&single).unwrap()[0].window_class, "fest");
     }
 
     #[test]
