@@ -15,6 +15,7 @@ browser would silently test only the four events that come from an HTTP handler,
 and [59] would have nothing to stall.
 """
 import asyncio
+import atexit
 import json
 import os
 import re
@@ -34,13 +35,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsclient
-from test_cast import Server, http, check, failures, SP, claim, HTTP as HTTP_PORT
+from test_cast import Server, http, ws, check, failures, SP, claim, HTTP as HTTP_PORT
 
 CHROME = "/usr/bin/google-chrome-stable"
 CDP_PORT = 9242
 CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 PROFILE = f"{SP}/webhook-profile"
 CERT = f"{SP}/cert.pem"
+# Discard: nothing listens there, ever. A case that wants no control loop has to
+# say so, because `Server`'s own default is the standard CDP port 9222 -- and a
+# stray Chrome on that port (the one tests/cast/README.md warns about) would
+# attach, run the loop, and inject `display.connected` and `playlist_empty`
+# deliveries into receivers that are counting.
+DEAD_CDP = "http://127.0.0.1:9"
 
 # Long enough that an item fires `playback.item_changed` exactly once and then
 # sits there, so a count is a count and not a race with the playlist looping.
@@ -81,6 +88,19 @@ class Display(Server):
 
     def __init__(self, **flags):
         flags.setdefault("cdp_url", CDP_URL)
+        super().__init__(**flags)
+
+
+class Alone(Server):
+    """A controller with nowhere to attach, for the cases that need no playback.
+
+    Pointing it at `DEAD_CDP` is not tidiness: the plain `Server` default is CDP
+    port 9222, and a browser left running there makes the control loop start and
+    deliver events these cases are not expecting.
+    """
+
+    def __init__(self, **flags):
+        flags.setdefault("cdp_url", DEAD_CDP)
         super().__init__(**flags)
 
 
@@ -198,6 +218,9 @@ def _combined_pem():
     handle, path = tempfile.mkstemp(suffix=".pem")
     with os.fdopen(handle, "w") as fh:
         fh.write(cert + key)
+    # It holds the cast listener's private key. Leaving a copy of that in the
+    # system temp directory after every run is not something a test gets to do.
+    atexit.register(lambda: os.path.exists(path) and os.remove(path))
     _pem_cache.append(path)
     return path
 
@@ -257,6 +280,28 @@ async def until_async(predicate, timeout=20.0):
 
 def events_of(receiver):
     return [b.get("event") for b in receiver.bodies()]
+
+
+# The three helpers below exist so that a wait which failed produces a FAIL line
+# and not an IndexError: a traceback escaping `main` would skip every remaining
+# case *and* the failure summary, and would read as a crash rather than a test
+# telling you what went wrong.
+def first_hook():
+    rows = hooks()
+    return rows[0] if rows else {}
+
+
+def last_result(name=None):
+    rows = [h for h in hooks() if name is None or h.get("name") == name]
+    return (rows[0].get("last_result") if rows else None) or {}
+
+
+def body_of(receiver, event):
+    """The first delivered body for `event`, or `{}` if there is none."""
+    for payload in receiver.bodies():
+        if payload.get("event") == event:
+            return payload
+    return {}
 
 
 async def case_52():
@@ -343,9 +388,11 @@ async def case_55():
 
 
 async def case_56():
-    print("\n[56] credentials in a playlist URL never reach a receiver")
+    print("\n[56] credentials in a URL never reach a receiver, at either emit site")
     with Receiver() as receiver, Display():
-        add_hook(receiver.url, ["playback.item_changed"])
+        # Two emit sites, one receiver: redaction is a property of every place
+        # that puts an operator-supplied URL on the wire, not of one of them.
+        add_hook(receiver.url, ["playback.item_changed", "override.set"])
         add_item(url="http://bob:hunter2@127.0.0.1:9/panel")
         check("a request arrived", receiver.wait(1), receiver.count())
         if receiver.count():
@@ -356,6 +403,20 @@ async def case_56():
             payload = receiver.bodies()[0]
             check("the title is redacted too, not only the url",
                   "hunter2" not in str(payload.get("data", {}).get("title")), payload)
+
+        before = receiver.count()
+        http("POST", "/api/override", {"url": "http://bob:hunter2@127.0.0.1:9/panel"})
+        check("the override was announced",
+              until(lambda: "override.set" in events_of(receiver)), events_of(receiver))
+        if receiver.count() > before:
+            raw = "".join(r[3] for r in receiver.requests[before:])
+            check("an override URL travels without its password",
+                  "hunter2" not in raw, raw)
+            check("and without its username", "bob" not in raw, raw)
+            check("but with its host",
+                  "127.0.0.1:9/panel" in str(body_of(receiver, "override.set")),
+                  body_of(receiver, "override.set"))
+        http("DELETE", "/api/override")
 
 
 async def case_57():
@@ -373,10 +434,10 @@ async def case_57():
               until(lambda: any(h["name"] == "Broken" and h["last_result"]
                                 and not h["last_result"]["ok"] for h in hooks())),
               [h.get("last_result") for h in hooks()])
-        recorded = [h for h in hooks() if h["name"] == "Broken"][0]["last_result"]
-        check("the record names the status", "500" in (recorded or {}).get("outcome", ""),
+        recorded = last_result("Broken")
+        check("the record names the status", "500" in recorded.get("outcome", ""),
               recorded)
-        check("and is not flagged as a test", (recorded or {}).get("test") is False,
+        check("and is not flagged as a test", recorded.get("test") is False,
               recorded)
 
 
@@ -391,13 +452,12 @@ async def case_58():
             check("the redirect was not followed", elsewhere.count() == 0,
                   elsewhere.requests)
             check("the failure was recorded",
-                  until(lambda: (hooks()[0].get("last_result") or {}).get("ok") is False),
-                  hooks())
-            result = hooks()[0].get("last_result")
+                  until(lambda: last_result().get("ok") is False), hooks())
+            result = last_result()
             check("the failure names the status",
-                  "301" in (result or {}).get("outcome", ""), result)
+                  "301" in result.get("outcome", ""), result)
             check("and says it was not followed",
-                  "not followed" in (result or {}).get("outcome", ""), result)
+                  "not followed" in result.get("outcome", ""), result)
 
 
 async def case_59():
@@ -436,7 +496,7 @@ async def case_59():
 
 async def case_60():
     print("\n[60] the test send delivers for real and says so")
-    with Receiver() as receiver, Server():
+    with Receiver() as receiver, Alone():
         _, hook_id = add_hook(receiver.url, ["cast.started"])
         status, data = http("POST", f"/api/webhooks/{hook_id}/test",
                             {"event": "cast.started"})
@@ -448,17 +508,19 @@ async def case_60():
             check("it is flagged as a test", payload.get("test") is True, payload)
             check("it is the event asked for",
                   payload.get("event") == "cast.started", payload)
-        result = hooks()[0].get("last_result")
-        check("the record says it was a test", (result or {}).get("test") is True, result)
+        check("the record says it was a test", last_result().get("test") is True,
+              last_result())
 
         # The field is optional and the server picks.
         status, data = http("POST", f"/api/webhooks/{hook_id}/test", {})
         check("the event may be omitted", status == 200 and data.get("ok"), (status, data))
         check("a second request arrived", receiver.wait(2), receiver.count())
-        check("the server chose a real event",
-              receiver.bodies()[1].get("event") in
-              [e["name"] for e in http("GET", "/api/webhooks/events")[1]["events"]],
-              receiver.bodies()[1])
+        if receiver.count() >= 2:
+            catalogue = http("GET", "/api/webhooks/events")[1] or {}
+            check("the server chose a real event",
+                  receiver.bodies()[1].get("event") in
+                  [e["name"] for e in catalogue.get("events", [])],
+                  receiver.bodies()[1])
 
         status, data = http("POST", f"/api/webhooks/{hook_id}/test", {"event": "nope"})
         check("an unknown event is refused", status == 400, (status, data))
@@ -468,7 +530,7 @@ async def case_60():
 
 async def case_61():
     print("\n[61] validation refuses what cannot work")
-    with Server():
+    with Alone():
         def refused(what, body):
             status, data = http("POST", "/api/webhooks", body)
             check(what, status == 400 and isinstance((data or {}).get("error"), str),
@@ -494,12 +556,15 @@ async def case_61():
         check("and its name is stored trimmed",
               [h["name"] for h in hooks()] == ["Padded"], hooks())
         check("a target with no events is allowed (it just never fires)",
-              hooks()[0]["events"] == [], hooks())
+              first_hook().get("events") == [], hooks())
 
 
 async def case_62():
     print("\n[62] the catalogue describes what is actually delivered")
-    with Receiver() as receiver, Server():
+    # `Alone`, not `Server`: the assertions below pair the nth test send with the
+    # nth delivery, and a control loop attached to a stray browser would slip a
+    # `display.connected` in between.
+    with Receiver() as receiver, Alone():
         status, cat = http("GET", "/api/webhooks/events")
         check("the catalogue is served", status == 200 and "events" in (cat or {}),
               (status, cat))
@@ -513,14 +578,18 @@ async def case_62():
         check('"test" is not offered as a placeholder', "test" not in cat["envelope"], cat)
 
         _, hook_id = add_hook(receiver.url, names, name="All")
-        for index, entry in enumerate(cat["events"]):
+        for entry in cat["events"]:
+            before = receiver.count()
             status, data = http("POST", f"/api/webhooks/{hook_id}/test",
                                 {"event": entry["name"]})
-            got = receiver.wait(index + 1)
-            if not got:
+            if not receiver.wait(before + 1):
                 check(f"{entry['name']} was delivered", False, data)
                 continue
-            payload = receiver.bodies()[index]
+            # Located by name rather than trusted to be the next one along, so a
+            # stray delivery makes this case say what it found instead of
+            # comparing the wrong pair of field lists.
+            payload = next((b for b in receiver.bodies()[before:]
+                            if b.get("event") == entry["name"]), {})
             check(f"{entry['name']} carries exactly the fields the catalogue lists",
                   sorted(payload.get("data", {}).keys()) == sorted(entry["fields"]),
                   (entry["fields"], payload.get("data")))
@@ -534,31 +603,32 @@ async def case_62():
         http("POST", f"/api/webhooks/{hook_id}/test", {"event": "display.connected"})
         check("a composed chip renders as JSON", receiver.wait(before + 1), receiver.count())
         if receiver.count() > before:
+            rendered = receiver.bodies()[before]
             check("and carries the boolean unquoted",
-                  receiver.bodies()[before].get("r") in (True, False),
-                  receiver.bodies()[before])
+                  rendered.get("r") in (True, False), rendered)
 
 
 async def case_63():
     print("\n[63] the CRUD surface round-trips, and the method reaches the wire")
-    with Receiver() as receiver, Server():
+    with Receiver() as receiver, Alone():
         status, hook_id = add_hook(receiver.url, ["cast.started"], name="One")
         check("create answers with an id", status == 200 and isinstance(hook_id, int),
               (status, hook_id))
-        row = hooks()[0]
+        row = first_hook()
         check("the defaults are POST, enabled, no template, verified TLS",
-              (row["method"], row["is_enabled"], row["body"], row["insecure_tls"])
-              == ("POST", True, None, False), row)
-        check("a target that never fired has no result", row["last_result"] is None, row)
+              (row.get("method"), row.get("is_enabled"), row.get("body"),
+               row.get("insecure_tls")) == ("POST", True, None, False), row)
+        check("a target that never fired has no result",
+              row.get("last_result", "missing") is None, row)
 
         status, _ = http("PUT", f"/api/webhooks/{hook_id}",
                          {"name": "Two", "url": receiver.url, "method": "PATCH",
                           "events": ["cast.ended"], "headers": {"X-B": "{{ event }}"},
                           "body": "{}", "is_enabled": True})
         check("update answers ok", status == 200, status)
-        row = hooks()[0]
+        row = first_hook()
         check("every field came back changed",
-              (row["name"], row["method"], row["events"], row["body"])
+              (row.get("name"), row.get("method"), row.get("events"), row.get("body"))
               == ("Two", "PATCH", ["cast.ended"], "{}"), row)
 
         http("POST", f"/api/webhooks/{hook_id}/test", {"event": "cast.ended"})
@@ -584,10 +654,14 @@ async def case_64():
         check("both arrive with an empty playlist", receiver.wait(2), receiver.bodies())
         seen = events_of(receiver)
         check("the browser announced itself", "display.connected" in seen, seen)
+        # Only the first-connection half of `reconnect` is exercised. The other
+        # half (`connected_before` in browser.rs) needs the CDP connection to
+        # drop and come back, which means killing and restarting the browser
+        # mid-case -- slower and markedly more fragile than what it would buy.
+        # This case is not proof that `reconnect: true` ever happens.
         check("and not as a reconnect",
-              [b for b in receiver.bodies()
-               if b["event"] == "display.connected"][0]["data"]["reconnect"] is False,
-              receiver.bodies())
+              body_of(receiver, "display.connected").get("data", {})
+              .get("reconnect") is False, receiver.bodies())
         check("the idle screen announced itself", "playback.playlist_empty" in seen, seen)
         # The idle branch re-runs every five seconds. Edge-triggered means it
         # says so once, not every pass.
@@ -608,8 +682,12 @@ async def case_64():
 
 
 async def case_65():
-    print("\n[65] a cast announces itself where the sender registers")
-    with Receiver() as receiver, Server():
+    print("\n[65] a cast announces its whole life cycle")
+    # In the default auth mode the display is pinned at the same instant the
+    # sender registers, so nothing here can tell the two apart. That is [67]'s
+    # job; this case is the life cycle -- claim, socket, pin, drop, grace, hand
+    # the playlist back.
+    with Receiver() as receiver, Alone():
         add_hook(receiver.url, ["cast.started", "cast.ended", "override.set",
                                 "override.cleared"])
         status, body = claim()
@@ -657,7 +735,7 @@ async def case_65():
 
 async def case_66():
     print("\n[66] a self-signed receiver is refused unless the target opts in")
-    with Server():
+    with Alone():
         # Inside the Server: the certificate is the one it generates for its own
         # cast listener, so it exists by the time the receiver needs it.
         with Receiver(tls=True) as receiver:
@@ -686,8 +764,86 @@ async def case_66():
                   == [("Loose", True), ("Strict", False)], hooks())
 
 
+async def case_67():
+    print("\n[67] cast.started fires where the sender registers, not where the "
+          "display is pinned")
+    # The discriminating case, and the reason it needs pairing mode: in the
+    # default mode `activate_display` and `register_peer` happen at the same
+    # instant, so every assertion in [65] would still pass with the event moved
+    # back into `activate_display`. That move *was* the bug -- `start_pairing`
+    # pins the cast page to show the code, and `activate_display` then early
+    # returns for the real sender because `holding_override` is already true, so
+    # the event fired for the code and never for the cast. Here the two are
+    # thirty seconds apart if they need to be.
+    with Receiver() as receiver, Alone(cast_auth="pairing"):
+        add_hook(receiver.url, ["cast.started", "override.set"])
+        display_reader, display_writer = await ws("display")
+        await wsclient.recv_json(display_reader)
+
+        status, _ = http("POST", "/api/cast/pair")
+        check("pairing was started", status == 200, status)
+        pushed = await wsclient.recv_json(display_reader)
+        code = pushed.get("code")
+        check("the display was handed a code", isinstance(code, str) and len(code) == 4,
+              pushed)
+
+        # The barrier: pinning the display for the code demonstrably reached the
+        # receiver, so the absence of `cast.started` below is an absence and not
+        # a delivery round that never happened.
+        check("pinning the display for the code is announced as an override",
+              await until_async(lambda: body_of(receiver, "override.set")
+                                .get("data", {}).get("source") == "cast"),
+              receiver.bodies())
+        check("and nothing has announced a cast yet",
+              "cast.started" not in events_of(receiver), events_of(receiver))
+
+        sender_reader, sender_writer = await ws("sender", code)
+        welcome = await wsclient.recv_json(sender_reader)
+        check("the code was accepted", welcome.get("type") == "welcome", welcome)
+        check("the sender registering is what announces the cast",
+              await until_async(lambda: "cast.started" in events_of(receiver)),
+              events_of(receiver))
+        check("carrying the sender's address, which only that site knows",
+              body_of(receiver, "cast.started").get("data", {}).get("sender_ip")
+              == "127.0.0.1", body_of(receiver, "cast.started"))
+        check("and exactly once",
+              events_of(receiver).count("cast.started") == 1, events_of(receiver))
+        sender_writer.close()
+        display_writer.close()
+
+
+async def case_68():
+    print("\n[68] a guest page redacts its URL and is not a cast")
+    with Receiver() as receiver, Alone(guest_pages="on"):
+        add_hook(receiver.url, ["guest_page.shown", "override.set", "cast.started"])
+        reader, writer = await ws("sender", mode="page")
+        await wsclient.recv_json(reader)
+        await wsclient.send_json(
+            writer, {"type": "present",
+                     "url": "http://bob:hunter2@example.test/wiki", "scroll": "none"})
+        check("the page being shown is announced",
+              await until_async(lambda: "guest_page.shown" in events_of(receiver)),
+              events_of(receiver))
+        raw = "".join(r[3] for r in receiver.requests)
+        check("the guest's password never reaches a receiver", "hunter2" not in raw, raw)
+        check("nor their username", "bob" not in raw, raw)
+        check("but the address itself does",
+              "example.test/wiki" in str(body_of(receiver, "guest_page.shown")),
+              body_of(receiver, "guest_page.shown"))
+        check("the pinned page is its own override, sourced to the guest",
+              await until_async(lambda: body_of(receiver, "override.set")
+                                .get("data", {}).get("source") == "guest_page"),
+              receiver.bodies())
+        # The second discriminator: a page-mode sender registers, and registering
+        # is where `cast.started` lives -- but a page is not a cast.
+        check("and a page-mode sender announces no cast",
+              "cast.started" not in events_of(receiver), events_of(receiver))
+        writer.close()
+
+
 CASES = [case_52, case_53, case_54, case_55, case_56, case_57, case_58, case_59,
-         case_60, case_61, case_62, case_63, case_64, case_65, case_66]
+         case_60, case_61, case_62, case_63, case_64, case_65, case_66, case_67,
+         case_68]
 
 
 async def main(wanted):
@@ -698,8 +854,9 @@ async def main(wanted):
 
 
 if __name__ == "__main__":
-    # A case number or several runs just those. The whole file takes minutes,
-    # and iterating on one case should not.
+    # A case number or several runs just those. The whole file takes about 50
+    # seconds (measured, and what tests/cast/README.md says), and iterating on
+    # one case should not.
     wanted = sys.argv[1:]
     if not start_chrome():
         print("  FAIL  headless Chrome did not come up on {}".format(CDP_PORT))
