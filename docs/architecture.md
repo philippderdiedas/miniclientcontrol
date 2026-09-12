@@ -14,6 +14,7 @@ src/chromium.rs  finds, launches and supervises the display browser
 src/tls.rs       self-signed certificate, HTTPS listener, public-address resolution
 src/mdns.rs      publishes an extra .local name via avahi-publish
 src/audio.rs     venue audio through pactl, behind a backend seam
+src/webhook/     outbound webhooks: the Dispatcher on AppState, and its HTTP surface
 src/web.rs       serves web/ embedded with include_dir
 web/             the operator UI and the pages the display browser renders
 ```
@@ -122,6 +123,21 @@ On teardown the previous override is restored **only if the one on screen is sti
 ours**. An operator who set a different override during the cast made a newer
 decision, and silently reverting it would look like the UI ignoring them.
 
+## Outbound webhooks
+
+`webhook::Dispatcher` lives on `AppState`, and `fire` is the whole interface the
+rest of the tree sees: `browser.rs`, `cast.rs` and `handlers.rs` call it and carry
+on. It is synchronous and returns nothing, because `browser.rs` calls it from
+inside the control loop — anything that could block, error or await there would
+put a stranger's HTTP server in the path of what is on the screen. `fire` builds
+the payload, spawns, and returns; the spawned tasks read the enabled targets,
+render per target and deliver, bounded by a semaphore that **drops** rather than
+queues once it is full.
+
+`src/webhook/mod.rs` holds the events, the storage, the rendering and the
+hand-rolled HTTP client; `src/webhook/api.rs` holds the operator's CRUD routes and
+the event catalogue the admin page renders from. The split is for file size only.
+
 ## Injected runtimes
 
 Two scripts are registered to run on every new document and re-evaluated after
@@ -148,8 +164,9 @@ on.
 
 ## Database
 
-SQLite, path from `--database-path`. Tables: `assets`, `playlist_items`, and
-`settings` (key/value, for what the operator can change without a restart).
+SQLite, path from `--database-path`. Tables: `assets`, `playlist_items`,
+`settings` (key/value, for what the operator can change without a restart), and
+`webhooks` (one row per outbound target).
 
 Schema lives **only** in `db::run_migrations`, which is idempotent:
 `CREATE TABLE IF NOT EXISTS` plus a `pragma_table_info` probe before each

@@ -231,3 +231,42 @@ in by passing `--basic-auth-user` and `--basic-auth-password`.
 
 Passwords are stored as PBKDF2 hashes, so a copy of the database is not a copy of
 the credentials.
+
+## A webhook target may hold somebody else's secret
+
+A webhook target's `headers` are where an API token goes — a Discord webhook
+secret in the URL, a bearer token for a monitoring system, a `X-Api-Key` for a
+home-automation hub. That is the first time this controller stores a credential
+belonging to a *third party*, and it is worth one paragraph of deployment
+thought.
+
+`GET /api/webhooks` returns each target's headers as stored. That is deliberate:
+the operator has to be able to see and correct what they typed, and a write-only
+field would be inconsistent for no gain against an attacker who is already
+authenticated. But **basic auth is unconfigured by default**, and with no
+credentials set the operator API is served to anyone who can reach the LAN-facing
+HTTPS listener. `CorsLayer::permissive()` additionally makes that response
+readable to any website the operator happens to visit from a browser on the same
+network.
+
+None of that is new — `GET /api/settings` already returns `cast_code` in the
+clear under exactly the same conditions, and the operator surface has always been
+"protected when you protect it". The difference is only that a webhook target is
+the first thing here that can hold a secret which is not the device's own.
+
+So: **on any device where a webhook target carries a credential, configure basic
+auth.** Either from the admin page, or with `--basic-auth-user` and
+`--basic-auth-password`, which additionally pins it — see
+[Runtime settings versus flags](#runtime-settings-versus-flags). A device with no
+webhook targets, or with targets whose URLs are unauthenticated internal
+endpoints, is in the same position it was before.
+
+Two related properties, both by design:
+
+- **A redirect is refused, never followed.** A `3xx` is reported with its
+  `Location` as the failure it is. Following one would send the target's
+  `Authorization` header to a host the operator never configured and cannot see,
+  chosen by whoever controls the receiver.
+- **The target's URL is fixed, never templated.** A URL assembled from event data
+  would be a request to a host chosen by the payload, which is the same problem
+  wearing a different hat.

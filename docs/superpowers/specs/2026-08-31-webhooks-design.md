@@ -1,6 +1,6 @@
 # Outbound webhooks
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-08-31
 
 ## What and why
@@ -165,7 +165,9 @@ mistake in a new place.
 
 ## The dispatcher
 
-New module `src/webhook.rs`. Nothing else grows by more than a few lines.
+New module `src/webhook/`: `mod.rs` for the machinery below, `api.rs` for the
+operator's HTTP surface, split for file size alone. Nothing else grows by more
+than a few lines.
 
 ```rust
 pub struct Dispatcher {
@@ -336,8 +338,9 @@ the table logs and answers with what it has.
 ### The test send
 
 `POST /api/webhooks/{id}/test` renders the target against a synthetic sample of
-an event the operator picks and **delivers it for real**, answering `{status,
-body_excerpt, error}`. Not a dry run: a dry run proves the template compiles
+an event the operator picks and **delivers it for real**, answering
+`{ok, outcome}` — the outcome being the status, the refused redirect, or the
+transport error, in the same words the last-result line uses. Not a dry run: a dry run proves the template compiles
 and nothing about whether Discord accepts it, which is the actual question. The
 envelope carries `"test": true` so a receiver can tell.
 
@@ -412,7 +415,7 @@ reach the control loop, which is the single thing that must not break.
 
 - `README.md` — the API overview gains a Webhooks section
 - `docs/features.md` — what webhooks do
-- `docs/architecture.md` — the module map gains `webhook.rs`
+- `docs/architecture.md` — the module map gains `webhook/`
 - `CLAUDE.md` — the `--webhook` line under "not taken from picklecast" gains a
   sentence distinguishing that callback from this feature, plus the `fire`
   must-not-block rule and the refuse-redirects rule

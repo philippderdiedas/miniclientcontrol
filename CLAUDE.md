@@ -28,12 +28,16 @@ unrebuilt change looks exactly like a change that did not work.
 
 **Stop any locally running instance before the Python suite.** `test_port.py`
 needs the default `3443` free to test the fallback, and
-`test_browser.py`/`test_overlay.py` launch their own Chrome on `9222`/`9232`. A
-dev instance holding those makes them fail in a way that reads exactly like a code
-regression — they pass again the moment it is stopped.
+`test_browser.py`/`test_overlay.py`/`test_webhook.py` launch their own Chrome on
+`9222`/`9232`/`9242`. A dev instance holding those makes them fail in a way that
+reads exactly like a code regression — they pass again the moment it is stopped.
+A stray Chrome on `9222` is worse than none for `test_webhook.py`: the loop
+attaches to it and injects `display.connected` and `playback.playlist_empty`
+deliveries into receivers that are counting.
 
 `tests/cast/` is stdlib-only Python, wired into no CI. Run it by hand after
-touching `cast.rs`, `tls.rs`, `settings.rs`, `audio.rs` or the route table.
+touching `cast.rs`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/` or the route
+table.
 
 When testing casting locally, share a single *window* rather than the whole
 screen, or the display shows an infinite mirror.
@@ -414,6 +418,115 @@ playing fine), and unmuted-first playback with a muted fallback.
 Deliberately **not** taken, so do not add them back: p2pt/WebTorrent trackers, the
 tracker-vs-local transport probe, the YouTube iframe remote control, the
 `--webhook` callback, and the `/api/override` proxy.
+
+`src/webhook/` is not that callback returning. Picklecast's was glue between two
+processes — picklecast telling the controller a cast had started so it could flip
+an override — and it is dead because both sides live in one binary and the
+override is now a function call. This is the same shape pointed the other way:
+the controller telling a *third party*, re-introducing no second process and
+putting nothing on the display path that waits.
+
+## Webhooks (`src/webhook/`)
+
+What they are and what an operator sees:
+[docs/features.md](docs/features.md#webhooks). The credential question:
+[docs/deployment.md](docs/deployment.md#a-webhook-target-may-hold-somebody-elses-secret).
+The rules:
+
+**`Dispatcher::fire` is synchronous, infallible, and returns `()`.** `browser.rs`
+calls it from inside the control loop, so a version that could block, await or
+error would put a stranger's HTTP server in the path of what is on the screen. It
+builds the payload, spawns, and returns. Keep all three properties: an `async fn`
+or a `Result` here would be an `.await` or a `?` at a call site that owns the
+display.
+
+**Past `MAX_INFLIGHT` an event is dropped, not queued.** `try_acquire_owned`
+failing logs a `warn!` and skips that target. The alternative is unbounded
+`spawn` on a Pi, and `playback.item_changed` against a receiver that has begun to
+hang is exactly the shape that parks thousands of tasks holding sockets. Dropping
+is honest — the contract is already one attempt and no retry.
+
+**The permit is bound as the *first* statement of the delivery task**
+(`let _permit = permit;`). `let _ = permit;` at the end does **not** work: a
+wildcard `let` is not a read, so under Rust 2021 disjoint capture the async block
+never captures the permit at all. It drops at the end of the loop iteration,
+before the future is first polled, and the whole bound goes silently inert —
+which shipped once and was found only by a reviewer reading the capture rules.
+Nothing may be inserted above it.
+
+**Redirects are refused, never followed.** Following one would send the target's
+`Authorization` header to a host the operator never configured, chosen by whoever
+controls the receiver. A `3xx` *with* a `Location` is reported as
+`Outcome::Redirect` so the operator can fix the row; one without has nowhere to
+send anyone and is just a status.
+
+**Every URL reaching an event goes through `guest_page::redact`** — the emit site
+does it, never the dispatcher, which is why `Event` takes `String` and not `Url`.
+`browser.rs::redact_str` is the wrapper for a URL that is only ever a string, and
+`playback.item_changed` redacts `title` as well as `url`, because a URL item's
+title *is* its URL.
+
+**Header *values* are templates too**, so `validate` compile-checks them exactly
+like the body — otherwise a value that cannot compile saves with a `200` and then
+fails on every delivery. The header *name* is never templated, but it is checked
+with the same `HeaderName::from_bytes` hyper uses at send time, so the operator
+gets a readable message instead of a dispatch log nobody is watching.
+`content-length` is set last and is not overridable: a target naming it would
+otherwise put two conflicting ones on the wire, which is the request-smuggling
+shape if a proxy sits in between.
+
+**`| tojson` is the rule for every field, not just the strings.** A bare boolean
+renders Jinja2-style as `True`, which is invalid JSON, and a number that happens
+to render correctly is exactly the "happens to" that drifts. The server publishes
+`field_prefix` and `placeholder_suffix` from `/api/webhooks/events` so the admin
+page *composes* a placeholder from the server's rule rather than reimplementing
+it. Autoescape is off (HTML escaping turns `&` into `&amp;` inside a JSON string)
+and undefined is lenient (a template written for one event is routinely
+subscribed to another, and a missing title must not silence a
+display-disconnected notice).
+
+**`api::catalogue()` is the only source of event names and fields for the UI.** A
+page offering placeholders the server does not send is the overlay-preview
+mistake in a new place. `test` is deliberately absent from it: `envelope()` sets
+that key only when it is true, so a `{{ test }}` chip would look right in the test
+send and render empty on every delivery that mattered.
+
+**`cast.started` is emitted where the sender registers, not where the display is
+pinned.** `start_pairing` pins the cast page to show the code, so an emit inside
+`activate_display` would announce a cast when a *code* appeared — and then stay
+silent for the real cast, because `activate_display` early-returns once it
+already holds the override. `CastSession::cast_announced` keeps it to one per
+cast across a sender reconnect, and gates `cast.ended` so an unused code emits no
+end without a beginning. `override.set` stays in `activate_display`, because
+pinning the display is exactly what happened there.
+
+**`playback.playlist_empty` is edge-triggered** by `announced_empty`, because the
+idle branch re-runs every five seconds and would otherwise be a notification
+every five seconds for as long as the playlist stays empty. `display.connected`
+fires once per successful CDP attach — after the runtimes are installed, so a
+connection that still bails out to the top of the outer loop is not announced —
+and `display.disconnected` is gated on `connected_before`, so a controller that
+never got a browser does not report losing one.
+
+**`display.*` reports the CDP connection, not that anything is being painted**,
+and nothing here detects a frozen screen. Measured on a Pi 3 whose V3D GPU
+wedged: thirteen hours of the same frame, the kernel resetting the GPU once a
+second, the compositor blocked in `vc4_wait_for_seqno` — while CDP answered every
+request and both page targets were present, so `is_connection_lost` never fired.
+Do not let the events grow a name that implies otherwise.
+
+**The routes are operator-only.** Not in `is_display_path` (which would open them
+to the whole LAN), not in `cast::is_cast_public_path` (which would open them to
+every guest): a target's headers are where an API token lives.
+
+**No global switch and no CLI flag**, unlike `--managed-cert` and
+`--guest-pages`. A fresh database has no rows, so nothing is delivered and
+nothing needs switching off — which is also why the Python harness needed no new
+default.
+
+Targets are read fresh on every event and never cached: an operator who disables
+one expects the *next* event to respect it, and it is a table with single-digit
+rows.
 
 ## Settings (`src/settings.rs`)
 
