@@ -274,6 +274,12 @@ fn environment() -> Environment<'static> {
 /// `api::MAX_TEMPLATE_BYTES`, which is about the size of the stored row.
 const MAX_RENDER_BYTES: usize = 1024 * 1024;
 
+/// The same cap for a *header* value, where a megabyte would be meaningless:
+/// hyper would send it, and every proxy and receiver between here and the target
+/// rejects a header somewhere between 8 and 16 KB. Sharing the stored-row cap
+/// keeps the number one an operator can reason about.
+const MAX_HEADER_RENDER_BYTES: usize = 16 * 1024;
+
 /// An `io::Write` that refuses to grow past `limit`.
 ///
 /// The refusal is reported through `overflowed` rather than read back out of
@@ -310,13 +316,14 @@ fn render_capped(
     label: &str,
     template: &str,
     context: &Value,
+    limit: usize,
 ) -> Result<String, String> {
     let compiled = env
         .template_from_str(template)
         .map_err(|e| format!("{label}: {e}"))?;
     let mut out = CappedWriter {
         buf: Vec::new(),
-        limit: MAX_RENDER_BYTES,
+        limit,
         overflowed: false,
     };
     // `render_captured_to` and not the older `render_to_write`, which this
@@ -326,7 +333,7 @@ fn render_capped(
             .map_err(|_| format!("{label}: das Ergebnis ist kein gültiges UTF-8.")),
         Err(_) if out.overflowed => Err(format!(
             "{label}: das Ergebnis ist größer als {} KB.",
-            MAX_RENDER_BYTES / 1024
+            limit / 1024
         )),
         Err(e) => Err(format!("{label}: {e}")),
     }
@@ -348,13 +355,19 @@ pub fn render(target: &Target, context: &Value) -> Result<Rendered, String> {
     let env = environment();
 
     let body = match &target.body {
-        Some(template) => render_capped(&env, "body template", template, context)?,
+        Some(template) => render_capped(&env, "body template", template, context, MAX_RENDER_BYTES)?,
         None => context.to_string(),
     };
 
     let mut headers = BTreeMap::new();
     for (name, template) in &target.headers {
-        let value = render_capped(&env, &format!("header {name}"), template, context)?;
+        let value = render_capped(
+            &env,
+            &format!("header {name}"),
+            template,
+            context,
+            MAX_HEADER_RENDER_BYTES,
+        )?;
         headers.insert(name.to_ascii_lowercase(), value);
     }
     headers
@@ -1021,6 +1034,27 @@ mod tests {
         target.headers.insert("X-Big".into(), "{{ data.url * 40000 }}".into());
         let error = render(&target, &ctx()).unwrap_err();
         assert!(error.contains("X-Big"), "{error}");
+    }
+
+    /// The header cap is a *different* number from the body's, and this pins it:
+    /// 35 KB is comfortably inside `MAX_RENDER_BYTES` and outside
+    /// `MAX_HEADER_RENDER_BYTES`, so it is refused only while the two differ.
+    /// The neighbouring oversized-header test uses a value that breaks both and
+    /// would pass either way.
+    #[test]
+    fn a_header_value_is_capped_tighter_than_a_body() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        // `data.url` is 35 characters, so this is ~35 KB.
+        target.headers.insert("X-Chunky".into(), "{{ data.url * 1000 }}".into());
+        let error = render(&target, &ctx()).unwrap_err();
+        assert!(error.contains("X-Chunky"), "{error}");
+
+        // The same size in a body is fine, which is what makes the header limit
+        // a limit rather than a second spelling of the first.
+        let mut roomy = target_wanting(&["guest_page.shown"]);
+        roomy.body = Some("{{ data.url * 1000 }}".into());
+        let rendered = render(&roomy, &ctx()).expect("35 KB is well inside the body cap");
+        assert!(rendered.body.len() > 16 * 1024, "{}", rendered.body.len());
     }
 
     /// The other half of a limit: it must leave real templates alone. A loop

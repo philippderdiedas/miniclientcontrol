@@ -486,6 +486,19 @@ cheap instruction can still emit megabytes — so removing either is not covered
 the other two. Fuel is also the *only* bound on how long a render runs: `render`
 is synchronous, so no `tokio::time::timeout` around it could ever fire.
 
+**Those three do not bound interpreter memory, and nothing here does.** A value
+materialised and never written is invisible to both: fuel counts instructions and
+the cap counts bytes *written*, so eight `{% set v = "x" * 100000000 %}` lines —
+244 bytes, a few dozen fuel, four bytes of output — peak at 861 MB, measured,
+which is an OOM on a 740 MB device with no swap. minijinja's own ceiling on a
+repeated string is 100 MB, so this is bounded only by how many times an operator
+repeats the trick. It takes a deliberately hostile template rather than a mistake,
+and the control is the same one the rest of the operator API relies on — configure
+basic auth (see
+[docs/deployment.md](docs/deployment.md#a-webhook-target-may-hold-somebody-elses-secret)).
+Do not read the three caps above as a complete account of what a template can
+cost.
+
 **`| tojson` is the rule for every field, not just the strings.** A bare boolean
 renders Jinja2-style as `True`, which is invalid JSON, and a number that happens
 to render correctly is exactly the "happens to" that drifts. The server publishes

@@ -124,7 +124,7 @@ per target and a template to put it in.
 | `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) | `handlers.rs::set_override`, `cast.rs::activate_display` |
 | `override.cleared` | `source` | `handlers.rs::clear_override`, `cast.rs::deactivate_display` |
 | `cast.started` | `sender_ip`, `mode` | `cast.rs::register_peer` |
-| `cast.ended` | `reason` (`operator`/`sender`/`grace`/`disabled`/`replaced`), `duration_secs` | `cast.rs::deactivate_display` |
+| `cast.ended` | `reason` (`operator`/`sender`/`display`/`grace`/`disabled`/`replaced`), `duration_secs` | `cast.rs::deactivate_display` |
 | `guest_page.shown` | `url`, `sender_ip` | `cast.rs::activate_display` |
 | `guest_page.ended` | `reason` (as above), `duration_secs` | `cast.rs::deactivate_display` |
 | `display.disconnected` | `error` | `browser.rs`, outer loop on `is_connection_lost` |
