@@ -11,6 +11,11 @@
 //! wires it into `main.rs` and builds per-display state from its output. Until
 //! then this module is otherwise-correct dead code by construction, which is
 //! what the blanket allow below is for.
+//!
+//! REMOVE THE `allow` BELOW in the commit that adds the first caller of
+//! `configure`. It is temporary scaffolding, not a policy: a warning-clean
+//! build is how this project notices code nobody calls, and a module-level
+//! allow left behind would blind that check for everything added here later.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
@@ -119,6 +124,12 @@ mod tests {
         // upgrade must not move their CDP port or their window class.
         assert_eq!(configured[0].cdp_url, "http://127.0.0.1:9222");
         assert_eq!(configured[0].window_class, "miniclientcontrol-9222");
+        // Asserted too, because a regression in this one field alone would
+        // point a second browser at the first one's profile directory.
+        assert_eq!(
+            configured[0].user_data_dir,
+            std::path::PathBuf::from("/tmp/miniclientcontrol-chromium-9222")
+        );
     }
 
     #[test]
