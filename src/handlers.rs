@@ -362,11 +362,17 @@ pub async fn add_to_playlist(
         return StatusCode::BAD_REQUEST;
     }
 
-    // Get max play_order
-    let row: (i64,) = sqlx::query_as("SELECT COALESCE(MAX(play_order), 0) FROM playlist_items")
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or((0,));
+    // Scoped to the target playlist: an unscoped max would give a new
+    // playlist's first item a high order borrowed from an unrelated screen's
+    // history, which reads as a bug the moment anything trusts the absolute
+    // value (today only relative order within a playlist is read anywhere).
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COALESCE(MAX(play_order), 0) FROM playlist_items WHERE playlist_id = ?",
+    )
+    .bind(payload.playlist_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or((0,));
     let next_order = row.0 + 1;
 
     let scroll_config = payload.scroll_config.unwrap_or(ScrollMode::None);
@@ -561,6 +567,28 @@ pub async fn update_playlist_item(
 /// Renumbering rather than swapping two values on purpose: `play_order` is typed by hand
 /// in the UI, so duplicates and gaps accumulate, and a pairwise swap between two rows
 /// that share an order does nothing visible.
+
+/// The ids `move_playlist_item` reorders among, in play order, scoped to one
+/// playlist. Pulled out of the handler so the scoping can be tested at pool
+/// level, without an `AppState` -- the previous version built this list from
+/// every row in the table regardless of playlist, which let an "up"/"down"
+/// click on one screen swap orders with an unrelated screen's playlist.
+/// `IS` rather than `=`: `playlist_id` is nullable (a row an older binary
+/// wrote, or one the one-time backfill never reached), and SQLite's
+/// `NULL = NULL` is unknown, not true, in a `WHERE` clause -- which would
+/// silently exclude same-playlist NULL rows from each other.
+pub(crate) async fn ordered_ids_in_playlist(
+    pool: &sqlx::SqlitePool,
+    playlist_id: Option<i64>,
+) -> Result<Vec<i64>, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT id FROM playlist_items WHERE playlist_id IS ? ORDER BY play_order ASC, id ASC",
+    )
+    .bind(playlist_id)
+    .fetch_all(pool)
+    .await
+}
+
 pub async fn move_playlist_item(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -580,9 +608,7 @@ pub async fn move_playlist_item(
     // The renumbering below must stay inside the moved item's own playlist:
     // pulling the whole table into one 1..n sequence would interleave two
     // screens' orders, which shows up as items playing in the wrong sequence on
-    // a screen nobody was touching. `IS` rather than `=` because playlist_id is
-    // nullable (a row an older binary wrote and the backfill never reached),
-    // and `NULL = NULL` is unknown, not true, in SQLite's WHERE clause.
+    // a screen nobody was touching.
     let playlist_id: Option<i64> =
         sqlx::query_scalar("SELECT playlist_id FROM playlist_items WHERE id = ?")
             .bind(id)
@@ -591,13 +617,7 @@ pub async fn move_playlist_item(
             .unwrap_or(None)
             .flatten();
 
-    let mut ids = match sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM playlist_items WHERE playlist_id IS ? ORDER BY play_order ASC, id ASC",
-    )
-    .bind(playlist_id)
-    .fetch_all(&state.pool)
-    .await
-    {
+    let mut ids = match ordered_ids_in_playlist(&state.pool, playlist_id).await {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to read playlist order: {}", e);
@@ -796,4 +816,84 @@ pub async fn clear_override(
         .fire(crate::webhook::Event::OverrideCleared { source: "operator" });
 
     (StatusCode::OK, Json(OverrideResponse { active: false }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pool() -> sqlx::SqlitePool {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn ordered_ids_stay_inside_one_playlist() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'A'), (2, 'B')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Interleaved ids on purpose: 1 and 3 belong to playlist 1, 2 and 4 to
+        // playlist 2, so an unscoped query (the bug) would return all four.
+        for (id, playlist_id) in [(1, 1), (2, 2), (3, 1), (4, 2)] {
+            sqlx::query(
+                "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (?, 'https://a.test', ?, ?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(playlist_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let ids = ordered_ids_in_playlist(&pool, Some(1)).await.unwrap();
+        assert_eq!(
+            ids,
+            vec![1, 3],
+            "a move in playlist 1 must never reach items belonging to playlist 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_playlist_id_groups_with_other_null_rows() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'A')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Two rows an older binary wrote before the backfill reached them (NULL
+        // playlist_id), with one playlist-1 row sandwiched between them. `=`
+        // would treat `NULL = NULL` as unknown and return neither NULL row;
+        // `IS` must return exactly the two NULL rows, not zero and not all three.
+        sqlx::query(
+            "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (1, 'https://a.test', 1, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (2, 'https://a.test', 2, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (3, 'https://a.test', 3, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let ids = ordered_ids_in_playlist(&pool, None).await.unwrap();
+        assert_eq!(
+            ids,
+            vec![1, 3],
+            "IS groups NULL rows with each other, not with every row nor with none"
+        );
+    }
 }

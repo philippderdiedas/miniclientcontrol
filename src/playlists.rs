@@ -128,30 +128,54 @@ async fn rename(
 /// Refused while it still holds items. Deleting the playlist would leave them
 /// with a dangling `playlist_id` and no screen would ever play them again --
 /// worse than an error, because nothing would say so.
+///
+/// The count and the delete are one statement, not two: counting first and
+/// deleting second leaves a window where a `POST /api/playlist` lands in
+/// between, inserting into a playlist the delete has already decided is
+/// empty. The guard exists precisely to stop that dangling item, so it has to
+/// hold across the whole operation, not just at the moment it was checked.
 async fn remove(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
-    let held = items_in(&state.pool, id).await;
-    if held > 0 {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": format!("Enthält noch {held} Elemente. Erst leeren oder verschieben.")
-            })),
-        )
-            .into_response();
+    let result = sqlx::query(
+        "DELETE FROM playlists WHERE id = ? \
+         AND NOT EXISTS (SELECT 1 FROM playlist_items WHERE playlist_id = ?)",
+    )
+    .bind(id)
+    .bind(id)
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            // Nothing was deleted: either the id doesn't exist, or it does but
+            // still holds items. Only this already-exceptional path pays for a
+            // second query, and only to produce the count the error carries.
+            let held = items_in(&state.pool, id).await;
+            if held > 0 {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!("Enthält noch {held} Elemente. Erst leeren oder verschieben.")
+                    })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Nicht gefunden." })),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            error!("Failed to delete playlist {}: {}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Konnte nicht gelöscht werden." })),
+            )
+                .into_response()
+        }
     }
-    if let Err(e) = sqlx::query("DELETE FROM playlists WHERE id = ?")
-        .bind(id)
-        .execute(&state.pool)
-        .await
-    {
-        error!("Failed to delete playlist {}: {}", id, e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "Konnte nicht gelöscht werden." })),
-        )
-            .into_response();
-    }
-    Json(json!({ "ok": true })).into_response()
 }
 
 #[cfg(test)]
