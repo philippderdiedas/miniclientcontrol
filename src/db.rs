@@ -133,6 +133,74 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // 9. Playlists as objects. Items belonged to "the" playlist; now they belong
+    // to one of several, and a display is assigned one.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS playlists (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(pool)
+    .await?;
+
+    // 10. The screens this deployment declared. `name` is the identity, because
+    // an operator's playlist assignment has to survive a restart and an index
+    // would not. ON DELETE SET NULL is what keeps a playlist alive when the
+    // screen it was assigned to is taken away -- that is the whole point of
+    // playlists being objects.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS displays (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            label       TEXT,
+            playlist_id INTEGER,
+            FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+        );"
+    )
+    .execute(pool)
+    .await?;
+
+    let has_playlist_id: bool = sqlx::query(
+        "SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='playlist_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .map(|row| row.get::<i32, _>(0) > 0)
+    .unwrap_or(false);
+
+    if !has_playlist_id {
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN playlist_id INTEGER")
+            .execute(pool)
+            .await;
+    }
+
+    // 11. One-time backfill. Only when the operator has no playlists at all:
+    // once they do, a stray item with no playlist is their business, and
+    // sweeping it into a new "Standard" would be the migration inventing a
+    // decision nobody asked for.
+    let playlists: i64 = sqlx::query_scalar("SELECT count(*) FROM playlists")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    let orphans: i64 = sqlx::query_scalar("SELECT count(*) FROM playlist_items")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+
+    if playlists == 0 && orphans > 0 {
+        let row = sqlx::query("INSERT INTO playlists (name) VALUES ('Standard') RETURNING id")
+            .fetch_one(pool)
+            .await?;
+        let id: i64 = row.get(0);
+        sqlx::query("UPDATE playlist_items SET playlist_id = ? WHERE playlist_id IS NULL")
+            .bind(id)
+            .execute(pool)
+            .await?;
+        tracing::info!("Moved {} existing items into the 'Standard' playlist", orphans);
+    }
+
     Ok(())
 }
 
@@ -172,4 +240,147 @@ pub async fn load_item_overlay(
     serde_json::from_str::<Option<crate::settings::ItemOverlay>>(&raw)
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pool() -> Pool<Sqlite> {
+        // `cache=shared` so every connection in the pool sees the same in-memory
+        // database; a bare `sqlite::memory:` gives each connection its own.
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared")
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    async fn count(pool: &Pool<Sqlite>, sql: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(sql).fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_fresh_database_has_the_new_tables_and_no_rows_to_move() {
+        let pool = pool().await;
+        assert_eq!(count(&pool, "SELECT count(*) FROM playlists").await, 0);
+        assert_eq!(count(&pool, "SELECT count(*) FROM displays").await, 0);
+    }
+
+    #[tokio::test]
+    async fn existing_items_are_moved_into_a_standard_playlist() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared").await.unwrap();
+        // The shape an older device has: items, and no notion of a playlist.
+        sqlx::query(
+            "CREATE TABLE playlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER, url TEXT,
+                play_order INTEGER NOT NULL, duration INTEGER, is_enabled BOOLEAN DEFAULT 1,
+                start_date TEXT, end_date TEXT, keep_loaded BOOLEAN DEFAULT 0,
+                scroll_config TEXT DEFAULT '{\"type\":\"None\",\"options\":null}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for order in 1..=3 {
+            sqlx::query("INSERT INTO playlist_items (url, play_order) VALUES (?, ?)")
+                .bind(format!("https://example.test/{order}"))
+                .bind(order)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        run_migrations(&pool).await.unwrap();
+
+        assert_eq!(count(&pool, "SELECT count(*) FROM playlists").await, 1);
+        let name: String = sqlx::query_scalar("SELECT name FROM playlists")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Standard");
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM playlist_items WHERE playlist_id IS NULL").await,
+            0,
+            "every existing item must have been moved into the playlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_backfill_is_idempotent() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE playlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER, url TEXT,
+                play_order INTEGER NOT NULL, duration INTEGER, is_enabled BOOLEAN DEFAULT 1,
+                start_date TEXT, end_date TEXT, keep_loaded BOOLEAN DEFAULT 0,
+                scroll_config TEXT DEFAULT '{\"type\":\"None\",\"options\":null}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO playlist_items (url, play_order) VALUES ('https://a.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM playlists").await,
+            1,
+            "a second run must not create a second Standard playlist"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_database_that_already_has_playlists_is_left_alone() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Foyer')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO playlist_items (url, play_order) VALUES ('https://a.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+
+        // The item has no playlist, but the backfill must not fire: the operator
+        // already has playlists and moving strays into a new "Standard" would be
+        // the migration inventing a decision.
+        assert_eq!(count(&pool, "SELECT count(*) FROM playlists").await, 1);
+        let name: String = sqlx::query_scalar("SELECT name FROM playlists")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(name, "Foyer");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_playlist_unassigns_it_from_a_display() {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'Foyer')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO displays (name, playlist_id) VALUES ('foyer', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::query("DELETE FROM playlists WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let assigned: Option<i64> =
+            sqlx::query_scalar("SELECT playlist_id FROM displays WHERE name = 'foyer'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(assigned.is_none(), "ON DELETE SET NULL did not fire -- is PRAGMA foreign_keys on?");
+    }
 }

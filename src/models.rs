@@ -275,7 +275,13 @@ pub struct PlaylistItemWithAsset {
     pub end_date: Option<String>,
     #[sqlx(default)]
     pub keep_loaded: bool,
-    
+
+    /// Which playlist this item belongs to. `Option` because the column is added
+    /// by migration and an item written by an older binary has none until the
+    /// backfill runs.
+    #[sqlx(default)]
+    pub playlist_id: Option<i64>,
+
     // Serialized JSON stored in DB
     #[sqlx(default)]
     pub scroll_config: sqlx::types::Json<ScrollMode>,
