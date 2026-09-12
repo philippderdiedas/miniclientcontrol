@@ -436,8 +436,11 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
         Showing::Page { url, scroll } => (url.to_string(), scroll.clone()),
         Showing::Nothing => return,
     };
+    // The primary display: casting pins one screen, and which one it is becomes
+    // configurable in Task 11.
+    let display = state.primary();
     {
-        let mut current = state.override_item.lock().await;
+        let mut current = display.override_item.lock().await;
         session.previous_override = current.clone();
         *current = Some(OverrideItem {
             asset_id: None,
@@ -454,7 +457,7 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
     let epoch = session.epoch;
     drop(session);
 
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
 
     match &showing {
         Showing::Cast => {
@@ -505,8 +508,10 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
         Showing::Page { url, .. } => Some(url.to_string()),
         Showing::Nothing => None,
     };
+    // The same screen `activate_display` pinned.
+    let display = state.primary();
     {
-        let mut current = state.override_item.lock().await;
+        let mut current = display.override_item.lock().await;
         // Only restore if what is on screen is still the override we installed.
         // An operator who set a different one mid-session made a newer decision,
         // and silently reverting it would look like the UI ignoring them.
@@ -538,7 +543,7 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
     session.epoch += 1;
     drop(session);
 
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
     info!("Cast: display released, playlist resumes");
 
     // Both `override.cleared` fires sit outside the `still_ours` branch above,
@@ -1434,7 +1439,7 @@ async fn caster_only(state: &AppState, peer: IpAddr) -> bool {
 
 /// Processes whose audio counts as "the cast's own".
 pub async fn cast_process_ids(state: &AppState) -> Vec<u32> {
-    let Some(pid) = *state.browser_pid.lock().await else {
+    let Some(pid) = *state.primary().browser_pid.lock().await else {
         // Someone else started the browser, so we cannot claim a subtree. The
         // panel still works; it just cannot mark one stream as the caster's.
         return Vec::new();
@@ -1688,20 +1693,16 @@ mod tests {
         AppState {
             pool: pool.clone(),
             args: Arc::new(args),
-            skip_signal: Default::default(),
-            playlist_signal: Default::default(),
-            override_signal: Default::default(),
-            overlay_signal: Default::default(),
-            current_item_id: Default::default(),
-            pending_jump: Default::default(),
-            override_item: Default::default(),
+            displays: Arc::new(vec![Arc::new(crate::models::Display::new(
+                "default",
+                "http://127.0.0.1:9222",
+            ))]),
             cast_tls_port: 0,
             managed_cert: false,
             settings: Arc::new(tokio::sync::RwLock::new(settings)),
             locks: Default::default(),
             auth_cache: Default::default(),
             audio: Arc::new(crate::audio::Backend::Unavailable),
-            browser_pid: Default::default(),
             cast: Default::default(),
             webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
         }

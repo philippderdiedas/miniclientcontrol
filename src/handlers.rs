@@ -270,7 +270,7 @@ pub async fn update_asset(
             error!("Failed to update asset {}: {}", id, e);
         }
         // Playlist items without their own duration fall back to the asset duration.
-        state.playlist_signal.notify_one();
+        state.notify_playlist_changed();
     }
     StatusCode::OK
 }
@@ -308,7 +308,7 @@ pub async fn delete_asset(
         {
             error!("Failed to delete asset {}: {}", id, e);
         }
-        state.playlist_signal.notify_one();
+        state.notify_playlist_changed();
     }
     StatusCode::OK
 }
@@ -407,7 +407,7 @@ pub async fn add_to_playlist(
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    state.playlist_signal.notify_one();
+    state.notify_playlist_changed();
 
     StatusCode::CREATED
 }
@@ -552,11 +552,11 @@ pub async fn update_playlist_item(
         overlay_changed = true;
     }
 
-    state.playlist_signal.notify_one();
+    state.notify_playlist_changed();
     // The item on screen may be this one, and its badge should not wait for the
     // next navigation. The loop re-reads the item's overlay when it re-applies.
     if overlay_changed {
-        state.overlay_signal.notify_one();
+        state.notify_overlay_changed();
     }
 
     StatusCode::OK.into_response()
@@ -673,7 +673,7 @@ pub async fn move_playlist_item(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    state.playlist_signal.notify_one();
+    state.notify_playlist_changed();
     StatusCode::OK.into_response()
 }
 
@@ -688,7 +688,7 @@ pub async fn delete_playlist_item(
     {
         error!("Failed to delete playlist item {}: {}", id, e);
     }
-    state.playlist_signal.notify_one();
+    state.notify_playlist_changed();
     StatusCode::OK
 }
 
@@ -700,27 +700,33 @@ pub async fn set_current(
     // Record the request in `pending_jump`, not `current_item_id`: the browser loop
     // owns `current_item_id` and rewrites it at the start of every item, so writing
     // there races with playback and loses the click.
+    //
+    // The primary display, because this path carries no display name; Task 8
+    // gives it a scoped sibling and makes the unscoped one resolve explicitly.
+    let display = state.primary();
     {
-        let mut lock = state.pending_jump.lock().await;
+        let mut lock = display.pending_jump.lock().await;
         *lock = payload.item_id;
     }
     // Interrupt the current wait. notify_one stores a permit if the loop is busy
     // navigating, so the request survives until the loop next awaits.
-    state.skip_signal.notify_one();
+    display.skip_signal.notify_one();
     StatusCode::OK
 }
 
 pub async fn get_current(State(state): State<AppState>) -> impl IntoResponse {
+    let display = state.primary();
     let id = {
-        let lock = state.current_item_id.lock().await;
+        let lock = display.current_item_id.lock().await;
         *lock
     };
     (StatusCode::OK, Json(CurrentItemResponse { item_id: id }))
 }
 
 pub async fn get_override(State(state): State<AppState>) -> impl IntoResponse {
+    let display = state.primary();
     let current = {
-        let lock = state.override_item.lock().await;
+        let lock = display.override_item.lock().await;
         lock.clone()
     };
 
@@ -779,15 +785,16 @@ pub async fn set_override(
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
     };
 
+    let display = state.primary();
     {
-        let mut lock = state.override_item.lock().await;
+        let mut lock = display.override_item.lock().await;
         *lock = Some(override_item);
     }
 
     // Only override_signal: the browser loop watches it both while playing the
     // playlist and while an override is up. Poking skip_signal as well would leave
     // an unconsumed permit that cuts the next playlist item short.
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
 
     // An asset override has no URL to announce, and inventing one would be a
     // link to something the receiver cannot fetch. The `asset_id` in the
@@ -803,12 +810,13 @@ pub async fn set_override(
 pub async fn clear_override(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    let display = state.primary();
     {
-        let mut lock = state.override_item.lock().await;
+        let mut lock = display.override_item.lock().await;
         *lock = None;
     }
 
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
 
     state
         .webhooks

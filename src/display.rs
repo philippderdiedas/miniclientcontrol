@@ -6,17 +6,6 @@
 //! away from the window manager, which is where this project already puts it.
 //! See `docs/superpowers/specs/2026-09-12-multi-display-design.md` for the
 //! measurements.
-//!
-//! Nothing outside this file's tests calls `configure` yet — the next task
-//! wires it into `main.rs` and builds per-display state from its output. Until
-//! then this module is otherwise-correct dead code by construction, which is
-//! what the blanket allow below is for.
-//!
-//! REMOVE THE `allow` BELOW in the commit that adds the first caller of
-//! `configure`. It is temporary scaffolding, not a policy: a warning-clean
-//! build is how this project notices code nobody calls, and a module-level
-//! allow left behind would blind that check for everything added here later.
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -31,7 +20,14 @@ pub struct DisplayConfig {
     pub cdp_url: String,
     /// Becomes the Wayland `app_id`, which is how the window manager tells two
     /// of our windows apart and puts each on the right output.
+    ///
+    /// No reader yet: `chromium::spawn` still derives both of these from `Args`,
+    /// and the task that gives each display its own browser is what makes them
+    /// live. Allowed by field rather than for the module, so everything else
+    /// here keeps its dead-code check.
+    #[allow(dead_code)]
     pub window_class: String,
+    #[allow(dead_code)]
     pub user_data_dir: PathBuf,
 }
 
@@ -165,6 +161,14 @@ mod tests {
         // it to something both can hold without quoting.
         assert!(configure(&args_with(vec!["foyer schirm".into()])).is_err());
         assert!(configure(&args_with(vec!["../etc".into()])).is_err());
+    }
+
+    #[test]
+    fn the_primary_display_is_the_first_declared() {
+        // `--cast-display` and the legacy unscoped API paths both resolve
+        // through this, so which one is primary is not an implementation detail.
+        let configured = configure(&args_with(vec!["foyer".into(), "werkstatt".into()])).unwrap();
+        assert_eq!(configured[0].name, "foyer");
     }
 
     #[test]

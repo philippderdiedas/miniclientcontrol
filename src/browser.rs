@@ -15,7 +15,16 @@ use crate::models::{AppState, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use urlencoding::encode;
 
 pub async fn browser_loop(state: AppState) {
-    info!("Starting browser loop...");
+    // One loop still, so it drives the primary display. Task 7 turns this into a
+    // parameter and spawns one loop per declared display; until then the only
+    // thing that changes here is where the playback state lives.
+    let display = state.primary();
+    // Bound out of the macro's reach: `tracing`'s own `display()` field helper is
+    // in scope inside `info!`, so `display.name` there resolves to that function
+    // and not to this local.
+    let display_name = display.name.clone();
+    let cdp_url = display.cdp_url.clone();
+    info!("Starting browser loop for display '{}'...", display_name);
 
     // play_order of the last item we finished. The playlist is re-fetched whenever it
     // changes, and without this every edit (or reconnect) restarted playback at item
@@ -45,14 +54,14 @@ pub async fn browser_loop(state: AppState) {
             ..Default::default()
         };
         let (mut browser, mut handler) = match Browser::connect_with_config(
-            &state.args.cdp_url,
+            &cdp_url,
             handler_config,
         )
         .await
         {
             Ok(res) => res,
             Err(_) => {
-                info!("Could not launch browser, trying to connect to {}", state.args.cdp_url);
+                info!("Could not launch browser, trying to connect to {}", cdp_url);
                 sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -178,7 +187,7 @@ pub async fn browser_loop(state: AppState) {
         let mut reconnect_needed = false;
         loop {
             let active_override = {
-                let lock = state.override_item.lock().await;
+                let lock = display.override_item.lock().await;
                 lock.clone()
             };
 
@@ -257,7 +266,7 @@ pub async fn browser_loop(state: AppState) {
                 }
                 // Update state
                 {
-                    let mut lock = state.current_item_id.lock().await;
+                    let mut lock = display.current_item_id.lock().await;
                     *lock = None;
                 }
 
@@ -275,16 +284,16 @@ pub async fn browser_loop(state: AppState) {
                 // Wait a bit before checking DB again
                 tokio::select! {
                     _ = sleep(Duration::from_secs(5)) => {},
-                    _ = state.skip_signal.notified() => {
+                    _ = display.skip_signal.notified() => {
                         info!("Skip signal received (while empty), reloading playlist...");
                     }
-                    _ = state.playlist_signal.notified() => {
+                    _ = display.playlist_signal.notified() => {
                         info!("Playlist changed while empty, reloading playlist...");
                     }
-                    _ = state.override_signal.notified() => {
+                    _ = display.override_signal.notified() => {
                         info!("Override signal received while empty.");
                     }
-                    _ = state.overlay_signal.notified() => {
+                    _ = display.overlay_signal.notified() => {
                         info!("Overlay settings changed while empty.");
                     }
                 }
@@ -308,7 +317,7 @@ pub async fn browser_loop(state: AppState) {
             // it has been checked against a fresh list: consuming it on a miss drops
             // the click and resumes playback on an unrelated item.
             {
-                let mut pending = state.pending_jump.lock().await;
+                let mut pending = display.pending_jump.lock().await;
                 if let Some(target_id) = *pending {
                     match playlist.iter().position(|x| x.id == target_id) {
                         Some(pos) => {
@@ -328,7 +337,7 @@ pub async fn browser_loop(state: AppState) {
                 let item = &playlist[index];
                 // Update current item ID
                 {
-                    let mut lock = state.current_item_id.lock().await;
+                    let mut lock = display.current_item_id.lock().await;
                     *lock = Some(item.id);
                 }
 
@@ -451,16 +460,16 @@ pub async fn browser_loop(state: AppState) {
                             info!("Duration ended.");
                             break;
                         },
-                        _ = state.skip_signal.notified() => {
+                        _ = display.skip_signal.notified() => {
                             info!("Skip signal received.");
                             skip_requested = true;
                             break;
                         },
-                        _ = state.override_signal.notified() => {
+                        _ = display.override_signal.notified() => {
                             info!("Override signal received, interrupting item.");
                             break;
                         },
-                        _ = state.overlay_signal.notified() => {
+                        _ = display.overlay_signal.notified() => {
                             // Applied to the page already on screen, and the
                             // remaining time is recomputed rather than restarted
                             // -- an overlay edit must not silently extend the
@@ -483,7 +492,7 @@ pub async fn browser_loop(state: AppState) {
                                 .checked_sub(item_started_at.elapsed())
                                 .unwrap_or(Duration::from_secs(0));
                         },
-                        _ = state.playlist_signal.notified() => {
+                        _ = display.playlist_signal.notified() => {
                             let still_active = is_playlist_item_active_now(&state, item.id).await;
                             if still_active {
                                 reload_before_next = true;
@@ -499,7 +508,7 @@ pub async fn browser_loop(state: AppState) {
                 }
 
                 let override_active = {
-                    let lock = state.override_item.lock().await;
+                    let lock = display.override_item.lock().await;
                     lock.is_some()
                 };
 
@@ -524,11 +533,11 @@ pub async fn browser_loop(state: AppState) {
                     // snapshot the playlist is re-read at the top of the loop and the
                     // jump is resolved there. Consuming it here threw the click away,
                     // because the snapshot can be a whole item duration out of date.
-                    let target_id = *state.pending_jump.lock().await;
+                    let target_id = *display.pending_jump.lock().await;
                     if let Some(target_id) = target_id {
                         match playlist.iter().position(|x| x.id == target_id) {
                             Some(pos) => {
-                                *state.pending_jump.lock().await = None;
+                                *display.pending_jump.lock().await = None;
                                 index = pos;
                                 continue;
                             }
@@ -613,6 +622,9 @@ async fn run_override_loop(
     page: &Page,
     mut override_item: OverrideItem,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // The same display `browser_loop` drives; Task 7 passes it in rather than
+    // resolving it a second time.
+    let display = state.primary();
     loop {
         let target_url = override_target_url(state, &override_item);
         info!("Override active. Navigating to: {}", target_url);
@@ -638,8 +650,8 @@ async fn run_override_loop(
             // matters. Re-applying does not touch the page otherwise, so a live
             // RTCPeerConnection survives it.
             tokio::select! {
-                _ = state.override_signal.notified() => {},
-                _ = state.overlay_signal.notified() => {
+                _ = display.override_signal.notified() => {},
+                _ = display.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
                     if let Err(e) = apply_overlay(state, page, None).await {
                         error!("Failed to re-apply overlay: {}", e);
@@ -649,7 +661,7 @@ async fn run_override_loop(
             }
 
             let current_override = {
-                let lock = state.override_item.lock().await;
+                let lock = display.override_item.lock().await;
                 lock.clone()
             };
 

@@ -31,7 +31,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use models::{AppState, Args};
 use base64::Engine;
@@ -235,17 +235,36 @@ async fn main() -> Result<()> {
     };
     let managed_cert_active = managed.is_some();
 
+    // Resolved before `AppState` exists, because the per-display playback state
+    // is built from it. A bad `--display` exits rather than degrading: a typo
+    // that silently dropped a screen would show up as a black panel in a venue,
+    // with nothing saying why.
+    let configured = match display::configure(&args) {
+        Ok(configured) => configured,
+        Err(message) => {
+            tracing::error!("{}", message);
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(
+        "Driving {} display(s): {}",
+        configured.len(),
+        configured
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let displays: Vec<Arc<models::Display>> = configured
+        .iter()
+        .map(|c| Arc::new(models::Display::new(&c.name, &c.cdp_url)))
+        .collect();
+
     // 3. Init State
     let state = AppState {
         pool: pool.clone(),
         args: Arc::new(args.clone()),
-        skip_signal: Arc::new(Notify::new()),
-        playlist_signal: Arc::new(Notify::new()),
-        override_signal: Arc::new(Notify::new()),
-        overlay_signal: Arc::new(Notify::new()),
-        current_item_id: Arc::new(Mutex::new(None)),
-        pending_jump: Arc::new(Mutex::new(None)),
-        override_item: Arc::new(Mutex::new(None)),
+        displays: Arc::new(displays),
         cast: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
         managed_cert: managed_cert_active,
@@ -253,7 +272,6 @@ async fn main() -> Result<()> {
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
-        browser_pid: Arc::new(Mutex::new(None)),
         webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 
@@ -266,7 +284,9 @@ async fn main() -> Result<()> {
     // the port already answering.
     if !args.no_launch_browser {
         let browser_args = state.args.clone();
-        let pid_slot = state.browser_pid.clone();
+        // One display for now, so the primary is the only one; Task 6 spawns a
+        // supervisor per declared display.
+        let pid_slot = state.primary().browser_pid.clone();
         tokio::spawn(async move { chromium::supervise(browser_args, pid_slot).await });
     }
 
