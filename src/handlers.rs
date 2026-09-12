@@ -562,12 +562,6 @@ pub async fn update_playlist_item(
     StatusCode::OK.into_response()
 }
 
-/// Move an item one slot up or down and renumber the whole list.
-///
-/// Renumbering rather than swapping two values on purpose: `play_order` is typed by hand
-/// in the UI, so duplicates and gaps accumulate, and a pairwise swap between two rows
-/// that share an order does nothing visible.
-
 /// The ids `move_playlist_item` reorders among, in play order, scoped to one
 /// playlist. Pulled out of the handler so the scoping can be tested at pool
 /// level, without an `AppState` -- the previous version built this list from
@@ -589,6 +583,11 @@ pub(crate) async fn ordered_ids_in_playlist(
     .await
 }
 
+/// Move an item one slot up or down and renumber the whole list.
+///
+/// Renumbering rather than swapping two values on purpose: `play_order` is typed by hand
+/// in the UI, so duplicates and gaps accumulate, and a pairwise swap between two rows
+/// that share an order does nothing visible.
 pub async fn move_playlist_item(
     State(state): State<AppState>,
     Path(id): Path<i64>,

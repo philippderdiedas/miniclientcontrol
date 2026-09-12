@@ -155,7 +155,12 @@ async fn remove(State(state): State<AppState>, Path(id): Path<i64>) -> Response 
                 (
                     StatusCode::CONFLICT,
                     Json(json!({
-                        "error": format!("Enthält noch {held} Elemente. Erst leeren oder verschieben.")
+                        // Singular and plural spelled out: "1 Elemente" is wrong
+                        // German and this is a message an operator reads.
+                        "error": format!(
+                            "Enthält noch {held} {}. Erst leeren oder verschieben.",
+                            if held == 1 { "Element" } else { "Elemente" }
+                        )
                     })),
                 )
                     .into_response()
