@@ -1,4 +1,5 @@
 mod db;
+mod display;
 mod handlers;
 mod models;
 mod browser;

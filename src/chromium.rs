@@ -68,7 +68,7 @@ pub fn detect_executable(configured: Option<&Path>) -> Result<PathBuf> {
 /// The port `--cdp-url` points at, which is the port we must tell Chromium to
 /// open. Keeping one source of truth avoids the classic "launched on 9222,
 /// connecting to 9223" afternoon.
-fn debugging_port(cdp_url: &str) -> Result<u16> {
+pub(crate) fn debugging_port(cdp_url: &str) -> Result<u16> {
     let rest = cdp_url.split("://").nth(1).unwrap_or(cdp_url);
     let host_port = rest.split('/').next().unwrap_or(rest);
     host_port

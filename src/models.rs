@@ -37,6 +37,17 @@ pub struct Args {
     #[arg(long, env, default_value = "http://127.0.0.1:9222")]
     pub cdp_url: String,
 
+    /// A screen this deployment drives, as `name` or `name:cdp-port`.
+    ///
+    /// Repeat it once per screen. The name is the identity an operator's
+    /// playlist assignment is stored against, and it is what the window-manager
+    /// config matches on — `miniclientcontrol-<name>` becomes the Wayland
+    /// `app_id`. Passing none keeps the single-display behaviour exactly as it
+    /// was, which is why this is a `Vec` with no clap default rather than an
+    /// `Option`.
+    #[arg(long = "display", env = "DISPLAYS", value_delimiter = ',')]
+    pub display: Vec<String>,
+
     /// Basic auth username (set together with basic_auth_password)
     #[arg(long, env)]
     pub basic_auth_user: Option<String>,
