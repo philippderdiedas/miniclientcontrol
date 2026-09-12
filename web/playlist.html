@@ -536,12 +536,22 @@
       if (name === null) return;
       const btn = document.getElementById('playlistNewBtn');
       btn.disabled = true;
-      const res = await fetch('/api/playlists', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      btn.disabled = false;
+      // `finally`, not a plain re-enable after the await: a network-level
+      // rejection skips everything after it, and the button would stay dead
+      // until the page is reloaded.
+      let res;
+      try {
+        res = await fetch('/api/playlists', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
       if (!res.ok) { flash(feedback, await readError(res, 'Anlegen fehlgeschlagen'), true); return; }
       const { id } = await res.json();
       setPlaylistParam(String(id));
@@ -559,12 +569,19 @@
       if (name === null) return;
       const btn = document.getElementById('playlistRenameBtn');
       btn.disabled = true;
-      const res = await fetch(`/api/playlists/${currentPlaylist}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      btn.disabled = false;
+      let res;
+      try {
+        res = await fetch(`/api/playlists/${currentPlaylist}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
       if (!res.ok) { flash(feedback, await readError(res, 'Umbenennen fehlgeschlagen'), true); return; }
       flash(feedback, 'umbenannt ✓');
       await loadPlaylists();
@@ -576,8 +593,15 @@
       if (!confirm('Diese Playlist wirklich löschen?')) return;
       const btn = document.getElementById('playlistDeleteBtn');
       btn.disabled = true;
-      const res = await fetch(`/api/playlists/${currentPlaylist}`, { method: 'DELETE' });
-      btn.disabled = false;
+      let res;
+      try {
+        res = await fetch(`/api/playlists/${currentPlaylist}`, { method: 'DELETE' });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
       // The server counts the items and this is its own message -- do not
       // pre-empt it here, or the page would have to count them again.
       if (!res.ok) { flash(feedback, await readError(res, 'Löschen fehlgeschlagen'), true); return; }
