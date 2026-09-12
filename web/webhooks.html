@@ -40,6 +40,7 @@
     .events { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .2rem; margin: .6rem 0; }
     .events label { font-size: .9rem; }
     .chatty { color: var(--warn); font-size: .8rem; display: block; margin-left: 1.4rem; }
+    .noEvents { color: var(--warn); font-size: .85rem; margin: -.3rem 0 .6rem; }
     textarea { width: 100%; min-height: 5rem; font-family: ui-monospace, monospace; font-size: .85rem; }
     .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: .3rem 0; }
     .chip {
@@ -194,6 +195,17 @@
         for (const f of [...fields].sort()) add(dataPlaceholder(f));
       };
 
+      // A target with nothing checked is saved, enabled, and silent forever.
+      // That is a legitimate place to park one mid-edit, so it is not a `400`
+      // from `validate` — but it must not look configured either, because
+      // "enabled" and "never fires" is otherwise a contradiction the card shows
+      // no sign of.
+      const noEvents = el('div', { class: 'noEvents' });
+      const renderEventHint = () => {
+        noEvents.hidden = state.events.size > 0;
+        noEvents.textContent = 'Kein Ereignis ausgewählt — dieser Webhook wird nie gesendet.';
+      };
+
       const events = el('div', { class: 'events' });
       for (const entry of CATALOGUE.events) {
         const box = el('input', {
@@ -203,6 +215,7 @@
             if (e.target.checked) state.events.add(entry.name);
             else state.events.delete(entry.name);
             renderChips();
+            renderEventHint();
             markDirty();
           },
         });
@@ -218,6 +231,7 @@
         events.append(wrapper);
       }
       renderChips();
+      renderEventHint();
 
       const headerRows = el('div', { class: 'headers' });
       const addHeaderRow = (key = '', value = '') => {
@@ -324,7 +338,16 @@
         const label = name.value.trim() || 'diesen Webhook';
         if (!confirm(`„${label}“ wirklich löschen?`)) return;
         if (state.id !== null) {
-          const response = await fetch(`/api/webhooks/${state.id}`, { method: 'DELETE' });
+          let response;
+          try {
+            response = await fetch(`/api/webhooks/${state.id}`, { method: 'DELETE' });
+          } catch (_) {
+            // Same reason as `save` and `test`: without this the card is left
+            // standing with no message at all, which reads as a delete that
+            // did nothing rather than as a server that could not be reached.
+            flash(feedback, 'Server nicht erreichbar.', true);
+            return;
+          }
           if (!response.ok) {
             // A failed delete keeps the row: the alternative is a page that shows
             // the target as gone while it keeps firing, with the divergence
@@ -353,6 +376,7 @@
             el('span', { text: 'TLS-Zertifikat nicht prüfen (nur für interne Empfänger)' }))),
         el('p', { class: 'muted', text: 'Ereignisse' }),
         events,
+        noEvents,
         el('p', { class: 'muted', text: 'Header' }),
         headerRows,
         el('button', { type: 'button', text: '+ Header', onclick: () => { addHeaderRow(); markDirty(); } }),
