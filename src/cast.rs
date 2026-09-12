@@ -1439,6 +1439,8 @@ async fn caster_only(state: &AppState, peer: IpAddr) -> bool {
 
 /// Processes whose audio counts as "the cast's own".
 pub async fn cast_process_ids(state: &AppState) -> Vec<u32> {
+    // The primary display, like the other two cast sites: Task 11 gives casting
+    // a configured display and they all resolve it the same way.
     let Some(pid) = *state.primary().browser_pid.lock().await else {
         // Someone else started the browser, so we cannot claim a subtree. The
         // panel still works; it just cannot mark one stream as the caster's.

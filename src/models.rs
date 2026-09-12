@@ -413,6 +413,8 @@ impl AppState {
     /// Its first caller is the display-scoped API, which resolves a name out of
     /// the request path. Allowed by name rather than for the module, so nothing
     /// else added here loses its dead-code check in the meantime.
+    ///
+    /// REMOVE this allow in the commit that adds the first caller.
     #[allow(dead_code)]
     pub fn display(&self, name: &str) -> Option<Arc<Display>> {
         self.displays.iter().find(|d| d.name == name).cloned()

@@ -715,6 +715,8 @@ pub async fn set_current(
 }
 
 pub async fn get_current(State(state): State<AppState>) -> impl IntoResponse {
+    // The primary display, because this path carries no display name;
+    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
     let display = state.primary();
     let id = {
         let lock = display.current_item_id.lock().await;
@@ -724,6 +726,8 @@ pub async fn get_current(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn get_override(State(state): State<AppState>) -> impl IntoResponse {
+    // The primary display, because this path carries no display name;
+    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
     let display = state.primary();
     let current = {
         let lock = display.override_item.lock().await;
@@ -785,6 +789,8 @@ pub async fn set_override(
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
     };
 
+    // The primary display, because this path carries no display name;
+    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
     let display = state.primary();
     {
         let mut lock = display.override_item.lock().await;
@@ -810,6 +816,8 @@ pub async fn set_override(
 pub async fn clear_override(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    // The primary display, because this path carries no display name;
+    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
     let display = state.primary();
     {
         let mut lock = display.override_item.lock().await;

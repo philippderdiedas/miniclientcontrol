@@ -25,6 +25,8 @@ pub struct DisplayConfig {
     /// and the task that gives each display its own browser is what makes them
     /// live. Allowed by field rather than for the module, so everything else
     /// here keeps its dead-code check.
+    ///
+    /// REMOVE these two allows in the commit that first reads them.
     #[allow(dead_code)]
     pub window_class: String,
     #[allow(dead_code)]
