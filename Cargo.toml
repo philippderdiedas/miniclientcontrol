@@ -52,6 +52,6 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 # path that keeps reqwest out of this tree. Verified with `cross build`.
 # The `json` feature is what provides the `tojson` filter, which is the escape
 # every JSON body template depends on; it pulls in serde_json, already here.
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json", "fuel"] }
 # already in the tree via rustls/rcgen; used directly for PBKDF2 password hashing
 ring = "0.17"

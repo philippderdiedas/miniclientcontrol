@@ -475,6 +475,17 @@ gets a readable message instead of a dispatch log nobody is watching.
 otherwise put two conflicting ones on the wire, which is the request-smuggling
 shape if a proxy sits in between.
 
+**A template is bounded three times, and the three are not interchangeable.**
+`api::MAX_TEMPLATE_BYTES` (16 KB) is about the *stored row* — it keeps a
+pathological request from growing the `webhooks` table on a device whose SD card
+is the component that dies. `RENDER_FUEL` and `MAX_RENDER_BYTES` are about the
+*device*: 78 bytes of nested `for` loops over `range` pass the row cap
+comfortably and rendered 10 MB in 493 ms before fuel was turned on, with 10 GB
+one digit away. Fuel bounds the work, the byte cap bounds the output, and one
+cheap instruction can still emit megabytes — so removing either is not covered by
+the other two. Fuel is also the *only* bound on how long a render runs: `render`
+is synchronous, so no `tokio::time::timeout` around it could ever fire.
+
 **`| tojson` is the rule for every field, not just the strings.** A bare boolean
 renders Jinja2-style as `True`, which is invalid JSON, and a number that happens
 to render correctly is exactly the "happens to" that drifts. The server publishes

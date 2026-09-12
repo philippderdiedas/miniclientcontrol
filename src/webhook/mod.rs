@@ -233,7 +233,20 @@ pub struct Rendered {
     pub headers: BTreeMap<String, String>,
 }
 
-/// A minijinja environment with this project's two non-default decisions.
+/// How many minijinja instructions one render may execute.
+///
+/// Without this a template of 78 bytes -- two nested `for` loops over `range`,
+/// which the 16 KB template cap has no opinion about -- renders for as long as
+/// it likes and allocates as much as it likes; measured against this exact
+/// dependency it produced 10 MB in half a second and would have produced 10 GB
+/// had the inner range been raised. On a Pi 3 with ~740 MB and no swap that is
+/// the process dying, and if the target subscribes to `display.connected` it
+/// dies again on every restart, which leaves no admin page to fix it from. The
+/// number is two orders of magnitude above anything a real target needs: the
+/// biggest template here loops over a handful of fields.
+const RENDER_FUEL: u64 = 50_000;
+
+/// A minijinja environment with this project's non-default decisions.
 fn environment() -> Environment<'static> {
     let mut env = Environment::new();
     // minijinja escapes for HTML by default, which turns `&` into `&amp;`
@@ -243,7 +256,80 @@ fn environment() -> Environment<'static> {
     // template written for one event is routinely subscribed to another, and a
     // missing title cannot be allowed to silence a display-disconnected notice.
     env.set_undefined_behavior(UndefinedBehavior::Lenient);
+    // See `RENDER_FUEL`. This is the only bound on how long a render runs:
+    // `render` is synchronous, so no `tokio::time::timeout` around it could
+    // ever fire -- the timer cannot be polled while the worker is inside the
+    // interpreter.
+    env.set_fuel(Some(RENDER_FUEL));
     env
+}
+
+/// How many bytes one rendered template may produce.
+///
+/// Fuel bounds the *work*, not the *output*: a single instruction can emit a
+/// field the size of the context, so the two limits are not substitutes. A
+/// megabyte is far more than any real receiver is sent -- the bodies here are
+/// JSON objects of a dozen fields -- and it is small enough that a handful of
+/// them at once is still nothing on the target device. Distinct again from
+/// `api::MAX_TEMPLATE_BYTES`, which is about the size of the stored row.
+const MAX_RENDER_BYTES: usize = 1024 * 1024;
+
+/// An `io::Write` that refuses to grow past `limit`.
+///
+/// The refusal is reported through `overflowed` rather than read back out of
+/// the `minijinja::Error`, which flattens every write failure into the same
+/// "I/O error during rendering" and keeps the cause only as an opaque source.
+struct CappedWriter {
+    buf: Vec<u8>,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() + data.len() > self.limit {
+            self.overflowed = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "output limit reached",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Render one template under both limits, `label` naming it in the error so a
+/// header failure says which header rather than just "a header".
+fn render_capped(
+    env: &Environment<'_>,
+    label: &str,
+    template: &str,
+    context: &Value,
+) -> Result<String, String> {
+    let compiled = env
+        .template_from_str(template)
+        .map_err(|e| format!("{label}: {e}"))?;
+    let mut out = CappedWriter {
+        buf: Vec::new(),
+        limit: MAX_RENDER_BYTES,
+        overflowed: false,
+    };
+    // `render_captured_to` and not the older `render_to_write`, which this
+    // version of minijinja deprecates; the build is warning-clean and stays so.
+    match compiled.render_captured_to(context, &mut out) {
+        Ok(_) => String::from_utf8(out.buf)
+            .map_err(|_| format!("{label}: das Ergebnis ist kein gültiges UTF-8.")),
+        Err(_) if out.overflowed => Err(format!(
+            "{label}: das Ergebnis ist größer als {} KB.",
+            MAX_RENDER_BYTES / 1024
+        )),
+        Err(e) => Err(format!("{label}: {e}")),
+    }
 }
 
 /// Compile a template without rendering it, for validation on save.
@@ -262,17 +348,13 @@ pub fn render(target: &Target, context: &Value) -> Result<Rendered, String> {
     let env = environment();
 
     let body = match &target.body {
-        Some(template) => env
-            .render_str(template, context)
-            .map_err(|e| format!("body template: {e}"))?,
+        Some(template) => render_capped(&env, "body template", template, context)?,
         None => context.to_string(),
     };
 
     let mut headers = BTreeMap::new();
     for (name, template) in &target.headers {
-        let value = env
-            .render_str(template, context)
-            .map_err(|e| format!("header {name}: {e}"))?;
+        let value = render_capped(&env, &format!("header {name}"), template, context)?;
         headers.insert(name.to_ascii_lowercase(), value);
     }
     headers
@@ -884,6 +966,72 @@ mod tests {
         assert!(!error.is_empty());
         assert!(compile_check("{{ unclosed ").is_err());
         assert!(compile_check("{{ data.url | tojson }}").is_ok());
+    }
+
+    /// The measured attack: 78 bytes of template, two nested `for` loops over
+    /// `range`, which produced 10 MB in 493 ms against this dependency before
+    /// fuel was turned on and would have produced 10 GB with a larger inner
+    /// range. `MAX_TEMPLATE_BYTES` cannot see this -- it weighs the stored row,
+    /// and the row is tiny.
+    #[tokio::test]
+    async fn the_measured_runaway_template_is_refused_rather_than_rendered() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        let attack = "{% for i in range(100000) %}{% for j in range(100) %}x{% endfor %}{% endfor %}";
+        assert_eq!(attack.len(), 78, "this must stay the template that was measured");
+        target.body = Some(attack.into());
+
+        let error = render(&target, &ctx()).unwrap_err();
+        assert!(
+            error.contains("fuel"),
+            "the refusal must name the reason, not just fail: {error}"
+        );
+
+        // `compile_check` still passes it, which is the point of having a
+        // second limit at render time: the template is syntactically fine.
+        assert!(compile_check(attack).is_ok());
+
+        // And the whole delivery ends as a per-target `Outcome::Error` that the
+        // operator can read off the card, with nothing sent to the network.
+        let outcome = run(&target, &ctx()).await;
+        match outcome {
+            Outcome::Error(message) => assert!(message.contains("fuel"), "{message}"),
+            other => panic!("a runaway template must not reach the network: {other:?}"),
+        }
+    }
+
+    /// Fuel bounds the work, not the output: one cheap instruction can emit
+    /// megabytes. Repeating a string costs a single multiply, so this one has
+    /// fuel to spare and has to be stopped by the byte cap instead.
+    #[test]
+    fn a_template_producing_more_than_the_cap_is_refused() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body = Some("{{ data.url * 40000 }}".into());
+        let error = render(&target, &ctx()).unwrap_err();
+        assert!(
+            error.contains("KB"),
+            "the refusal must name the size limit: {error}"
+        );
+    }
+
+    /// A header value is a template too, so it is capped on the same terms --
+    /// and the error says which header, not just "a header".
+    #[test]
+    fn an_oversized_header_value_is_refused_and_names_its_header() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.headers.insert("X-Big".into(), "{{ data.url * 40000 }}".into());
+        let error = render(&target, &ctx()).unwrap_err();
+        assert!(error.contains("X-Big"), "{error}");
+    }
+
+    /// The other half of a limit: it must leave real templates alone. A loop
+    /// over every field of an envelope is the largest shape a target here has.
+    #[test]
+    fn an_ordinary_template_has_fuel_and_room_to_spare() {
+        let mut target = target_wanting(&["guest_page.shown"]);
+        target.body =
+            Some("{% for key, value in data | items %}{{ key }}={{ value }};{% endfor %}".into());
+        let rendered = render(&target, &ctx()).expect("a real template must still render");
+        assert!(rendered.body.contains("sender_ip=192.168.1.44"), "{}", rendered.body);
     }
 
     /// A one-shot HTTP server on an ephemeral port. Returns its URL, a handle
