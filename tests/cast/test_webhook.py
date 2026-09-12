@@ -579,7 +579,12 @@ async def case_62():
 
         _, hook_id = add_hook(receiver.url, names, name="All")
         for entry in cat["events"]:
+            # Two counters on purpose: `wait` counts requests, while the slice
+            # below indexes `bodies()`, which drops any request whose body was
+            # empty. They cannot be the same number the moment a delivery
+            # renders to nothing.
             before = receiver.count()
+            before_bodies = len(receiver.bodies())
             status, data = http("POST", f"/api/webhooks/{hook_id}/test",
                                 {"event": entry["name"]})
             if not receiver.wait(before + 1):
@@ -588,7 +593,7 @@ async def case_62():
             # Located by name rather than trusted to be the next one along, so a
             # stray delivery makes this case say what it found instead of
             # comparing the wrong pair of field lists.
-            payload = next((b for b in receiver.bodies()[before:]
+            payload = next((b for b in receiver.bodies()[before_bodies:]
                             if b.get("event") == entry["name"]), {})
             check(f"{entry['name']} carries exactly the fields the catalogue lists",
                   sorted(payload.get("data", {}).keys()) == sorted(entry["fields"]),
@@ -600,10 +605,11 @@ async def case_62():
              {"name": "All", "url": receiver.url, "events": names,
               "body": '{"r": ' + chip + "}"})
         before = receiver.count()
+        before_bodies = len(receiver.bodies())
         http("POST", f"/api/webhooks/{hook_id}/test", {"event": "display.connected"})
         check("a composed chip renders as JSON", receiver.wait(before + 1), receiver.count())
-        if receiver.count() > before:
-            rendered = receiver.bodies()[before]
+        if len(receiver.bodies()) > before_bodies:
+            rendered = receiver.bodies()[before_bodies]
             check("and carries the boolean unquoted",
                   rendered.get("r") in (True, False), rendered)
 
