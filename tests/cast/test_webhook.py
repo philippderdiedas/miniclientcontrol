@@ -16,6 +16,7 @@ and [59] would have nothing to stall.
 """
 import asyncio
 import atexit
+import base64
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 # Not `import http.server`: `http` is the request helper imported from
 # test_cast below, and the module would shadow it (the same trap test_browser.py
@@ -242,6 +244,35 @@ def add_item(url="http://127.0.0.1:9/x", duration=LONG):
     http("POST", "/api/playlist", {"url": url, "duration": duration})
     rows = http("GET", "/api/playlist")[1] or []
     return rows[-1]["id"] if rows else None
+
+
+AUTH = ("ops", "hunter2!!")
+
+
+def authed(method, path, body=None, auth=None):
+    """`http`, but able to present -- or deliberately withhold -- credentials.
+
+    The shared `http` helper sends none at all, which is the right default
+    everywhere else in this suite and useless for the one case that is about
+    whether they are demanded.
+    """
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{HTTP_PORT}{path}", data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {})
+    if auth:
+        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
+        req.add_header("Authorization", "Basic " + token)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as res:
+            raw = res.read().decode()
+            return res.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw
 
 
 def hooks():
@@ -847,9 +878,48 @@ async def case_68():
         writer.close()
 
 
+async def case_69():
+    print("\n[69] the webhook API is operator-only, and something asserts it")
+    # The property is otherwise guarded by two *absences* -- not in
+    # `is_display_path`, not in `cast::is_cast_public_path` -- and an absence is
+    # exactly what a later edit removes without anything going red. A target's
+    # headers are where a third party's API token lives, so this is the one
+    # route set worth pinning down from outside the binary.
+    with Alone(basic_auth_user="ops", basic_auth_password="hunter2!!"):
+        check("reading the targets without credentials is refused",
+              authed("GET", "/api/webhooks")[0] == 401)
+        # From 127.0.0.1, which is the point: the loopback exemption covers
+        # `is_display_path` only, and a webhook route is not one.
+        status, rows = authed("GET", "/api/webhooks", auth=AUTH)
+        check("and succeeds with them", status == 200 and isinstance(rows, list), (status, rows))
+
+        target = {"name": "Gated", "url": "http://127.0.0.1:9/hook",
+                  "events": ["playback.item_changed"]}
+        check("creating one without credentials is refused",
+              authed("POST", "/api/webhooks", target)[0] == 401)
+        status, body = authed("POST", "/api/webhooks", target, auth=AUTH)
+        check("and succeeds with them", status == 200 and body.get("id"), (status, body))
+        hook_id = (body or {}).get("id")
+
+        check("the test send without credentials is refused",
+              authed("POST", f"/api/webhooks/{hook_id}/test", {})[0] == 401)
+        check("editing one without credentials is refused",
+              authed("PUT", f"/api/webhooks/{hook_id}", target)[0] == 401)
+        check("deleting one without credentials is refused",
+              authed("DELETE", f"/api/webhooks/{hook_id}")[0] == 401)
+        check("the row is still there",
+              len(authed("GET", "/api/webhooks", auth=AUTH)[1] or []) == 1)
+        check("and deleting it with credentials works",
+              authed("DELETE", f"/api/webhooks/{hook_id}", auth=AUTH)[0] == 200)
+
+        # The catalogue is a route too, and it is the one a page hits first.
+        check("even the event catalogue is behind the credentials",
+              authed("GET", "/api/webhooks/events")[0] == 401)
+
+
 CASES = [case_52, case_53, case_54, case_55, case_56, case_57, case_58, case_59,
          case_60, case_61, case_62, case_63, case_64, case_65, case_66, case_67,
-         case_68]
+         case_68, case_69]
 
 
 async def main(wanted):
