@@ -283,6 +283,16 @@ async fn main() -> Result<()> {
     // else manages them (an existing sway `exec` line), which the supervisor
     // detects by finding the port already answering.
     if !args.no_launch_browser {
+        // `state.displays` is built by mapping over `configured` a few lines
+        // up, so the two are the same length by construction today -- but
+        // construction is not a proof that survives a later edit, and a zip
+        // that silently drops the tail of the longer side would leave a
+        // display with no supervisor and nothing saying why.
+        debug_assert_eq!(
+            configured.len(),
+            state.displays.len(),
+            "state.displays should be built by mapping over configured"
+        );
         for (config, display) in configured.iter().zip(state.displays.iter()) {
             let browser_args = state.args.clone();
             let config = config.clone();
@@ -293,14 +303,18 @@ async fn main() -> Result<()> {
 
     // 4. Spawn Browser Controller Task
     //
-    // Still one loop, so only the primary display is actually played. Every
-    // declared display gets a browser above, which makes the startup banner's
-    // count true of the browsers but not yet of playback -- said out loud here,
-    // because a screen sitting on `about:blank` with no explanation is exactly
-    // the silent-black-panel failure `display::configure` refuses to allow.
+    // Still one loop, so only the primary display is actually played. With
+    // browsers launched, every declared display gets one above, which makes
+    // the startup banner's count true of the browsers but not yet of playback
+    // -- said out loud below, because a screen sitting on `about:blank` (or,
+    // under `--no-launch-browser`, on whatever it already had on it) with no
+    // explanation is exactly the silent-black-panel failure
+    // `display::configure` refuses to allow. Worded to hold under
+    // `--no-launch-browser` too, where the other displays get no browser from
+    // us at all.
     if state.displays.len() > 1 {
         tracing::warn!(
-            "Only display '{}' is played for now; the others have a browser but no playlist.",
+            "Only display '{}' is played for now; the playlist does not reach the others yet.",
             state.primary().name
         );
     }

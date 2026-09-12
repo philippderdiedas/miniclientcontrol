@@ -170,8 +170,16 @@ fn spawn(args: &Args, display: &crate::display::DisplayConfig) -> Result<Child> 
     command
         .arg(format!("--remote-debugging-port={}", port))
         .arg(format!("--user-data-dir={}", profile.display()))
-        // WM_CLASS's second field, which is what i3's `class` matcher reads,
-        // and the Wayland `app_id` sway matches on.
+        // WM_CLASS's second field, which is what i3's `class` matcher reads.
+        // On Wayland this is what becomes the compositor's `app_id` --
+        // measured, not assumed: on a real sway 1.12 session (an Arch box at
+        // 10.124.101.151), a Chromium launched with `--class=screen-A` showed
+        // up in `swaymsg -t get_tree` as `app_id: "screen-A"`, and the window
+        // was then moved with
+        // `[app_id="screen-A"] move container to output HEADLESS-1` and the
+        // move confirmed by reading the tree back. Not verified under
+        // GNOME/mutter, which matches `app-id` against `.desktop` files
+        // differently.
         .arg(format!("--class={}", display.window_class))
         .args(BASE_ARGS);
 

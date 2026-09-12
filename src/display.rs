@@ -54,6 +54,25 @@ fn validate_display_name(name: &str) -> Result<(), String> {
 /// Fails the process rather than degrading: a typo that silently dropped a
 /// screen would show up as a black panel in a venue, with nothing saying why.
 pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
+    // `--class` inside `--chromium-arg` is appended after the derived or pinned
+    // `--class` on the Chromium command line, and Chromium is last-wins for a
+    // repeated switch. Left alone, it would quietly collapse every display onto
+    // one `app_id`, which is exactly the placement failure a named display
+    // exists to avoid. There is already a purpose-built flag for this
+    // (`--chromium-class`), so refusing here costs a real deployment nothing.
+    if args
+        .chromium_arg
+        .iter()
+        .any(|a| a == "--class" || a.starts_with("--class="))
+    {
+        return Err(
+            "--class gehört nicht in --chromium-arg: es würde als letztes Flag über die \
+             abgeleitete oder gepinnte Klasse gewinnen und mehrere Displays auf denselben \
+             app_id kollabieren lassen. --chromium-class verwenden."
+                .to_string(),
+        );
+    }
+
     if args.display.is_empty() {
         // Exactly today's behaviour, down to the class derived from the port.
         let port = crate::chromium::debugging_port(&args.cdp_url).unwrap_or(BASE_CDP_PORT);
@@ -65,16 +84,24 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
         }]);
     }
 
-    // Both flags pin one value for the whole process, which with several screens
-    // would point every browser at the same profile directory and give every
-    // window the same `app_id`. A shared profile is not a cosmetic clash: two
-    // Chromiums on one corrupt it.
-    if args.display.len() > 1
-        && (args.chromium_class.is_some() || args.chromium_user_data_dir.is_some())
-    {
+    // The declared branch below always derives the port from a display's
+    // position and the class and profile from its name, and never reads these
+    // three flags back -- so a deployment that passes one of them alongside
+    // any `--display` would have it silently do nothing, which is what the
+    // "a flag actually passed pins its setting" rule (see `settings.rs`) exists
+    // to prevent. Refusing this for one declared display too, not only several,
+    // is deliberate: honouring the pin for exactly one would be a rule that
+    // changes meaning the moment a venue adds a second panel, which is the
+    // shape that breaks later. With several displays it is also the collision
+    // it always was -- a shared profile corrupts, a shared `app_id` only
+    // misplaces -- but that is no longer the only reason it is refused.
+    let cdp_url_pinned =
+        crate::chromium::debugging_port(&args.cdp_url).unwrap_or(BASE_CDP_PORT) != BASE_CDP_PORT;
+    if args.chromium_class.is_some() || args.chromium_user_data_dir.is_some() || cdp_url_pinned {
         return Err(
-            "--chromium-class und --chromium-user-data-dir gelten für alle Displays und \
-             würden sie kollidieren lassen. Mit mehreren --display weglassen."
+            "--chromium-class, --chromium-user-data-dir und --cdp-url werden mit --display \
+             aus Position und Namen des Displays abgeleitet und nicht aus diesen Flags \
+             gelesen. Ohne --display weglassen."
                 .to_string(),
         );
     }
@@ -182,21 +209,58 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_class_or_profile_collides_with_several_displays() {
+    fn a_pinned_flag_is_refused_once_any_display_is_declared() {
+        // The declared branch derives port, class and profile from the name and
+        // its position; a pin alongside it would silently do nothing, so this is
+        // refused for one declared display exactly as for several -- honouring
+        // it for exactly one would be a rule that changes meaning the moment a
+        // second display is added.
+        let mut single_class = args_with(vec!["a".into()]);
+        single_class.chromium_class = Some("fest".into());
+        assert!(configure(&single_class).is_err());
+
+        let mut single_profile = args_with(vec!["a".into()]);
+        single_profile.chromium_user_data_dir = Some(std::path::PathBuf::from("/tmp/fest"));
+        assert!(configure(&single_profile).is_err());
+
+        let mut single_cdp = args_with(vec!["a".into()]);
+        single_cdp.cdp_url = "http://127.0.0.1:9999".into();
+        assert!(configure(&single_cdp).is_err());
+
+        let mut several_class = args_with(vec!["a".into(), "b".into()]);
+        several_class.chromium_class = Some("fest".into());
+        assert!(configure(&several_class).is_err());
+
+        let mut several_profile = args_with(vec!["a".into(), "b".into()]);
+        several_profile.chromium_user_data_dir = Some(std::path::PathBuf::from("/tmp/fest"));
+        assert!(configure(&several_profile).is_err());
+
+        let mut several_cdp = args_with(vec!["a".into(), "b".into()]);
+        several_cdp.cdp_url = "http://127.0.0.1:9999".into();
+        assert!(configure(&several_cdp).is_err());
+
+        // No --display at all still honours every pin: that is the deployment
+        // real venues use today, and it must not move.
+        let mut no_display = args_with(vec![]);
+        no_display.chromium_class = Some("fest".into());
+        assert!(configure(&no_display).is_ok());
+        assert_eq!(configure(&no_display).unwrap()[0].window_class, "fest");
+    }
+
+    #[test]
+    fn a_smuggled_class_via_chromium_arg_is_refused() {
+        // A repeated Chromium switch is last-wins, and this one is appended
+        // after the derived or pinned `--class` on the command line, so left
+        // alone it would collapse every display onto one `app_id`.
         let mut args = args_with(vec!["a".into(), "b".into()]);
-        args.chromium_class = Some("fest".into());
+        args.chromium_arg = vec!["--class=sneaky".into()];
         assert!(configure(&args).is_err());
 
-        let mut args = args_with(vec!["a".into(), "b".into()]);
-        args.chromium_user_data_dir = Some(std::path::PathBuf::from("/tmp/fest"));
-        assert!(configure(&args).is_err());
-
-        // One display is fine: there is nothing to collide with, and this is the
-        // deployment that has always been allowed to pin them.
-        let mut single = args_with(vec![]);
-        single.chromium_class = Some("fest".into());
-        assert!(configure(&single).is_ok());
-        assert_eq!(configure(&single).unwrap()[0].window_class, "fest");
+        // It is refused even without --display: there is a purpose-built flag
+        // for this (`--chromium-class`), so the smuggled form is never needed.
+        let mut no_display = args_with(vec![]);
+        no_display.chromium_arg = vec!["--class=sneaky".into()];
+        assert!(configure(&no_display).is_err());
     }
 
     #[test]
