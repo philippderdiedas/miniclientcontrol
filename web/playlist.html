@@ -136,6 +136,7 @@
     <button id="playlistDeleteBtn" type="button" class="danger">Löschen</button>
     <span class="feedback" id="playlistFeedback"></span>
   </div>
+  <p class="err" id="playlistLoadError" hidden>Playlists konnten nicht geladen werden – Server nicht erreichbar.</p>
 
   <div class="statusbar">
     <strong id="nowPlaying">läuft: –</strong>
@@ -450,6 +451,22 @@
     // reload, or a link an operator sends a colleague, lands on the same one.
     let currentPlaylist = null;
 
+    // `dirty` and `cardNodes` are keyed by item id alone, and item ids are global
+    // across playlists. Switching the playlist being viewed must clear both
+    // together: otherwise a `dirty` id left over from playlist A can collide with
+    // an id in playlist B, wrongly flagging a freshly-loaded card "ungespeichert",
+    // while the node in `cardNodes` that actually held the typed-in text for A is
+    // simply dropped on the next `loadPlaylist()` -- the edit is lost and the
+    // operator is told the opposite. Call this instead of assigning
+    // `currentPlaylist` directly.
+    function setCurrentPlaylist(id) {
+      if (id !== currentPlaylist) {
+        dirty.clear();
+        cardNodes.clear();
+      }
+      currentPlaylist = id;
+    }
+
     function setPlaylistParam(id) {
       const params = new URLSearchParams(location.search);
       if (id) params.set('playlist', id);
@@ -459,19 +476,38 @@
     }
 
     async function loadPlaylists() {
-      const lists = await fetch('/api/playlists').then((r) => r.json()).catch(() => []);
       const pick = document.getElementById('playlistPick');
+      const loadError = document.getElementById('playlistLoadError');
+      let lists;
+      try {
+        const res = await fetch('/api/playlists');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        lists = await res.json();
+      } catch (_) {
+        // A network failure and a genuine empty install must not read the same:
+        // only the success path below may claim "no playlists exist". Leave
+        // whatever was on screen alone and just say the fetch failed.
+        loadError.hidden = false;
+        return [];
+      }
+      loadError.hidden = true;
+
       pick.replaceChildren();
       for (const list of lists) {
-        pick.append(el('option', {
+        const option = el('option', {
           value: String(list.id),
           text: `${list.name} (${list.items})`,
-        }));
+        });
+        // The raw name, untouched by the "(count)" suffix appended above, so
+        // Umbenennen can prefill it without parsing that suffix back out of
+        // text this same function formatted.
+        option.dataset.name = list.name;
+        pick.append(option);
       }
       const wanted = new URLSearchParams(location.search).get('playlist');
-      currentPlaylist = (wanted && lists.some((l) => String(l.id) === wanted))
+      setCurrentPlaylist((wanted && lists.some((l) => String(l.id) === wanted))
         ? wanted
-        : (lists[0] ? String(lists[0].id) : null);
+        : (lists[0] ? String(lists[0].id) : null));
       if (currentPlaylist) pick.value = currentPlaylist;
 
       // An item form with nowhere to put the item is a form that produces a 400
@@ -488,7 +524,7 @@
     }
 
     document.getElementById('playlistPick').addEventListener('change', async (e) => {
-      currentPlaylist = e.target.value || null;
+      setCurrentPlaylist(e.target.value || null);
       setPlaylistParam(currentPlaylist);
       await loadPlaylist();
       await refreshStatus();
@@ -498,11 +534,14 @@
       const feedback = document.getElementById('playlistFeedback');
       const name = prompt('Name der neuen Playlist:');
       if (name === null) return;
+      const btn = document.getElementById('playlistNewBtn');
+      btn.disabled = true;
       const res = await fetch('/api/playlists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
+      btn.disabled = false;
       if (!res.ok) { flash(feedback, await readError(res, 'Anlegen fehlgeschlagen'), true); return; }
       const { id } = await res.json();
       setPlaylistParam(String(id));
@@ -515,14 +554,17 @@
       const feedback = document.getElementById('playlistFeedback');
       if (!currentPlaylist) return;
       const pick = document.getElementById('playlistPick');
-      const currentName = pick.selectedOptions[0] ? pick.selectedOptions[0].text.replace(/\s\(\d+\)$/, '') : '';
+      const currentName = pick.selectedOptions[0] ? pick.selectedOptions[0].dataset.name : '';
       const name = prompt('Neuer Name:', currentName);
       if (name === null) return;
+      const btn = document.getElementById('playlistRenameBtn');
+      btn.disabled = true;
       const res = await fetch(`/api/playlists/${currentPlaylist}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
+      btn.disabled = false;
       if (!res.ok) { flash(feedback, await readError(res, 'Umbenennen fehlgeschlagen'), true); return; }
       flash(feedback, 'umbenannt ✓');
       await loadPlaylists();
@@ -532,7 +574,10 @@
       const feedback = document.getElementById('playlistFeedback');
       if (!currentPlaylist) return;
       if (!confirm('Diese Playlist wirklich löschen?')) return;
+      const btn = document.getElementById('playlistDeleteBtn');
+      btn.disabled = true;
       const res = await fetch(`/api/playlists/${currentPlaylist}`, { method: 'DELETE' });
+      btn.disabled = false;
       // The server counts the items and this is its own message -- do not
       // pre-empt it here, or the page would have to count them again.
       if (!res.ok) { flash(feedback, await readError(res, 'Löschen fehlgeschlagen'), true); return; }
