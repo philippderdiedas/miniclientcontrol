@@ -545,10 +545,18 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
     // so the event goes out even when the override was left alone because an
     // operator had replaced it mid-session. That is deliberate: the event says
     // this session stopped holding the display, which is true either way, and it
-    // is what keeps every `override.set` paired with exactly one
-    // `override.cleared`. The asymmetry with `cast.ended` is also deliberate --
-    // that one describes a cast, so it is gated on one having been announced,
-    // while `override.cleared` describes the display and is not.
+    // is what keeps a session's own `override.set` paired with an
+    // `override.cleared` carrying the same `source`. The pairing holds per
+    // source and not globally, and a receiver must not assume otherwise:
+    // `handlers::set_override` fires a second `override.set{operator}` with no
+    // clear in between when an operator replaces one override with another, and
+    // `handlers::clear_override` fires `override.cleared{operator}`
+    // unconditionally, even with nothing set. An operator clearing a cast's
+    // override mid-session therefore produces `set{cast}`,
+    // `cleared{operator}`, `cleared{cast}` -- two clears for one set. The
+    // asymmetry with `cast.ended` is also deliberate -- that one describes a
+    // cast, so it is gated on one having been announced, while
+    // `override.cleared` describes the display and is not.
     match was {
         Showing::Cast => {
             if announced {
@@ -1029,7 +1037,15 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
         Some("stop") => {
             info!("Cast: {:?} asked to stop", role);
             let state = state.clone();
-            tokio::spawn(async move { end_session(&state, "sender").await });
+            // The arm is role-agnostic on purpose -- either end may hang up --
+            // so the reason has to come from `role`. Hard-coding "sender" put
+            // the display's own stop in the log and in `cast.ended` under the
+            // sender's name, which is a false trail for whoever reads it back.
+            let reason = match role {
+                Role::Sender => "sender",
+                Role::Display => "display",
+            };
+            tokio::spawn(async move { end_session(&state, reason).await });
             false
         }
         other => {
