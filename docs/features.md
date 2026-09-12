@@ -138,3 +138,77 @@ helping a guest over the phone is the only one who cannot see it.
 Settings live in the database, so they survive restarts. Anything passed on the
 command line pins that setting and the UI shows it as locked — which is also the
 way back in if the operator password is ever forgotten.
+
+## Webhooks
+
+The controller knows things nobody else does: a cast started, the display browser
+died and came back, the playlist has been empty since Tuesday. All of it used to
+live in a log on a device in a corridor. Webhooks are the way out: the controller
+**POSTs to URLs the operator configures** when something happens, so a Discord
+channel gets a line when a guest puts a page on the foyer screen and a monitoring
+system gets a ping when the display drops.
+
+Targets are a list of rows on `/webhooks.html`, not a setting — each has a name,
+a URL, a method, custom headers, the events it wants, and an optional body
+template. They are never configurable from the command line: a URL alone would
+fit a flag, but per-target headers, event selection and a template do not.
+
+Ten events, in four families:
+
+| Event | Carries |
+|---|---|
+| `playback.item_changed` | `item_id`, `kind` (`asset`/`url`), `title`, `url`, `duration` |
+| `playback.playlist_empty` | — |
+| `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) |
+| `override.cleared` | `source` |
+| `cast.started` | `sender_ip`, `mode` |
+| `cast.ended` | `reason`, `duration_secs` |
+| `guest_page.shown` | `url`, `sender_ip` |
+| `guest_page.ended` | `reason`, `duration_secs` |
+| `display.disconnected` | `error` |
+| `display.connected` | `reconnect` |
+
+Every one of them arrives in the same envelope — `event`, `timestamp`, `device`
+(the machine's hostname), and a `data` object with the fields above. A target
+with no template gets exactly that, as JSON, which is what most receivers want.
+
+**With a template, the envelope is the context.** The body is a
+[minijinja](https://docs.rs/minijinja) template rendered against it, so a Discord
+target and a Telegram target can each be given the shape they insist on without
+the controller knowing anything about either. Header *values* are templates too,
+which is enough for a receiver that routes on the event name in a header. The
+admin page offers the selected events' fields as clickable chips, and a chip
+always inserts `{{ data.x | tojson }}` — the `| tojson` is not decoration, it is
+what keeps a URL containing a quote, or a plain `true`, from producing invalid
+JSON.
+
+**Delivery is one attempt and no retry.** These events are ephemeral status, not
+a ledger: a `cast.started` redelivered four minutes later, after the cast ended,
+is worse than never sent — and a durable queue would put an SD-card write on the
+path of every event, on a device where the card is the component that dies. The
+result of the last attempt per target is shown on the page, in memory only.
+**Testen** renders a target against a sample event and delivers it for real,
+because a dry run proves the template compiles and nothing about whether Discord
+accepts it.
+
+Nothing a target does can reach the display. A receiver that hangs, answers `500`
+or redirects elsewhere costs the playlist nothing, and a redirect is refused
+rather than followed — see [deployment.md](deployment.md#a-webhook-target-may-hold-somebody-elses-secret).
+Internal receivers on self-signed certificates are this project's normal world,
+so there is a per-target switch for skipping certificate verification; it is
+per-row and visible rather than global, because a target holding an API token
+must not skip it by accident.
+
+`playback.item_changed` is the chatty one: a ten-second playlist fires it 360
+times an hour. It is opt-in like everything else, and the page says so beside the
+checkbox rather than leaving the operator to find out from their receiver's bill.
+
+**`display.disconnected` reports the CDP connection, not that anything is being
+painted.** It fires when the controller loses its DevTools session and has to
+reconnect, which is a real and common failure — but it is not a frozen-screen
+detector, and using it as one is relying on exactly the wrong signal. Measured on
+a Raspberry Pi 3 whose V3D GPU wedged: the kernel reset it once a second, the
+compositor sat blocked in `vc4_wait_for_seqno`, and the screen showed the same
+frame for thirteen hours while CDP answered every request normally and both page
+targets were present. No disconnect was detected, because nothing had
+disconnected.

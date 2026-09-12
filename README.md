@@ -140,7 +140,7 @@ These options also support environment variables through `clap` `env` support.
 ## Runtime Behavior
 
 - Creates the asset directory if missing.
-- Creates/migrates SQLite tables (`assets`, `playlist_items`, `settings`).
+- Creates/migrates SQLite tables (`assets`, `playlist_items`, `settings`, `webhooks`).
 - Starts an HTTP server on `0.0.0.0:<port>`.
 - Serves uploaded files from `/uploads/...`.
 - Serves embedded UI files with fallback to `index.html`.
@@ -213,6 +213,24 @@ These options also support environment variables through `clap` `env` support.
 `GET /api/cast/state` also carries a live pairing code and its remaining seconds
 while one exists, so the admin page can show what the display is showing.
 `/api/cast/info` never does.
+
+### Webhooks
+
+- `GET /api/webhooks` — list targets, each with the result of its last delivery
+- `POST /api/webhooks` — create a target
+- `PUT /api/webhooks/{id}` — update a target
+- `DELETE /api/webhooks/{id}` — remove a target
+- `POST /api/webhooks/{id}/test` — render an enabled target against a sample
+  event and deliver it for real, answering `{ ok, outcome }` with what came back
+- `GET /api/webhooks/events` — the event catalogue: name, description and the
+  fields each one carries, plus the rule for composing a placeholder. The admin
+  page builds its checkboxes and its chips from this and never from a copy of
+  its own
+
+Create and update reject what could not work: an unknown event name, a URL whose
+scheme is not `http`/`https`, a method other than `POST`/`PUT`/`PATCH`, a header
+name hyper would refuse, and a body or header template that does not compile.
+Each answers `400` with `{ "error": "…" }`.
 
 ## Screen Casting
 

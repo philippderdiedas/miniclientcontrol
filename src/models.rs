@@ -294,6 +294,11 @@ pub struct PlaylistItemWithAsset {
     pub mimetype: Option<String>,
     #[sqlx(default)]
     pub asset_duration: Option<i64>,
+
+    /// The asset's original upload name, which is what a webhook calls the item.
+    /// `local_path` is a sanitised derivative and reads badly in a notification.
+    #[sqlx(default)]
+    pub filename: Option<String>,
 }
 
 // --- Application State ---
@@ -344,4 +349,7 @@ pub struct AppState {
     pub browser_pid: Arc<Mutex<Option<u32>>>,
     /// Screen-cast session. A running cast owns `override_item`; see `cast.rs`.
     pub cast: crate::cast::SharedCastSession,
+    /// Outbound webhooks. `fire` is synchronous and infallible, which is what
+    /// lets the control loop call it.
+    pub webhooks: Arc<crate::webhook::Dispatcher>,
 }

@@ -11,6 +11,7 @@ mod settings;
 mod chromium;
 mod mdns;
 mod audio;
+mod webhook;
 
 use anyhow::Result;
 use axum::{
@@ -251,6 +252,7 @@ async fn main() -> Result<()> {
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
         browser_pid: Arc::new(Mutex::new(None)),
+        webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 
     // A custom `.local` name has to be announced; Avahi only does the hostname.
@@ -294,6 +296,22 @@ async fn main() -> Result<()> {
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 
         .layer(CorsLayer::permissive())
+        // Merged *after* the CORS layer, which in axum applies only to the
+        // routes registered before it, so the webhook API answers no
+        // cross-origin read. Nothing in this repository needs it: every page
+        // under `web/` fetches its own origin with a relative path, and the
+        // cast socket is a WebSocket, which CORS does not govern. The rest of
+        // the operator API stays permissive because that is what it has always
+        // been -- the difference here is that a target's headers hold a *third
+        // party's* credential, which unlike `cast_code` is worth something off
+        // this network, so a page the operator happens to visit must not be
+        // able to read it back. This is not an access-control boundary and does
+        // not pretend to be one: configure basic auth, as
+        // docs/deployment.md says. Being merged last also leaves these routes
+        // on axum's default body limit rather than the 500 MB an upload needs,
+        // which is the right way round: a target is a few kilobytes of
+        // template.
+        .merge(webhook::api::routes())
         .with_state(state.clone());
 
     let app = app.layer(middleware::from_fn_with_state(

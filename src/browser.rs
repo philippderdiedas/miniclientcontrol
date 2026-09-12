@@ -22,6 +22,13 @@ pub async fn browser_loop(state: AppState) {
     // one — on a device whose playlist is touched regularly, later items never played.
     let mut resume_after_order: Option<i64> = None;
 
+    // Edge-tracking for the two events that would otherwise repeat themselves.
+    // The empty-playlist branch re-runs every five seconds for as long as the
+    // playlist stays empty, and the connect path runs on every reconnect, so
+    // firing from either unguarded would be a notification on a timer.
+    let mut announced_empty = false;
+    let mut connected_before = false;
+
     loop {
         // 1. Launch or Connect to Chrome
         // Deliberately permissive. Signage routinely points at internal dashboards
@@ -149,6 +156,24 @@ pub async fn browser_loop(state: AppState) {
         let dynamic_page = page.clone();
         let mut keep_loaded_tabs: HashMap<i64, (Page, String)> = HashMap::new();
 
+        // Announced here rather than straight after `Browser::connect`: every
+        // step between the two can still bail out to the top of this loop, and a
+        // display whose control page failed to initialise is not one anybody
+        // would call connected. Reaching this line means the browser is set up
+        // and about to be driven.
+        //
+        // `reconnect` means "again within this process", which is narrower than
+        // what an operator means by the word. `connected_before` starts false at
+        // every start, and `chromium.rs` deliberately leaves the browser running
+        // when the controller stops, so the first connect after a deploy or a
+        // crash reports `reconnect: false` while the browser it attached to never
+        // went anywhere. Widening it would mean persisting the flag, which is an
+        // SD-card write for a field nobody acts on.
+        state.webhooks.fire(crate::webhook::Event::DisplayConnected {
+            reconnect: connected_before,
+        });
+        connected_before = true;
+
         // Inner loop mainly for playlist iteration
         let mut reconnect_needed = false;
         loop {
@@ -176,7 +201,7 @@ pub async fn browser_loop(state: AppState) {
                     p.start_date, p.end_date,
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
-                    a.local_path, a.mimetype, a.duration as asset_duration
+                    a.local_path, a.mimetype, a.duration as asset_duration, a.filename
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
                                 WHERE p.is_enabled = 1
@@ -234,6 +259,11 @@ pub async fn browser_loop(state: AppState) {
                 {
                     let mut lock = state.current_item_id.lock().await;
                     *lock = None;
+                }
+
+                if !announced_empty {
+                    announced_empty = true;
+                    state.webhooks.fire(crate::webhook::Event::PlaylistEmpty);
                 }
 
                 // The idle screen is a page like any other. It is also the one
@@ -310,6 +340,24 @@ pub async fn browser_loop(state: AppState) {
                     item.duration.or(item.asset_duration).unwrap_or(10),
                 ) as u64;
                 let intended_duration = Duration::from_secs(duration_secs);
+
+                // Something is playing again, so the next empty playlist is worth
+                // announcing afresh.
+                announced_empty = false;
+                state.webhooks.fire(crate::webhook::Event::ItemChanged {
+                    item_id: item.id,
+                    kind: if item.asset_id.is_some() { "asset" } else { "url" },
+                    // A URL item has no name but its URL, and that URL can carry
+                    // credentials exactly as the `url` field can -- so it is
+                    // redacted here too rather than only in `url`.
+                    title: item
+                        .filename
+                        .clone()
+                        .or_else(|| item.url.as_deref().map(redact_str))
+                        .unwrap_or_default(),
+                    url: redact_str(&target_url),
+                    duration: duration_secs,
+                });
 
                 let (active_page, do_navigate) = if item.keep_loaded {
                     if let Some((tab, _)) = keep_loaded_tabs.get(&item.id) {
@@ -518,6 +566,14 @@ pub async fn browser_loop(state: AppState) {
 
         if reconnect_needed {
             error!("CDP session lost. Reconnecting to browser...");
+            // The only way out of the inner loop, so this is the one path that
+            // loses a connection that was working. The guard is belt and braces
+            // against a future early `continue` slipping in above.
+            if connected_before {
+                state.webhooks.fire(crate::webhook::Event::DisplayDisconnected {
+                    error: "the CDP connection was lost".to_string(),
+                });
+            }
             sleep(Duration::from_secs(2)).await;
         }
     }
@@ -742,6 +798,18 @@ fn internal_pdf_viewer_url(port: u16, local_path: &str, mode: &ScrollMode) -> St
         port,
         query.join("&")
     )
+}
+
+/// Strip credentials from a URL that is about to leave the process.
+///
+/// A playlist URL can carry them exactly like a guest page URL can, and a
+/// webhook is somewhere they must not go. Anything unparseable is passed
+/// through: it is not a URL with credentials in it either.
+pub(crate) fn redact_str(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => crate::guest_page::redact(&parsed),
+        Err(_) => url.to_string(),
+    }
 }
 
 fn no_content_url(port: u16) -> String {

@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Webhooks</title>
+  <style>
+    :root {
+      --line: #d8d8d8;
+      --muted: #666;
+      --accent: #0b6b3a;
+      --accent-bg: #e8f5ee;
+      --warn: #8a5a00;
+      --warn-bg: #fff5e0;
+      --err: #a11;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 1000px;
+      margin: 0 auto 4rem;
+      padding: 0 1rem;
+      line-height: 1.45;
+    }
+    h1 { margin-bottom: .2rem; }
+    nav { margin: 0 0 1rem; color: var(--muted); }
+    .muted { color: var(--muted); }
+    .err { color: var(--err); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: .8rem;
+      margin: .8rem 0;
+    }
+    .card.dirty { border-color: var(--warn); background: var(--warn-bg); }
+    .grid { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: flex-end; }
+    .f { display: flex; flex-direction: column; gap: .15rem; }
+    .f span { font-size: .8rem; color: var(--muted); }
+    .inline { display: inline-flex; align-items: center; gap: .3rem; }
+    .events { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .2rem; margin: .6rem 0; }
+    .events label { font-size: .9rem; }
+    .chatty { color: var(--warn); font-size: .8rem; display: block; margin-left: 1.4rem; }
+    .noEvents { color: var(--warn); font-size: .85rem; margin: -.3rem 0 .6rem; }
+    textarea { width: 100%; min-height: 5rem; font-family: ui-monospace, monospace; font-size: .85rem; }
+    .chips { display: flex; flex-wrap: wrap; gap: .3rem; margin: .3rem 0; }
+    .chip {
+      font-family: ui-monospace, monospace; font-size: .75rem;
+      border: 1px solid var(--line); border-radius: 10px;
+      padding: .1rem .5rem; background: #fafafa; cursor: pointer;
+    }
+    .headers { display: flex; flex-direction: column; gap: .3rem; margin: .4rem 0; }
+    .headerRow { display: flex; gap: .4rem; }
+    .actions { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; }
+    .feedback { font-size: .85rem; }
+    .last { font-size: .85rem; margin-top: .4rem; }
+    .last.ok { color: var(--accent); }
+    .last.bad { color: var(--err); }
+    button.primary { background: var(--accent); color: #fff; border: 0; padding: .35rem .8rem; border-radius: 4px; cursor: pointer; }
+    button { padding: .35rem .7rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Webhooks</h1>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a></nav>
+  <p class="muted">
+    Der Controller schickt eine Nachricht, wenn etwas passiert. Ein Versuch pro
+    Ereignis, keine Wiederholung.
+  </p>
+
+  <p class="err" id="loadError" hidden>Webhooks konnten nicht geladen werden – Server nicht erreichbar.</p>
+  <p class="err" id="catalogueError" hidden>
+    Ereignis-Katalog konnte nicht geladen werden – Ereignisse und Platzhalter fehlen, bis die Seite neu geladen wird.
+  </p>
+  <div id="list"></div>
+  <p class="muted" id="emptyHint" hidden>Noch keine Webhooks.</p>
+  <button type="button" class="primary" id="addBtn">Webhook hinzufügen</button>
+
+  <script>
+    // Every node here is built with createElement/textContent. A webhook URL and
+    // a receiver's error body are both attacker-influenced, so string-interpolated
+    // innerHTML would be an injection sink.
+    const el = (tag, props = {}, ...children) => {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') node.className = v;
+        else if (k === 'text') node.textContent = v;
+        else if (k === 'style') node.style.cssText = v;
+        else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+        else if (v !== null && v !== undefined && v !== false) node[k] = v;
+      }
+      for (const c of children) if (c) node.append(c);
+      return node;
+    };
+
+    const field = (labelText, input) =>
+      el('label', { class: 'f' }, el('span', { text: labelText }), input);
+
+    // Lifted from playlist.html so both pages report success/failure the same way:
+    // a success message clears itself, an error one sits until the next attempt.
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+      if (!isError) setTimeout(() => { if (node.textContent === message) node.textContent = ''; }, 2500);
+    }
+
+    async function readError(res, fallback) {
+      try {
+        const body = await res.json();
+        if (body && body.error) return body.error;
+      } catch (_) { /* not a JSON error body */ }
+      return fallback;
+    }
+
+    // The event catalogue comes from the server and is never written into this
+    // page: a UI offering placeholders the server does not send is a display bug
+    // that looks like a server bug.
+    let CATALOGUE = { events: [], envelope: [], field_prefix: 'data.', placeholder_suffix: ' | tojson' };
+
+    // The server's rule, applied rather than reimplemented. `| tojson` is correct
+    // for every type, not a special case for booleans: a bare boolean renders
+    // Jinja2-style as `True`, which is not valid JSON.
+    const dataPlaceholder = (field) =>
+      `{{ ${CATALOGUE.field_prefix}${field}${CATALOGUE.placeholder_suffix} }}`;
+    const envelopePlaceholder = (name) => `{{ ${name} }}`;
+    // Cards the operator has touched since their last save. Skipped entirely by
+    // the poll, because the cards *are* the edit form.
+    const dirty = new Set();
+    // id -> the card's DOM node, so the poll can update one line inside it.
+    const cards = new Map();
+
+    const relative = (iso) => {
+      const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+      if (seconds < 60) return `vor ${seconds} s`;
+      if (seconds < 3600) return `vor ${Math.round(seconds / 60)} min`;
+      return `vor ${Math.round(seconds / 3600)} h`;
+    };
+
+    const insertAtCursor = (textarea, snippet) => {
+      // No `??` fallback: selectionStart is null only for input types where
+      // selection does not apply, never for a textarea, so a never-focused one
+      // reports value.length -- the `value` setter moves the caret to the end.
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      // setRangeText is the scoped, spec'd insertion: it cannot desynchronise
+      // selection from value the way assigning textarea.value can. Whether it
+      // also registers a browser undo transaction is unmeasured and not a spec
+      // guarantee -- do not claim it does.
+      textarea.setRangeText(snippet, start, end, 'end');
+      textarea.focus();
+      textarea.dispatchEvent(new Event('input'));
+    };
+
+    function buildCard(hook) {
+      const state = {
+        id: hook.id ?? null,
+        events: new Set(hook.events || []),
+        headers: Object.entries(hook.headers || {}),
+      };
+
+      const card = el('div', { class: 'card' });
+      const markDirty = () => {
+        if (state.id !== null) dirty.add(state.id);
+        card.classList.add('dirty');
+      };
+
+      const name = el('input', { value: hook.name || '', style: 'width:170px', oninput: markDirty });
+      const url = el('input', { value: hook.url || '', placeholder: 'https://...', style: 'width:320px', oninput: markDirty });
+      const method = el('select', { onchange: markDirty },
+        ...['POST', 'PUT', 'PATCH'].map((m) =>
+          el('option', { value: m, text: m, selected: (hook.method || 'POST') === m })));
+      const enabled = el('input', { type: 'checkbox', checked: hook.is_enabled !== false, onchange: markDirty });
+      const insecure = el('input', { type: 'checkbox', checked: !!hook.insecure_tls, onchange: markDirty });
+
+      const body = el('textarea', {
+        value: hook.body || '',
+        placeholder: 'Leer lassen für die Standard-JSON-Nachricht.',
+        oninput: markDirty,
+      });
+
+      const chips = el('div', { class: 'chips' });
+      const renderChips = () => {
+        chips.replaceChildren();
+        const add = (snippet) => chips.append(el('button', {
+          type: 'button', class: 'chip', text: snippet,
+          onclick: () => insertAtCursor(body, snippet),
+        }));
+        for (const name of CATALOGUE.envelope) add(envelopePlaceholder(name));
+        const fields = new Set();
+        for (const entry of CATALOGUE.events) {
+          if (state.events.has(entry.name)) for (const f of entry.fields) fields.add(f);
+        }
+        // Composed from the server's own prefix and suffix rather than hardcoded
+        // here, so the shape an operator gets by clicking is correct for every
+        // field type and stays correct if the server's rule ever changes.
+        for (const f of [...fields].sort()) add(dataPlaceholder(f));
+      };
+
+      // A target with nothing checked is saved, enabled, and silent forever.
+      // That is a legitimate place to park one mid-edit, so it is not a `400`
+      // from `validate` — but it must not look configured either, because
+      // "enabled" and "never fires" is otherwise a contradiction the card shows
+      // no sign of.
+      const noEvents = el('div', { class: 'noEvents' });
+      const renderEventHint = () => {
+        noEvents.hidden = state.events.size > 0;
+        noEvents.textContent = 'Kein Ereignis ausgewählt — dieser Webhook wird nie gesendet.';
+      };
+
+      const events = el('div', { class: 'events' });
+      for (const entry of CATALOGUE.events) {
+        const box = el('input', {
+          type: 'checkbox',
+          checked: state.events.has(entry.name),
+          onchange: (e) => {
+            if (e.target.checked) state.events.add(entry.name);
+            else state.events.delete(entry.name);
+            renderChips();
+            renderEventHint();
+            markDirty();
+          },
+        });
+        const label = el('label', { class: 'inline' }, box,
+          el('span', { text: `${entry.name} — ${entry.description}` }));
+        const wrapper = el('div', {}, label);
+        if (entry.chatty) {
+          wrapper.append(el('span', {
+            class: 'chatty',
+            text: 'Feuert bei jedem Element — bei einer 10-Sekunden-Playlist 360-mal pro Stunde.',
+          }));
+        }
+        events.append(wrapper);
+      }
+      renderChips();
+      renderEventHint();
+
+      const headerRows = el('div', { class: 'headers' });
+      const addHeaderRow = (key = '', value = '') => {
+        const k = el('input', { value: key, placeholder: 'Header', style: 'width:180px', oninput: markDirty });
+        // The example is composed from the catalogue's own envelope rather than
+        // spelling out a field name here; with no envelope loaded (yet) it just
+        // says "Wert" instead of guessing.
+        const v = el('input', {
+          value: value,
+          placeholder: CATALOGUE.envelope[0] ? `Wert oder ${envelopePlaceholder(CATALOGUE.envelope[0])}` : 'Wert',
+          style: 'width:320px', oninput: markDirty,
+        });
+        const row = el('div', { class: 'headerRow' }, k, v,
+          el('button', { type: 'button', text: '−', onclick: () => { row.remove(); markDirty(); } }));
+        row.dataset.header = '1';
+        headerRows.append(row);
+      };
+      for (const [k, v] of state.headers) addHeaderRow(k, v);
+
+      const feedback = el('span', { class: 'feedback' });
+      const last = el('div', { class: 'last' });
+      card.lastLine = last;
+
+      const collect = () => {
+        const headers = {};
+        for (const row of headerRows.querySelectorAll('[data-header]')) {
+          const [k, v] = row.querySelectorAll('input');
+          if (k.value.trim()) headers[k.value.trim()] = v.value;
+        }
+        return {
+          // Sent verbatim, including empty: the server's own rejection ("Der Name
+          // darf nicht leer sein.") is the message the operator should see, not a
+          // client-side substitute that would let several targets share "Webhook"
+          // — the one identifier every log line has for a target.
+          name: name.value.trim(),
+          url: url.value.trim(),
+          method: method.value,
+          is_enabled: enabled.checked,
+          events: [...state.events],
+          headers,
+          body: body.value.trim() ? body.value : null,
+          insecure_tls: insecure.checked,
+        };
+      };
+
+      const save = async () => {
+        flash(feedback, 'Speichern…', false);
+        const payload = collect();
+        const target = state.id === null ? '/api/webhooks' : `/api/webhooks/${state.id}`;
+        let response;
+        try {
+          response = await fetch(target, {
+            method: state.id === null ? 'POST' : 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+        } catch (_) {
+          // The read side reports an unreachable server; the write side has to
+          // as well, or a save would end with the progress message quietly
+          // clearing itself and nothing said. The card keeps its dirty mark.
+          flash(feedback, 'Server nicht erreichbar.', true);
+          return;
+        }
+        if (!response.ok) {
+          flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        if (state.id === null && data.id) {
+          state.id = data.id;
+          cards.set(state.id, card);
+        }
+        dirty.delete(state.id);
+        card.classList.remove('dirty');
+        flash(feedback, 'Gespeichert.', false);
+      };
+
+      const test = async () => {
+        if (state.id === null) {
+          flash(feedback, 'Erst speichern.', true);
+          return;
+        }
+        flash(feedback, 'Sende…', false);
+        // No event name is hardcoded here: the catalogue is the only source. With
+        // nothing checked, the field is omitted and the server applies its own
+        // default (TestRequest.event is Option<String> with #[serde(default)]).
+        const event = [...state.events][0];
+        let response;
+        try {
+          response = await fetch(`/api/webhooks/${state.id}/test`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(event ? { event } : {}),
+          });
+        } catch (_) {
+          flash(feedback, 'Server nicht erreichbar.', true);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        flash(feedback, data.outcome || data.error || 'Keine Antwort.', !data.ok);
+      };
+
+      const remove = async () => {
+        const label = name.value.trim() || 'diesen Webhook';
+        if (!confirm(`„${label}“ wirklich löschen?`)) return;
+        if (state.id !== null) {
+          let response;
+          try {
+            response = await fetch(`/api/webhooks/${state.id}`, { method: 'DELETE' });
+          } catch (_) {
+            // Same reason as `save` and `test`: without this the card is left
+            // standing with no message at all, which reads as a delete that
+            // did nothing rather than as a server that could not be reached.
+            flash(feedback, 'Server nicht erreichbar.', true);
+            return;
+          }
+          if (!response.ok) {
+            // A failed delete keeps the row: the alternative is a page that shows
+            // the target as gone while it keeps firing, with the divergence
+            // invisible until a reload.
+            flash(feedback, await readError(response, 'Löschen fehlgeschlagen.'), true);
+            return;
+          }
+          cards.delete(state.id);
+          dirty.delete(state.id);
+        }
+        card.remove();
+        // Counted from the DOM, not from `cards`: that map holds only saved
+        // targets, so an unsaved new card would otherwise sit beside the
+        // "nothing configured" hint.
+        document.getElementById('emptyHint').hidden =
+          document.getElementById('list').children.length > 0;
+      };
+
+      card.append(
+        el('div', { class: 'grid' },
+          field('Name', name),
+          field('URL', url),
+          field('Methode', method),
+          el('label', { class: 'inline' }, enabled, el('span', { text: 'Aktiv' })),
+          el('label', { class: 'inline' }, insecure,
+            el('span', { text: 'TLS-Zertifikat nicht prüfen (nur für interne Empfänger)' }))),
+        el('p', { class: 'muted', text: 'Ereignisse' }),
+        events,
+        noEvents,
+        el('p', { class: 'muted', text: 'Header' }),
+        headerRows,
+        el('button', { type: 'button', text: '+ Header', onclick: () => { addHeaderRow(); markDirty(); } }),
+        el('p', { class: 'muted', text: 'Nachricht (leer = Standard-JSON)' }),
+        chips,
+        body,
+        el('div', { class: 'actions' },
+          el('button', { type: 'button', class: 'primary', text: 'Speichern', onclick: save }),
+          el('button', { type: 'button', text: 'Testen', onclick: test }),
+          el('button', { type: 'button', text: 'Löschen', onclick: remove }),
+          feedback),
+        last);
+
+      if (state.id !== null) cards.set(state.id, card);
+      applyLast(card, hook.last_result);
+      return card;
+    }
+
+    function applyLast(card, result) {
+      const line = card.lastLine;
+      if (!line) return;
+      if (!result) {
+        line.className = 'last muted';
+        line.textContent = 'Noch nichts gesendet.';
+        return;
+      }
+      line.className = result.ok ? 'last ok' : 'last bad';
+      // `test` marks a manually triggered send so it can never be mistaken for
+      // live traffic the target actually received.
+      const suffix = result.test ? ' · Testsendung' : '';
+      line.textContent = `${result.ok ? '✓' : '✗'} ${result.outcome} · ${relative(result.at)} · ${result.event}${suffix}`;
+    }
+
+    // Distinguishes "nothing configured" from "cannot talk to the server" — a
+    // non-2xx response or a thrown network error both mean the latter, and
+    // rendering an empty list for it would read as the affirmative "Noch keine
+    // Webhooks."
+    async function loadAll() {
+      const list = document.getElementById('list');
+      const loadError = document.getElementById('loadError');
+      const emptyHint = document.getElementById('emptyHint');
+      let hooks;
+      try {
+        const res = await fetch('/api/webhooks');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        hooks = await res.json();
+      } catch (_) {
+        loadError.hidden = false;
+        emptyHint.hidden = true;
+        return;
+      }
+      loadError.hidden = true;
+      list.replaceChildren();
+      cards.clear();
+      for (const hook of hooks) list.append(buildCard(hook));
+      emptyHint.hidden = hooks.length > 0;
+    }
+
+    // Polling updates the last-result line and nothing else. The cards are the
+    // edit form; re-rendering one would eat whatever is being typed into it.
+    async function poll() {
+      let hooks;
+      try {
+        const res = await fetch('/api/webhooks');
+        if (!res.ok) return;
+        hooks = await res.json();
+      } catch (_) {
+        return;
+      }
+      for (const hook of hooks) {
+        if (dirty.has(hook.id)) continue;
+        const card = cards.get(hook.id);
+        if (card) applyLast(card, hook.last_result);
+      }
+    }
+
+    document.getElementById('addBtn').addEventListener('click', () => {
+      const card = buildCard({ events: [], headers: {} });
+      card.classList.add('dirty');
+      document.getElementById('list').append(card);
+      document.getElementById('emptyHint').hidden = true;
+    });
+
+    (async () => {
+      // A failed catalogue fetch must not fall back to empty arrays silently: that
+      // renders cards with no event checkboxes and no chips and no message
+      // anywhere. Show the error and leave CATALOGUE at its safe empty default.
+      try {
+        const res = await fetch('/api/webhooks/events');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        CATALOGUE = await res.json();
+        document.getElementById('catalogueError').hidden = true;
+      } catch (_) {
+        document.getElementById('catalogueError').hidden = false;
+      }
+      await loadAll();
+      setInterval(poll, 2000);
+    })();
+  </script>
+</body>
+</html>

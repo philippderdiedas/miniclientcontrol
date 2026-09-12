@@ -1,6 +1,6 @@
 # Outbound webhooks
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-08-31
 
 ## What and why
@@ -78,8 +78,8 @@ CREATE TABLE IF NOT EXISTS webhooks (
     url          TEXT NOT NULL,
     method       TEXT NOT NULL DEFAULT 'POST',
     is_enabled   BOOLEAN DEFAULT 1,
-    events       TEXT NOT NULL DEFAULT '[]', -- JSON array of event names
-    headers      TEXT NOT NULL DEFAULT '{}', -- JSON object; values are templates
+    events       TEXT DEFAULT '[]', -- JSON array of event names
+    headers      TEXT DEFAULT '{}', -- JSON object; values are templates
     body         TEXT,                       -- minijinja template; NULL means the default envelope
     insecure_tls BOOLEAN DEFAULT 0,
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -123,10 +123,10 @@ per target and a template to put it in.
 | `playback.playlist_empty` | — | `browser.rs`, entering the idle screen |
 | `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) | `handlers.rs::set_override`, `cast.rs::activate_display` |
 | `override.cleared` | `source` | `handlers.rs::clear_override`, `cast.rs::deactivate_display` |
-| `cast.started` | `sender_ip`, `mode` | `cast.rs::activate_display` |
-| `cast.ended` | `reason` (`operator`/`grace`/`disabled`), `duration_secs` | `cast.rs::deactivate_display` |
+| `cast.started` | `sender_ip`, `mode` | `cast.rs::register_peer` |
+| `cast.ended` | `reason` (`operator`/`sender`/`display`/`grace`/`disabled`/`replaced`), `duration_secs` | `cast.rs::deactivate_display` |
 | `guest_page.shown` | `url`, `sender_ip` | `cast.rs::activate_display` |
-| `guest_page.ended` | `reason`, `duration_secs` | `cast.rs::deactivate_display` |
+| `guest_page.ended` | `reason` (as above), `duration_secs` | `cast.rs::deactivate_display` |
 | `display.disconnected` | `error` | `browser.rs`, outer loop on `is_connection_lost` |
 | `display.connected` | `reconnect` (bool) | `browser.rs`, after a successful CDP attach |
 
@@ -136,6 +136,17 @@ Three properties of this table are deliberate:
   `override_item`, so without it a receiver cannot tell an operator's decision
   from a cast starting, and would see two events for one occurrence. The
   cast and page families stay separate regardless, because they carry a sender.
+- **`cast.started` is emitted where the sender registers, not where the display is
+  pinned.** `start_pairing` pins the cast page to show the code, so an emit inside
+  `activate_display` announces a cast when a *code* appeared — and then stays silent
+  for the real cast, because `activate_display` early-returns once it already holds
+  the override. A session-scoped `cast_announced` flag keeps it to exactly one per
+  cast across a sender reconnect inside the grace period, and gates `cast.ended` so
+  an unused pairing code does not emit an end with no beginning. `override.set`
+  stays in `activate_display`: it describes the display being pinned, which is
+  exactly what happened.
+- **`started_at` is re-stamped when the sender registers**, so `duration_secs`
+  measures the cast rather than the pairing wait that preceded it.
 - **Every URL goes through `guest_page::redact`.** Credentials in a guest URL
   reach the browser and nothing else; a webhook is "nothing else". Same
   function as the log and the admin page use, so the three cannot drift.
@@ -154,7 +165,9 @@ mistake in a new place.
 
 ## The dispatcher
 
-New module `src/webhook.rs`. Nothing else grows by more than a few lines.
+New module `src/webhook/`: `mod.rs` for the machinery below, `api.rs` for the
+operator's HTTP surface, split for file size alone. Nothing else grows by more
+than a few lines.
 
 ```rust
 pub struct Dispatcher {
@@ -246,6 +259,11 @@ Three rules keep this from emitting broken JSON:
   }}"}` breaks the moment a URL contains a quote; `{"text": {{ data.url |
   tojson }}}` cannot. The placeholder chips in the UI insert the `| tojson`
   form, so what an operator gets by clicking is the correct shape.
+- **A bare boolean placeholder renders `True`, not `true`.** minijinja follows
+  Jinja2's `Display` for booleans, so `{"flag": {{ data.reconnect }}}` produces
+  invalid JSON while `{"flag": {{ data.reconnect | tojson }}}` is correct. This is
+  the second reason the admin page's chips insert the `| tojson` form for every
+  `data.*` field rather than only for strings — it is not merely about quoting.
 - **Autoescape is off, unconditionally.** minijinja defaults to HTML escaping,
   which turns `&` into `&amp;` inside a JSON string.
   `Environment::set_auto_escape_callback` returns `AutoEscape::None`.
@@ -262,7 +280,7 @@ target and never reaches the control loop.
 ### The dependency
 
 ```toml
-minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
+minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json"] }
 ```
 
 Pure Rust, `serde` its only required dependency. **The plan verifies it with
@@ -320,8 +338,9 @@ the table logs and answers with what it has.
 ### The test send
 
 `POST /api/webhooks/{id}/test` renders the target against a synthetic sample of
-an event the operator picks and **delivers it for real**, answering `{status,
-body_excerpt, error}`. Not a dry run: a dry run proves the template compiles
+an event the operator picks and **delivers it for real**, answering
+`{ok, outcome}` — the outcome being the status, the refused redirect, or the
+transport error, in the same words the last-result line uses. Not a dry run: a dry run proves the template compiles
 and nothing about whether Discord accepts it, which is the actual question. The
 envelope carries `"test": true` so a receiver can tell.
 
@@ -396,7 +415,7 @@ reach the control loop, which is the single thing that must not break.
 
 - `README.md` — the API overview gains a Webhooks section
 - `docs/features.md` — what webhooks do
-- `docs/architecture.md` — the module map gains `webhook.rs`
+- `docs/architecture.md` — the module map gains `webhook/`
 - `CLAUDE.md` — the `--webhook` line under "not taken from picklecast" gains a
   sentence distinguishing that callback from this feature, plus the `fire`
   must-not-block rule and the refuse-redirects rule
