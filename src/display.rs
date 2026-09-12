@@ -11,6 +11,11 @@ use std::path::PathBuf;
 
 use crate::models::Args;
 
+/// The clap default for `--cdp-url`. Kept here so the declared branch can tell
+/// "the operator named a URL" from "nobody passed one" -- the flag has a default
+/// and an env var, so its value alone does not say which.
+const DEFAULT_CDP_URL: &str = "http://127.0.0.1:9222";
+
 /// The first CDP port, and the one a single-display deployment has always used.
 const BASE_CDP_PORT: u16 = 9222;
 
@@ -54,12 +59,28 @@ fn validate_display_name(name: &str) -> Result<(), String> {
 /// Fails the process rather than degrading: a typo that silently dropped a
 /// screen would show up as a black panel in a venue, with nothing saying why.
 pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
+    if args.display.is_empty() {
+        // Exactly today's behaviour, down to the class derived from the port.
+        let port = crate::chromium::debugging_port(&args.cdp_url).unwrap_or(BASE_CDP_PORT);
+        return Ok(vec![DisplayConfig {
+            name: "default".to_string(),
+            cdp_url: args.cdp_url.clone(),
+            window_class: crate::chromium::window_class(args, port),
+            user_data_dir: crate::chromium::user_data_dir(args, port),
+        }]);
+    }
+
     // `--class` inside `--chromium-arg` is appended after the derived or pinned
     // `--class` on the Chromium command line, and Chromium is last-wins for a
     // repeated switch. Left alone, it would quietly collapse every display onto
     // one `app_id`, which is exactly the placement failure a named display
     // exists to avoid. There is already a purpose-built flag for this
-    // (`--chromium-class`), so refusing here costs a real deployment nothing.
+    // (`--chromium-class`).
+    //
+    // Below the early return on purpose: with no `--display` there is no
+    // second window to collide with, the smuggled class simply wins as it
+    // always did, and refusing there would turn a command line that works
+    // today into a refusal to boot.
     if args
         .chromium_arg
         .iter()
@@ -73,17 +94,6 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
         );
     }
 
-    if args.display.is_empty() {
-        // Exactly today's behaviour, down to the class derived from the port.
-        let port = crate::chromium::debugging_port(&args.cdp_url).unwrap_or(BASE_CDP_PORT);
-        return Ok(vec![DisplayConfig {
-            name: "default".to_string(),
-            cdp_url: args.cdp_url.clone(),
-            window_class: crate::chromium::window_class(args, port),
-            user_data_dir: crate::chromium::user_data_dir(args, port),
-        }]);
-    }
-
     // The declared branch below always derives the port from a display's
     // position and the class and profile from its name, and never reads these
     // three flags back -- so a deployment that passes one of them alongside
@@ -95,13 +105,16 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
     // shape that breaks later. With several displays it is also the collision
     // it always was -- a shared profile corrupts, a shared `app_id` only
     // misplaces -- but that is no longer the only reason it is refused.
-    let cdp_url_pinned =
-        crate::chromium::debugging_port(&args.cdp_url).unwrap_or(BASE_CDP_PORT) != BASE_CDP_PORT;
+    // Compared whole, not by port: `--cdp-url http://192.168.1.5:9222` names a
+    // different host on the default port, and a port-only check waved it
+    // through to be silently rewritten to loopback -- the very silent drop this
+    // guard exists to stop.
+    let cdp_url_pinned = args.cdp_url != DEFAULT_CDP_URL;
     if args.chromium_class.is_some() || args.chromium_user_data_dir.is_some() || cdp_url_pinned {
         return Err(
             "--chromium-class, --chromium-user-data-dir und --cdp-url werden mit --display \
              aus Position und Namen des Displays abgeleitet und nicht aus diesen Flags \
-             gelesen. Ohne --display weglassen."
+             gelesen. Diese Flags nur ohne --display verwenden."
                 .to_string(),
         );
     }
@@ -256,11 +269,16 @@ mod tests {
         args.chromium_arg = vec!["--class=sneaky".into()];
         assert!(configure(&args).is_err());
 
-        // It is refused even without --display: there is a purpose-built flag
-        // for this (`--chromium-class`), so the smuggled form is never needed.
+        // But NOT without --display. There is no second window to collide with
+        // there, the smuggled class simply wins as it always did, and refusing
+        // would turn a command line that works today into a refusal to boot --
+        // which the "no --display behaves exactly as today" rule forbids.
         let mut no_display = args_with(vec![]);
         no_display.chromium_arg = vec!["--class=sneaky".into()];
-        assert!(configure(&no_display).is_err());
+        assert!(
+            configure(&no_display).is_ok(),
+            "refusing this without --display breaks an existing command line"
+        );
     }
 
     #[test]
