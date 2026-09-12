@@ -43,6 +43,9 @@ pub struct AddToPlaylistRequest {
     pub scroll_config: Option<ScrollMode>,
     /// This item's own overlay, on top of the global one.
     pub overlay: Option<crate::settings::ItemOverlay>,
+    /// Which playlist the item joins. Required: an item with no playlist is one
+    /// no screen will ever play, and nothing would say so.
+    pub playlist_id: i64,
 }
 
 #[derive(Deserialize)]
@@ -310,24 +313,36 @@ pub async fn delete_asset(
     StatusCode::OK
 }
 
-pub async fn get_playlist(State(state): State<AppState>) -> impl IntoResponse {
-    // We need to join with assets.
+#[derive(serde::Deserialize)]
+pub struct PlaylistQuery {
+    pub playlist_id: Option<i64>,
+}
+
+pub async fn get_playlist(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<PlaylistQuery>,
+) -> impl IntoResponse {
     // scroll_config is COALESCEd: a NULL there fails to decode into Json<ScrollMode>,
     // which fails the whole query and would silently return an empty playlist.
+    // The playlist filter is applied with a NULL-tolerant predicate so that
+    // `?playlist_id=` absent still means "everything", which is what the legacy
+    // single-display callers expect.
     let items = sqlx::query_as::<_, PlaylistItemWithAsset>(
         r#"
         SELECT
             p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
-            p.start_date, p.end_date,
+            p.start_date, p.end_date, p.playlist_id,
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.overlay_config, 'null') as overlay_config,
             a.local_path, a.mimetype, a.duration as asset_duration, a.filename
         FROM playlist_items p
         LEFT JOIN assets a ON p.asset_id = a.id
+        WHERE (?1 IS NULL OR p.playlist_id = ?1)
         ORDER BY p.play_order ASC
         "#
     )
+    .bind(query.playlist_id)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_else(|e| {
@@ -366,7 +381,7 @@ pub async fn add_to_playlist(
         .map(sqlx::types::Json);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
@@ -378,6 +393,7 @@ pub async fn add_to_playlist(
     .bind(payload.end_date)
     .bind(sqlx::types::Json(scroll_config))
     .bind(overlay)
+    .bind(payload.playlist_id)
     .execute(&state.pool)
     .await
     {
@@ -561,9 +577,24 @@ pub async fn move_playlist_item(
         }
     };
 
+    // The renumbering below must stay inside the moved item's own playlist:
+    // pulling the whole table into one 1..n sequence would interleave two
+    // screens' orders, which shows up as items playing in the wrong sequence on
+    // a screen nobody was touching. `IS` rather than `=` because playlist_id is
+    // nullable (a row an older binary wrote and the backfill never reached),
+    // and `NULL = NULL` is unknown, not true, in SQLite's WHERE clause.
+    let playlist_id: Option<i64> =
+        sqlx::query_scalar("SELECT playlist_id FROM playlist_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or(None)
+            .flatten();
+
     let mut ids = match sqlx::query_scalar::<_, i64>(
-        "SELECT id FROM playlist_items ORDER BY play_order ASC, id ASC",
+        "SELECT id FROM playlist_items WHERE playlist_id IS ? ORDER BY play_order ASC, id ASC",
     )
+    .bind(playlist_id)
     .fetch_all(&state.pool)
     .await
     {
