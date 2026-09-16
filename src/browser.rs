@@ -34,6 +34,11 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
     // one — on a device whose playlist is touched regularly, later items never played.
     let mut resume_after_order: Option<i64> = None;
 
+    // The assignment the pass before this one played, so that a reassignment can
+    // be told from a plain re-read. A function-local like the edge-tracking
+    // below, which is what makes it per display.
+    let mut last_assigned: Option<i64> = None;
+
     // Edge-tracking for the two events that would otherwise repeat themselves.
     // The empty-playlist branch re-runs every five seconds for as long as the
     // playlist stays empty, and the connect path runs on every reconnect, so
@@ -206,8 +211,45 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             }
 
             // 2. Fetch Playlist
-            let playlist = match sqlx::query_as::<_, PlaylistItemWithAsset>(
-                r#"
+            // Which playlist this screen plays is read per pass and never
+            // cached: an operator reassigning it expects the next item to come
+            // from the new one, and this is a single row out of a table with
+            // single-digit rows. A failure to read it is *not* treated as "no
+            // playlist" -- a locked database would then blank a screen that is
+            // playing perfectly well -- so it takes the same log-and-retry path
+            // as a failed playlist read below and leaves the page alone.
+            let assigned = match sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT playlist_id FROM displays WHERE name = ?",
+            )
+            .bind(&display_name)
+            .fetch_optional(&state.pool)
+            .await
+            {
+                Ok(row) => row.flatten(),
+                Err(e) => {
+                    error!("Failed to read the playlist assignment: {}", e);
+                    sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            // A playlist just assigned starts at its beginning. `play_order` is
+            // numbered per playlist, so `resume_after_order` -- an order within
+            // the list it was recorded in -- means nothing in a different one,
+            // and carrying it across would drop the operator into the middle of
+            // the playlist they just picked.
+            if assigned != last_assigned {
+                resume_after_order = None;
+                last_assigned = assigned;
+            }
+
+            // A screen nobody has chosen a playlist for plays nothing and takes
+            // the idle branch below. Falling back to every item in the table
+            // would mean a second screen mirrors the first the moment it is
+            // declared, which is the opposite of what declaring it asked for.
+            let playlist = match assigned {
+                Some(playlist_id) => match sqlx::query_as::<_, PlaylistItemWithAsset>(
+                    r#"
                 SELECT
                     p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
                     p.start_date, p.end_date,
@@ -217,19 +259,24 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
                                 WHERE p.is_enabled = 1
+                                    AND p.playlist_id = ?
                                     AND (p.start_date IS NULL OR datetime(p.start_date) <= datetime('now'))
                                     AND (p.end_date IS NULL OR datetime('now') <= datetime(p.end_date))
                 ORDER BY p.play_order ASC
-                "#
-            )
-            .fetch_all(&state.pool)
-            .await {
-                Ok(list) => list,
-                Err(e) => {
-                    error!("DB Error: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
+                "#,
+                )
+                .bind(playlist_id)
+                .fetch_all(&state.pool)
+                .await
+                {
+                    Ok(list) => list,
+                    Err(e) => {
+                        error!("DB Error: {}", e);
+                        sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                },
+                None => Vec::new(),
             };
 
             if let Err(e) = reconcile_keep_loaded_tabs(
@@ -496,7 +543,8 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                                 .unwrap_or(Duration::from_secs(0));
                         },
                         _ = display.playlist_signal.notified() => {
-                            let still_active = is_playlist_item_active_now(&state, item.id).await;
+                            let still_active =
+                                is_playlist_item_active_now(&state, &display_name, item.id).await;
                             if still_active {
                                 reload_before_next = true;
                                 let elapsed_now = item_started_at.elapsed();
@@ -836,18 +884,31 @@ fn empty_playlist_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/empty_playlist.html", port)
 }
 
-async fn is_playlist_item_active_now(state: &AppState, id: i64) -> bool {
+/// Whether the item on screen is still one this display should be showing.
+///
+/// The join against `displays` is what makes a reassignment land on the item
+/// already playing: an item that belongs to a playlist this screen is no longer
+/// assigned -- including no playlist at all, since SQL never matches two `NULL`s
+/// -- is as gone from here as a deleted one. Waiting out its duration instead
+/// would leave an operator standing in front of the screen they just reassigned
+/// watching it ignore them for up to a whole item. The assignment is read here
+/// rather than taken from the pass's snapshot for the same reason that snapshot
+/// cannot be trusted anywhere else: it may have changed since.
+async fn is_playlist_item_active_now(state: &AppState, display_name: &str, id: i64) -> bool {
     let row: Result<(i64,), _> = sqlx::query_as(
         r#"
         SELECT COUNT(*)
         FROM playlist_items p
+        JOIN displays d ON d.playlist_id = p.playlist_id
         WHERE p.id = ?
+          AND d.name = ?
           AND p.is_enabled = 1
           AND (p.start_date IS NULL OR datetime(p.start_date) <= datetime('now'))
           AND (p.end_date IS NULL OR datetime('now') <= datetime(p.end_date))
         "#,
     )
     .bind(id)
+    .bind(display_name)
     .fetch_one(&state.pool)
     .await;
 

@@ -256,9 +256,17 @@ def a_playlist():
     and no item would ever be created, which reads as "the loop never ran".
     """
     rows = http("GET", "/api/playlists")[1] or []
-    if rows:
-        return rows[0]["id"]
-    return http("POST", "/api/playlists", {"name": "Test"})[1]["id"]
+    playlist_id = (rows[0]["id"] if rows
+                   else http("POST", "/api/playlists", {"name": "Test"})[1]["id"])
+    # The control loop plays the playlist its display is assigned and nothing
+    # else, and a database created fresh here has none at startup for the
+    # registration to hand over -- so without this nothing ever reaches the
+    # screen and every playback event below goes missing. This is the
+    # operator's step on the displays page, done from the test.
+    for row in http("GET", "/api/displays")[1] or []:
+        if row.get("playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id})
+    return playlist_id
 
 
 AUTH = ("ops", "hunter2!!")

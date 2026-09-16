@@ -33,9 +33,24 @@ def a_playlist(port=None):
     is created, which reads as "the loop never picked it up".
     """
     rows = http("GET", "/api/playlists", port=port)[1] or []
-    if rows:
-        return rows[0]["id"]
-    return http("POST", "/api/playlists", {"name": "Test"}, port=port)[1]["id"]
+    playlist_id = (rows[0]["id"] if rows
+                   else http("POST", "/api/playlists", {"name": "Test"}, port=port)[1]["id"])
+    assign(playlist_id, port=port)
+    return playlist_id
+
+
+def assign(playlist_id, port=None):
+    """Point every declared display at that playlist.
+
+    The control loop plays the playlist its display is assigned and nothing
+    else, and a database created fresh here has no playlist at startup for the
+    registration to hand over -- so without this the screen sits on the idle
+    page and every case below reads as "the loop never picked the item up".
+    This is the operator's step on the displays page, done from the test.
+    """
+    for row in http("GET", "/api/displays", port=port)[1] or []:
+        if row.get("playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id}, port=port)
 
 def spawn(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
