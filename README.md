@@ -397,6 +397,12 @@ That is the whole configuration. One HTTP port, one database, one asset library
 and one admin page; each screen gets its own Chromium, its own control loop and
 its own assigned playlist. Assign the playlists on `/displays.html`.
 
+`/admin.html` then reports one line per screen, and `/playlist.html` grows a
+screen picker beside its playlist picker: the status bar, the override and **Play
+now** act on the selected screen, while the item list below belongs to the
+selected playlist. With one screen declared the picker is not shown, and both
+pages look exactly as they always did.
+
 Each declared display derives what a separate controller used to be given by
 hand:
 

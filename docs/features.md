@@ -63,11 +63,22 @@ change, and a dropdown for the playlist it plays. A screen with no playlist show
 the idle page rather than erroring, and a screen that was removed from the command
 line keeps its row so that its playlist can be handed to another one.
 
-Playback is per screen and so is the override, which is why the API grew
-`/api/displays/{name}/…` paths for both. The old unscoped paths still work while
-one screen is declared, and answer `409` naming the declared screens once several
-are — an existing script gets told it has become ambiguous rather than having a
-coin flipped for it.
+Playback is per screen and so is the override, so `/playlist.html` has a **screen
+picker** beside its playlist picker, and everything in its status bar — what is
+running, the override, **Play now** — is about the selected screen while the list
+below is about the selected playlist. The two are independent, because an
+operator routinely edits a playlist no screen is currently showing, and the bar
+says so when they point at different things. The picker is remembered per browser
+and disappears when there is only one screen to choose. `/admin.html` answers the
+same question for all of them at once: one line per declared screen, naming what
+it plays and whether an override is on it.
+
+That the API grew `/api/displays/{name}/…` paths for both follows from the same
+split, and the pages use them always — a page with one code path for one screen
+and another for several is a page that only works on whichever the author had.
+The old unscoped paths still work while one screen is declared, and answer `409`
+naming the declared screens once several are — an existing script gets told it
+has become ambiguous rather than having a coin flipped for it.
 
 Casting is the exception that is not per screen yet: one session for the whole
 controller, landing on the display `--cast-display` names. See
@@ -182,7 +193,8 @@ server shows no panel at all rather than a set of controls that do nothing.
 
 ## Operator surface
 
-`/admin.html` shows what is on screen, what is casting, and the runtime settings:
+`/admin.html` shows what is on the screens — one line per declared display, with
+its playlist and any override — what is casting, and the runtime settings:
 whether casting is allowed, how a guest authenticates, the overlay, the language
 for dates and times, and the credentials for the operator UI itself. It also
 carries the room-audio panel and, while one is alive, the **pairing code the
@@ -193,7 +205,9 @@ helping a guest over the phone is the only one who cannot see it.
 declared display with its label and the playlist it plays. `/playlist.html` opens
 with a playlist picker, and everything below it edits the playlist that is
 selected; the selection is kept in the URL, so a link to one playlist is a link
-somebody can send.
+somebody can send. Its screen picker is the other half of that, and is kept in
+the browser rather than in the URL — which screen you are standing in front of is
+not part of what a link about a playlist means.
 
 Settings live in the database, so they survive restarts. Anything passed on the
 command line pins that setting and the UI shows it as locked — which is also the
