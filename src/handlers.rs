@@ -66,6 +66,55 @@ pub struct UpdatePlaylistRequest {
     pub url: Option<String>,
     /// Replacement asset. Only accepted for items that already are asset-backed.
     pub asset_id: Option<i64>,
+    /// Move the item into another playlist. Sent on its own -- see the rule at
+    /// the top of `update_playlist_item`.
+    ///
+    /// `double_option` here is not an offer to clear the field but the only way
+    /// to *refuse* clearing it: with a plain `Option<i64>` a JSON `null`
+    /// collapses into the outer `None`, which is indistinguishable from "field
+    /// absent", so a client asking for no playlist would be answered `200`
+    /// having changed nothing. An item with no playlist is the broken state this
+    /// field exists to repair -- `POST /api/playlist` requires one for exactly
+    /// that reason -- so `null` is an error, not a way back into it.
+    #[serde(default, deserialize_with = "double_option")]
+    pub playlist_id: Option<Option<i64>>,
+}
+
+impl UpdatePlaylistRequest {
+    /// Whether this request asks for anything besides the move.
+    ///
+    /// Destructured field by field rather than tested with a handful of
+    /// `is_some()` calls: a field added to the struct later and forgotten here
+    /// would silently become a combination the "a move stands alone" rule is
+    /// meant to refuse, and this way it fails to compile instead.
+    fn edits_besides_the_playlist(&self) -> bool {
+        let Self {
+            play_order,
+            duration,
+            enabled,
+            is_enabled,
+            keep_loaded,
+            start_date,
+            end_date,
+            scroll_config,
+            overlay,
+            url,
+            asset_id,
+            playlist_id: _,
+        } = self;
+
+        play_order.is_some()
+            || duration.is_some()
+            || enabled.is_some()
+            || is_enabled.is_some()
+            || keep_loaded.is_some()
+            || start_date.is_some()
+            || end_date.is_some()
+            || scroll_config.is_some()
+            || overlay.is_some()
+            || url.is_some()
+            || asset_id.is_some()
+    }
 }
 
 #[derive(Deserialize)]
@@ -417,6 +466,64 @@ pub async fn update_playlist_item(
     Path(id): Path<i64>,
     Json(payload): Json<UpdatePlaylistRequest>,
 ) -> impl IntoResponse {
+    // A move stands alone: a request carrying `playlist_id` may carry nothing
+    // else.
+    //
+    // Moving is not a kind change -- the playlist an item belongs to is a
+    // different axis from what it plays, so the like-for-like rule below has
+    // nothing to say about it -- but everything below is a field-by-field write
+    // whose error is swallowed and logged, while the move is a transaction over
+    // two playlists' `play_order`. Combined, a move that rolled back would sit
+    // behind edits that had already landed, under one status code that cannot
+    // say which half happened. The two also contradict each other outright: the
+    // move decides the item's new `play_order`, so an explicit one in the same
+    // request is two answers to one question. Refusing the combination costs a
+    // client a second request -- which is what the up/down buttons already do --
+    // and is the only version of this handler with no half-applied write in it.
+    if let Some(target) = payload.playlist_id {
+        if payload.edits_besides_the_playlist() {
+            return bad_request(
+                "Playlist-Wechsel bitte allein senden, ohne weitere Änderungen am Element.",
+            );
+        }
+        let Some(target) = target else {
+            return bad_request(
+                "Ein Element ohne Playlist spielt kein Bildschirm. Bitte eine Playlist wählen.",
+            );
+        };
+        return match move_item_to_playlist(&state.pool, id, target).await {
+            Ok(MoveOutcome::Moved) => {
+                // Two screens change what they play, which is why this is the
+                // unscoped notify like every other playlist-affecting write.
+                // Deliberately *not* `notify_overlay_changed`: an item's overlay
+                // travels with the item and neither it nor the global one was
+                // touched here, so poking that signal would re-apply a badge
+                // nothing changed about -- and on a display standing in an
+                // override (a cast, a pinned page) that is work for no reason.
+                state.notify_playlist_changed();
+                StatusCode::OK.into_response()
+            }
+            // Nothing changed, so nothing to announce. Not an error either: a
+            // client resending the playlist an item already sits in has asked
+            // for the state it is already in.
+            Ok(MoveOutcome::AlreadyThere) => StatusCode::OK.into_response(),
+            // Same refusal wording as `PUT /api/displays/{name}`, which checks
+            // the same id against the same table for the same reason.
+            Ok(MoveOutcome::UnknownPlaylist) => bad_request("Unbekannte Playlist."),
+            Ok(MoveOutcome::UnknownItem) => (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("Element {} gibt es nicht.", id),
+                }),
+            )
+                .into_response(),
+            Err(e) => {
+                error!("Failed to move playlist item {} to playlist {}: {}", id, target, e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        };
+    }
+
     // A source edit may only swap like for like: a URL item gets a different URL, an
     // asset item a different asset. Allowing a kind change would need the other column
     // cleared in the same write, and `playlist_target_url` silently prefers one column
@@ -571,16 +678,126 @@ pub async fn update_playlist_item(
 /// wrote, or one the one-time backfill never reached), and SQLite's
 /// `NULL = NULL` is unknown, not true, in a `WHERE` clause -- which would
 /// silently exclude same-playlist NULL rows from each other.
-pub(crate) async fn ordered_ids_in_playlist(
-    pool: &sqlx::SqlitePool,
+///
+/// Generic over the executor rather than taking `&SqlitePool`, so the move
+/// below can read the same list inside its transaction instead of keeping a
+/// second copy of this query -- and with it a second copy of the `IS` rule.
+pub(crate) async fn ordered_ids_in_playlist<'e, E>(
+    executor: E,
     playlist_id: Option<i64>,
-) -> Result<Vec<i64>, sqlx::Error> {
+) -> Result<Vec<i64>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query_scalar::<_, i64>(
         "SELECT id FROM playlist_items WHERE playlist_id IS ? ORDER BY play_order ASC, id ASC",
     )
     .bind(playlist_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await
+}
+
+/// Renumber one playlist `1..n` in the order it currently reads in.
+///
+/// Renumbering rather than patching the one row that moved, for the reason
+/// `move_playlist_item` gives: `play_order` is typed by hand in the UI, so
+/// duplicates and gaps are the column's normal state, and a move that only
+/// touched its own row would carry them along.
+async fn renumber_playlist(
+    conn: &mut sqlx::SqliteConnection,
+    playlist_id: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let ids = ordered_ids_in_playlist(&mut *conn, playlist_id).await?;
+    for (offset, item_id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE playlist_items SET play_order = ? WHERE id = ?")
+            .bind(offset as i64 + 1)
+            .bind(item_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// What `move_item_to_playlist` did, so the handler can phrase the refusal and
+/// the tests can assert the outcome without an `AppState`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MoveOutcome {
+    Moved,
+    AlreadyThere,
+    UnknownItem,
+    UnknownPlaylist,
+}
+
+/// Move one item into another playlist, appended to the end of it, and close
+/// the gap it leaves behind.
+///
+/// `play_order` belongs to a playlist, not to the table: an item carrying its
+/// old number into a new list collides with whatever already holds that number
+/// and leaves a hole where it came from. So the item is appended (`MAX + 1`
+/// scoped to the target, exactly as `add_to_playlist` numbers a new one) and
+/// *both* lists are then renumbered `1..n`, which is what "leaves both
+/// playlists coherent" means here -- the target with the newcomer last, the
+/// source with its gap closed.
+///
+/// One transaction, because these are several statements describing one
+/// decision. Half of it -- the item in the target list, both lists still
+/// numbered as if it had not moved -- is a playlist that plays in an order
+/// nobody chose, on a device whose ordinary way to stop is losing power.
+///
+/// The playlist's existence is checked in the statement that writes it, in the
+/// style of `playlists::remove`, and not before it: `playlist_items.playlist_id`
+/// was added by `ALTER TABLE` and therefore carries **no** foreign key, so
+/// nothing underneath this function would refuse a dangling id. The item would
+/// simply stop appearing on every screen with nothing saying why -- the same
+/// blank-screen failure the `asset_id` check upstream exists to prevent.
+pub(crate) async fn move_item_to_playlist(
+    pool: &sqlx::SqlitePool,
+    id: i64,
+    target: i64,
+) -> Result<MoveOutcome, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    // The outer Option is "is there such an item", the inner one is "does it
+    // have a playlist" -- an orphan (inner `None`) is precisely the row this
+    // endpoint exists to adopt, so it is not an error here.
+    let source: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT playlist_id FROM playlist_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(source) = source else {
+        return Ok(MoveOutcome::UnknownItem);
+    };
+    // Checked rather than let through: the append below would otherwise send an
+    // item to the end of the list it is already in, which is a reorder nobody
+    // asked for.
+    if source == Some(target) {
+        return Ok(MoveOutcome::AlreadyThere);
+    }
+
+    let done = sqlx::query(
+        "UPDATE playlist_items
+            SET playlist_id = ?1,
+                play_order = (SELECT COALESCE(MAX(play_order), 0) + 1
+                                FROM playlist_items WHERE playlist_id = ?1)
+          WHERE id = ?2
+            AND EXISTS (SELECT 1 FROM playlists WHERE id = ?1)",
+    )
+    .bind(target)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+
+    if done.rows_affected() == 0 {
+        // The item was read a statement ago inside this transaction, so the only
+        // thing the guard can have refused is the playlist.
+        return Ok(MoveOutcome::UnknownPlaylist);
+    }
+
+    renumber_playlist(&mut tx, source).await?;
+    renumber_playlist(&mut tx, Some(target)).await?;
+    tx.commit().await?;
+    Ok(MoveOutcome::Moved)
 }
 
 /// Move an item one slot up or down and renumber the whole list.
@@ -989,5 +1206,182 @@ mod tests {
             vec![1, 3],
             "IS groups NULL rows with each other, not with every row nor with none"
         );
+    }
+
+    /// Two playlists, the second one deliberately numbered with a gap and a
+    /// duplicate -- which is the ordinary state of a column operators type by
+    /// hand, and the state a move has to survive.
+    async fn two_playlists() -> sqlx::SqlitePool {
+        let pool = pool().await;
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'Foyer'), (2, 'Werkstatt')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, play_order, playlist_id) in [
+            (1, 1, Some(1)),
+            (2, 2, Some(1)),
+            (3, 3, Some(1)),
+            (4, 7, Some(2)),
+            (5, 7, Some(2)),
+        ] {
+            sqlx::query(
+                "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (?, 'https://a.test', ?, ?)",
+            )
+            .bind(id)
+            .bind(play_order)
+            .bind(playlist_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    async fn playlist_of(pool: &sqlx::SqlitePool, id: i64) -> Option<i64> {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT playlist_id FROM playlist_items WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn orders_in(pool: &sqlx::SqlitePool, playlist_id: Option<i64>) -> Vec<(i64, i64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT id, play_order FROM playlist_items WHERE playlist_id IS ? \
+             ORDER BY play_order ASC, id ASC",
+        )
+        .bind(playlist_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_moved_item_is_appended_and_both_lists_are_renumbered() {
+        let pool = two_playlists().await;
+
+        assert_eq!(
+            move_item_to_playlist(&pool, 2, 2).await.unwrap(),
+            MoveOutcome::Moved
+        );
+
+        assert_eq!(playlist_of(&pool, 2).await, Some(2));
+        // Appended, not inserted where its old number would have put it: item 2
+        // carried `play_order = 2`, which in the target list would have placed
+        // it ahead of both items already there.
+        assert_eq!(
+            orders_in(&pool, Some(2)).await,
+            vec![(4, 1), (5, 2), (2, 3)],
+            "the newcomer sits last, and the target's duplicate 7s are renumbered 1..n"
+        );
+        // The gap the item left behind is closed rather than left as 1,3.
+        assert_eq!(
+            orders_in(&pool, Some(1)).await,
+            vec![(1, 1), (3, 2)],
+            "the source list is renumbered 1..n too"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_playlist_that_does_not_exist_is_refused_and_nothing_moves() {
+        let pool = two_playlists().await;
+
+        assert_eq!(
+            move_item_to_playlist(&pool, 2, 99).await.unwrap(),
+            MoveOutcome::UnknownPlaylist
+        );
+
+        // Nothing written at all: a dangling `playlist_id` would take the item
+        // off every screen with nothing saying why, and `playlist_items` has no
+        // foreign key on this column to catch it afterwards.
+        assert_eq!(playlist_of(&pool, 2).await, Some(1));
+        assert_eq!(
+            orders_in(&pool, Some(1)).await,
+            vec![(1, 1), (2, 2), (3, 3)],
+            "a refused move renumbers nothing either"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_item_with_no_playlist_can_be_adopted() {
+        let pool = two_playlists().await;
+        // The row an interrupted backfill or an older binary leaves behind:
+        // invisible in the editor and, before this endpoint, unadoptable.
+        sqlx::query(
+            "INSERT INTO playlist_items (id, url, play_order, playlist_id) VALUES (9, 'https://a.test', 4, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            move_item_to_playlist(&pool, 9, 1).await.unwrap(),
+            MoveOutcome::Moved
+        );
+
+        assert_eq!(playlist_of(&pool, 9).await, Some(1));
+        assert_eq!(
+            orders_in(&pool, Some(1)).await,
+            vec![(1, 1), (2, 2), (3, 3), (9, 4)]
+        );
+        assert!(
+            orders_in(&pool, None).await.is_empty(),
+            "the orphan group is empty afterwards"
+        );
+    }
+
+    #[tokio::test]
+    async fn moving_an_item_where_it_already_is_reorders_nothing() {
+        let pool = two_playlists().await;
+
+        assert_eq!(
+            move_item_to_playlist(&pool, 1, 1).await.unwrap(),
+            MoveOutcome::AlreadyThere
+        );
+
+        // Not appended to the end of its own list, which is what an unguarded
+        // `MAX + 1` would have done to an item nobody asked to reorder.
+        assert_eq!(
+            orders_in(&pool, Some(1)).await,
+            vec![(1, 1), (2, 2), (3, 3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_item_that_does_not_exist_is_reported_as_missing() {
+        let pool = two_playlists().await;
+        assert_eq!(
+            move_item_to_playlist(&pool, 404, 1).await.unwrap(),
+            MoveOutcome::UnknownItem
+        );
+    }
+
+    #[test]
+    fn a_move_travelling_with_any_other_edit_is_recognised() {
+        let mut request = UpdatePlaylistRequest {
+            play_order: None,
+            duration: None,
+            enabled: None,
+            is_enabled: None,
+            keep_loaded: None,
+            start_date: None,
+            end_date: None,
+            scroll_config: None,
+            overlay: None,
+            url: None,
+            asset_id: None,
+            playlist_id: Some(Some(2)),
+        };
+        assert!(!request.edits_besides_the_playlist(), "a move on its own");
+
+        // The playlist page saves a whole card at once, so the field most likely
+        // to arrive alongside a move is the source -- and a source edit reads
+        // the row as it is, which the move is about to rewrite.
+        request.url = Some("https://b.test".into());
+        assert!(request.edits_besides_the_playlist());
+        request.url = None;
+        // The one that contradicts the move outright: it decides the order.
+        request.play_order = Some(1);
+        assert!(request.edits_besides_the_playlist());
     }
 }

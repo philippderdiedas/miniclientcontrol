@@ -784,6 +784,18 @@ The endpoint list is in [README.md](README.md#api-overview). The traps behind it
   half-changed row plays the wrong thing with no error anywhere. `asset_id` is
   checked against `assets` first; a dangling id yields a `NULL` `local_path` from
   the loop's `LEFT JOIN` and a blank screen.
+- **A move (`playlist_id`) stands alone and appends.** It is a different axis
+  from the source, so like-for-like has nothing to say about it — but the rest of
+  the handler is field-by-field writes with swallowed errors while the move is a
+  transaction over two playlists, so a combined request could answer one status
+  for a half-applied write, and an explicit `play_order` beside it is two answers
+  to one question. The item takes `MAX(play_order) + 1` in the target and **both**
+  playlists are renumbered `1..n`, for the same reason `/move` renumbers. The
+  target is checked against `playlists` in the statement that writes it —
+  `playlist_items.playlist_id` was added by `ALTER TABLE` and has **no** foreign
+  key, so nothing below would catch a dangling id. `null` is refused rather than
+  ignored (hence `double_option` for a field that is not clearable): an item in no
+  playlist is the broken state the field exists to repair.
 - The item `overlay` object is stored as SQL `null` unless it would actually draw
   something, so read paths never have to tell "switched off" from "empty".
 - **`POST /api/playlist` requires `playlist_id`.** An item in no playlist is one

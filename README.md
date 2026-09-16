@@ -188,7 +188,12 @@ declaration.
 - `POST /api/playlist` — add item (asset or URL). `playlist_id` is **required**:
   an item in no playlist is one no screen would ever play, and nothing would say
   so
-- `PUT /api/playlist/{id}` — update order/duration/enabled/schedule/scroll config
+- `PUT /api/playlist/{id}` — update order/duration/enabled/schedule/scroll config,
+  or move the item to another playlist with `playlist_id`. A move is sent on its
+  own — combined with any other field it is a `400` — and lands the item at the
+  end of the target playlist, renumbering both playlists `1..n`. An unknown
+  `playlist_id` is refused, and so is `null`: an item in no playlist is the state
+  this field exists to repair
 - `POST /api/playlist/{id}/move` — renumber within the item's own playlist
 - `DELETE /api/playlist/{id}` — remove playlist item
 
