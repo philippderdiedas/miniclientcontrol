@@ -17,7 +17,7 @@ async def main():
         dr, dw = await ws("display")
         await wsclient.recv_json(dr)
 
-        status, body = http("POST", "/api/cast/pair")
+        status, body = http("POST", "/api/cast/pair", {})
         check("pair returns a TTL but never the code",
               status == 200 and "expires_in" in body and "code" not in body, body)
 

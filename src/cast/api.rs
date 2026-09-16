@@ -257,6 +257,11 @@ pub struct ClaimRequest {
     /// does not send it behaves exactly as before.
     #[serde(default)]
     mode: ClaimMode,
+    /// Which screen the guest wants. Omitted resolves while exactly one display
+    /// is declared and refuses with `409` once several are -- `display::resolve`,
+    /// the same rule the playback routes follow.
+    #[serde(default)]
+    display: Option<String>,
 }
 
 /// Validate the code and hold the session for this guest.
@@ -274,7 +279,10 @@ pub async fn claim_session(
     }
 
     let addr = peer.ip();
-    let display = state.primary();
+    let display = match crate::display::resolve(&state, payload.display.as_deref()) {
+        Ok(display) => display,
+        Err(response) => return response,
+    };
 
     {
         let session = display.cast.lock().await;
@@ -313,6 +321,7 @@ pub async fn claim_session(
             addr,
             expires_at: Instant::now() + RESERVATION_TTL,
             mode: payload.mode,
+            display: display.name.clone(),
         });
     }
     info!("Cast: session reserved by {}", addr);
@@ -349,11 +358,27 @@ pub async fn stop_cast(State(state): State<AppState>) -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
+#[derive(Deserialize, Default)]
+pub struct PairRequest {
+    /// Which screen the guest wants. Same rule as `ClaimRequest::display`.
+    #[serde(default)]
+    display: Option<String>,
+}
+
 /// Ask the display to show a fresh pairing code (`--cast-auth=pairing` only).
 ///
 /// The code is deliberately not in the response: proving you can see the screen
 /// is the entire point, and returning it would reduce this to "no auth".
-pub async fn start_pairing(State(state): State<AppState>) -> Response {
+///
+/// TEMPORARY: `web/index.html:664` posts no body today, so the extractor has to
+/// tolerate an absent one (`Option<Json<PairRequest>>`) rather than requiring
+/// `Json<PairRequest>` outright. Task 10 updates the page to send `{}` at
+/// minimum; once it does, this can become a plain `Json<PairRequest>` and the
+/// tolerance for a missing body should be removed.
+pub async fn start_pairing(
+    State(state): State<AppState>,
+    payload: Option<Json<PairRequest>>,
+) -> Response {
     if state.args.disable_cast {
         return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
     }
@@ -364,7 +389,11 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
         )
             .into_response();
     }
-    let display = state.primary();
+    let display_name = payload.and_then(|Json(p)| p.display);
+    let display = match crate::display::resolve(&state, display_name.as_deref()) {
+        Ok(display) => display,
+        Err(response) => return response,
+    };
     if display.cast.lock().await.is_taken() {
         return (
             StatusCode::CONFLICT,

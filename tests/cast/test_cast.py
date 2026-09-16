@@ -68,34 +68,46 @@ class Server:
     def __exit__(self, *a):
         self.proc.terminate(); self.proc.wait(timeout=10)
 
-def claim(code=None, port=None, mode=None):
+def claim(code=None, port=None, mode=None, display=None):
     """POST /api/cast/claim -> (status, body). This is where a code is checked.
 
     `mode` is "page" for a guest who wants a web page on the display rather than
     a stream. It is decided here and not on the socket, because the server pins
     the display as soon as a sender connects.
+
+    `display` names the screen the guest wants; omitted, the server resolves it
+    the same way the playback routes do (`display::resolve`).
     """
     body = {}
     if code:
         body["code"] = code
     if mode:
         body["mode"] = mode
+    if display:
+        body["display"] = display
     return http("POST", "/api/cast/claim", body, port=port)
 
 
-async def ws(role, code=None, host="127.0.0.1", ticket="auto", mode=None):
+async def ws(role, code=None, host="127.0.0.1", ticket="auto", mode=None, display=None):
     """Open a signaling socket, claiming the session first for senders.
 
     `ticket="auto"` claims with `code`; pass an explicit ticket (or None) to
     exercise the socket's own admission checks.
+
+    `display` names the screen. For a sender it is the claim's `display` field
+    (the ticket is what the socket itself carries the screen with); for the
+    display role it is the connection's own `?screen=` -- the only role that
+    parameter exists for, since a sender's screen already comes from its ticket.
     """
     if role == "sender" and ticket == "auto":
-        status, body = claim(code, mode=mode)
+        status, body = claim(code, mode=mode, display=display)
         assert status == 200, f"claim refused: {status} {body}"
         ticket = body["ticket"]
     elif ticket == "auto":
         ticket = None
     path = f"/api/cast/ws?role={role}" + (f"&ticket={ticket}" if ticket else "")
+    if role == "display" and display:
+        path += f"&screen={display}"
     return await wsclient.connect(host, HTTP, path, secure=False)
 
 
@@ -162,6 +174,23 @@ async def main_flow():
         status, st = http("GET", "/api/cast/state")
         check("state reports no cast", not st["active"], st)
         dw.close()
+
+    print("\n[1b] the refusal above is per screen, not global")
+    # Two declared displays, neither with a browser attached -- this only needs
+    # the HTTP/WS admission logic, not a running control loop.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        sr, sw = await ws("sender", display="foyer")
+        await wsclient.recv_json(sr)
+
+        status, body = claim(display="foyer")
+        check("a second guest on the same screen is still refused",
+              status == 409 and "error" in body, (status, body))
+
+        status, body = claim(display="werkstatt")
+        check("a different screen is untouched by the first screen's refusal",
+              status == 200 and "ticket" in body, (status, body))
+
+        sw.close()
 
     print("\n[3] operator can cut a cast short")
     with Server():

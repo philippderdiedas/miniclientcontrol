@@ -37,6 +37,13 @@ pub struct CastWsQuery {
     /// happens once, at claim time, so there is a single place to get it wrong.
     #[serde(default)]
     ticket: Option<String>,
+    /// Which screen this connection is for. Only ever set by the display role:
+    /// the display role is loopback-only, so this is our own page saying which
+    /// screen it is. A sender never sends this -- its ticket already names the
+    /// screen it was issued for, and trusting a query string instead would let
+    /// a sender claim a screen its ticket was never issued for.
+    #[serde(default)]
+    screen: Option<String>,
 }
 
 pub async fn cast_ws(
@@ -72,8 +79,35 @@ pub async fn cast_ws(
     // Resolved once, here, and carried for the life of the socket: a socket may
     // only ever act on the session it was admitted to, so nothing below this
     // line resolves a screen a second time.
-    let display = state.primary();
+    let display = match role {
+        Role::Display => match crate::display::resolve(&state, query.screen.as_deref()) {
+            Ok(display) => display,
+            Err(response) => return response,
+        },
+        // No query parameter to trust here -- find whichever display's session
+        // is currently holding a live reservation for this exact ticket.
+        // `consume_reservation` still re-checks address and liveness before
+        // admitting it; this only decides which session to check them against.
+        // A ticket nobody holds (expired, wrong, or absent) falls back to the
+        // primary display so the socket still gets a legible refusal rather
+        // than 404ing on a display that does not exist.
+        Role::Sender => display_for_ticket(&state, ticket.as_deref())
+            .await
+            .unwrap_or_else(|| state.primary()),
+    };
     ws.on_upgrade(move |socket| handle_socket(state, display, role, addr, ticket, socket))
+}
+
+/// The display whose session holds a live reservation for this ticket, if any.
+async fn display_for_ticket(state: &AppState, ticket: Option<&str>) -> Option<Arc<Display>> {
+    let ticket = ticket?;
+    for display in state.displays.iter() {
+        let session = display.cast.lock().await;
+        if session.live_reservation().is_some_and(|held| held.ticket == ticket) {
+            return Some(display.clone());
+        }
+    }
+    None
 }
 
 async fn handle_socket(
@@ -333,13 +367,21 @@ async fn consume_reservation(
     let Some(provided) = ticket else {
         return Err("Sitzung nicht reserviert.".to_string());
     };
-    let matches = session
+    let held = session
         .live_reservation()
-        .is_some_and(|held| held.addr == addr && codes_match(&held.ticket, provided));
-    if !matches {
+        .filter(|held| held.addr == addr && codes_match(&held.ticket, provided));
+    let Some(held) = held else {
         // Not cleared on a mismatch: a stray socket must not drop a reservation
         // that legitimately belongs to somebody else.
         return Err("Die Reservierung ist abgelaufen. Bitte neu beginnen.".to_string());
+    };
+    // Almost redundant with `cast_ws` resolving the ticket's own display before
+    // the socket ever reaches here -- but explicit rather than incidental: a
+    // ticket minted for `foyer` is simply absent from `werkstatt`'s session, so
+    // without this the refusal would read as "expired" when it is really "wrong
+    // screen", and the guest has no way to tell the two apart.
+    if held.display != display.name {
+        return Err("Dieses Ticket gehört zu einem anderen Bildschirm.".to_string());
     }
 
     // Carried onto the session so `register_peer` knows, before the guest has

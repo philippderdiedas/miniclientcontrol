@@ -117,6 +117,11 @@ struct Reservation {
     addr: IpAddr,
     expires_at: Instant,
     mode: ClaimMode,
+    /// The screen this ticket was minted for. A session is per-display now, so
+    /// a ticket is already absent from every other display's session -- this
+    /// field is what makes a stray socket's refusal legible rather than
+    /// incidental (`consume_reservation` names it explicitly).
+    display: String,
 }
 
 /// What a guest said they were going to do, decided at claim time.
