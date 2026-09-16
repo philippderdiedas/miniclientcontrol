@@ -88,26 +88,58 @@ pub async fn cast_ws(
         // is currently holding a live reservation for this exact ticket.
         // `consume_reservation` still re-checks address and liveness before
         // admitting it; this only decides which session to check them against.
-        // A ticket nobody holds (expired, wrong, or absent) falls back to the
-        // primary display so the socket still gets a legible refusal rather
-        // than 404ing on a display that does not exist.
-        Role::Sender => display_for_ticket(&state, ticket.as_deref())
-            .await
-            .unwrap_or_else(|| state.primary()),
+        //
+        // A missing ticket names no screen at all, so it falls back to the
+        // primary display purely to have a session to open against --
+        // `consume_reservation` refuses it there on the ticket being absent, a
+        // refusal that says the same thing regardless of which display answered.
+        //
+        // A ticket that *was* provided but is held by no session (expired,
+        // guessed, or for a screen since removed) is refused right here, before
+        // any session is touched. Falling back to the primary display for that
+        // case, as this used to, would ask *its* session for a reason, and its
+        // busy/free state has nothing to do with this ticket -- an unrelated
+        // cast already running on the primary display would then read as "your
+        // reservation is fine, someone else is casting" when the truth is the
+        // guest's own reservation lapsed.
+        Role::Sender => match ticket.as_deref() {
+            None => state.primary(),
+            Some(_) => match display_for_ticket(&state, ticket.as_deref()).await {
+                Some(display) => display,
+                None => return ws.on_upgrade(refuse_unknown_ticket),
+            },
+        },
     };
     ws.on_upgrade(move |socket| handle_socket(state, display, role, addr, ticket, socket))
 }
 
 /// The display whose session holds a live reservation for this ticket, if any.
+///
+/// `codes_match`, not `==`: this scan runs first, over the same secret
+/// `consume_reservation` compares with `codes_match` a moment later, so a plain
+/// `==` here would let a wrong ticket be found one character at a time by
+/// timing this call alone -- the later, constant-time comparison would never
+/// even run.
 async fn display_for_ticket(state: &AppState, ticket: Option<&str>) -> Option<Arc<Display>> {
     let ticket = ticket?;
     for display in state.displays.iter() {
         let session = display.cast.lock().await;
-        if session.live_reservation().is_some_and(|held| held.ticket == ticket) {
+        if session.live_reservation().is_some_and(|held| codes_match(&held.ticket, ticket)) {
             return Some(display.clone());
         }
     }
     None
+}
+
+/// Refuse a sender whose ticket is held by no session at all, over the socket
+/// and without ever locking a display's session -- see the comment in
+/// `cast_ws` for why picking one to check against would be misleading.
+async fn refuse_unknown_ticket(socket: WebSocket) {
+    let (mut sink, _stream) = socket.split();
+    let frame = error_frame("claim", "Die Reservierung ist abgelaufen. Bitte neu beginnen.");
+    let _ = sink.send(frame).await;
+    let _ = sink.send(Message::Close(None)).await;
+    let _ = sink.close().await;
 }
 
 async fn handle_socket(
@@ -375,21 +407,29 @@ async fn consume_reservation(
         // that legitimately belongs to somebody else.
         return Err("Die Reservierung ist abgelaufen. Bitte neu beginnen.".to_string());
     };
-    // Almost redundant with `cast_ws` resolving the ticket's own display before
-    // the socket ever reaches here -- but explicit rather than incidental: a
-    // ticket minted for `foyer` is simply absent from `werkstatt`'s session, so
-    // without this the refusal would read as "expired" when it is really "wrong
-    // screen", and the guest has no way to tell the two apart.
+    // Not belt-and-braces in the usual sense -- there is no second, independent
+    // fact this checks against. `cast_ws` already resolved `display` to be the
+    // exact session holding this ticket (or refused before the socket ever
+    // reached here), and `Reservation::display` is stamped, once, from the name
+    // of the very session it is stored into (`claim_session`, the only
+    // construction site) -- so `held.display == display.name` on every path
+    // that gets this far. The guard is here so that if a future change ever let
+    // a `Reservation` move between sessions, that bug would fail loudly here
+    // rather than quietly admitting a sender to a screen its ticket was never
+    // issued for.
     if held.display != display.name {
         return Err("Dieses Ticket gehört zu einem anderen Bildschirm.".to_string());
     }
 
+    // Taken before `session` is borrowed mutably below -- `held` already proved
+    // `session.reservation` is `Some`, so re-deriving the mode from it again via
+    // `map_or` (as this used to) was reaching for a fallback that could never be
+    // taken.
+    let mode = held.mode;
+
     // Carried onto the session so `register_peer` knows, before the guest has
     // said anything on the socket, whether to pin the cast page.
-    session.pending_mode = session
-        .reservation
-        .as_ref()
-        .map_or(ClaimMode::Cast, |held| held.mode);
+    session.pending_mode = mode;
     session.reservation = None;
     Ok(())
 }
