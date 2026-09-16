@@ -260,6 +260,13 @@ async fn main() -> Result<()> {
         .map(|c| Arc::new(models::Display::new(&c.name, &c.cdp_url)))
         .collect();
 
+    // Every declared display needs a row before any loop reads its assignment:
+    // nothing else writes this table, so without it a fresh upgrade would have
+    // every screen unassigned and therefore idle. Placed here rather than in
+    // `db::run_migrations` because it is not schema -- it depends on what this
+    // command line declared, which the migration has no business knowing.
+    display::register(&pool, &configured).await?;
+
     // 3. Init State
     let state = AppState {
         pool: pool.clone(),
@@ -341,6 +348,7 @@ async fn main() -> Result<()> {
         .merge(settings::routes())
         .merge(audio::routes())
         .merge(playlists::routes())
+        .merge(display::routes())
         .nest_service("/uploads", serve_dir)
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 

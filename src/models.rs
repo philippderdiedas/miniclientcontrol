@@ -410,12 +410,9 @@ pub struct AppState {
 impl AppState {
     /// The display of that name, if this deployment declares one.
     ///
-    /// Its first caller is the display-scoped API, which resolves a name out of
-    /// the request path. Allowed by name rather than for the module, so nothing
-    /// else added here loses its dead-code check in the meantime.
-    ///
-    /// REMOVE this allow in the commit that adds the first caller.
-    #[allow(dead_code)]
+    /// Resolved out of a request path by the display-scoped API
+    /// (`display::resolve`), which is also where an unknown name turns into a
+    /// `404` listing the real ones.
     pub fn display(&self, name: &str) -> Option<Arc<Display>> {
         self.displays.iter().find(|d| d.name == name).cloned()
     }

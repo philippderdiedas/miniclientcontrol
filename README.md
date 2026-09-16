@@ -182,17 +182,34 @@ These options also support environment variables through `clap` `env` support.
 - `GET`/`POST /api/cast/audio` — the same, for the guest who is currently casting;
   guarded by the connected sender's address instead of by credentials
 
+### Displays
+
+- `GET /api/displays` — the declared screens, plus any row for a screen this
+  deployment no longer declares (`declared: false`), so its playlist can still be
+  reassigned
+- `PUT /api/displays/{name}` — set `label` and/or `playlist_id`; a `playlist_id`
+  of `null` clears the assignment
+
 ### Playback Control
 
 - `GET /api/control/current` — get current item id
 - `POST /api/control/current` — jump to item id (`{ "item_id": <id|null> }`)
+- `GET`/`POST /api/displays/{name}/control/current` — the same, for one named
+  display
 
 ### Override
 
 - `POST /api/override` — activate override playback
   - body supports either `asset_id` or `url`
   - optional `scroll_config`
+- `GET /api/override` — the override currently up, if any
 - `DELETE /api/override` — clear override and return to playlist loop
+- `GET`/`POST`/`DELETE /api/displays/{name}/override` — the same, for one named
+  display
+
+The two unscoped paths above address the display when exactly one is declared.
+With several they answer `409` and name them, because picking one would be a
+coin flip a script cannot see.
 
 ### Casting
 

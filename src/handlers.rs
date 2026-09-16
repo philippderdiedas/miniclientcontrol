@@ -1,10 +1,10 @@
 use axum::{
     extract::{Multipart, State, Path},
-    response::{IntoResponse, Json},
+    response::{IntoResponse, Json, Response},
     http::StatusCode,
 };
 use tracing::error;
-use crate::models::{AppState, Asset, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Asset, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Distinguishes "field absent" from "field explicitly null".
@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// A plain `Option<Option<T>>` cannot do this: serde collapses a JSON `null` into the
 /// *outer* `None`, so `Some(None)` is unreachable and a nullable field can never be
 /// cleared once set.
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -693,17 +693,37 @@ pub async fn delete_playlist_item(
 }
 
 
+// The five playback handlers below come in pairs: a `_for` entry point that
+// takes the display's name out of the path, a legacy unscoped one that resolves
+// through `display::resolve(.., None)`, and one shared `_of` body. Duplicating
+// the body instead would let the two drift, and the unscoped path is exactly the
+// one nobody tests by hand.
+
+pub async fn set_current_for(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<SetCurrentItemRequest>,
+) -> Response {
+    match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => set_current_of(&display, payload).await,
+        Err(response) => response,
+    }
+}
+
 pub async fn set_current(
     State(state): State<AppState>,
-    Json(payload): Json<SetCurrentItemRequest>
-) -> impl IntoResponse {
+    Json(payload): Json<SetCurrentItemRequest>,
+) -> Response {
+    match crate::display::resolve(&state, None) {
+        Ok(display) => set_current_of(&display, payload).await,
+        Err(response) => response,
+    }
+}
+
+async fn set_current_of(display: &Display, payload: SetCurrentItemRequest) -> Response {
     // Record the request in `pending_jump`, not `current_item_id`: the browser loop
     // owns `current_item_id` and rewrites it at the start of every item, so writing
     // there races with playback and loses the click.
-    //
-    // The primary display, because this path carries no display name; Task 8
-    // gives it a scoped sibling and makes the unscoped one resolve explicitly.
-    let display = state.primary();
     {
         let mut lock = display.pending_jump.lock().await;
         *lock = payload.item_id;
@@ -711,24 +731,52 @@ pub async fn set_current(
     // Interrupt the current wait. notify_one stores a permit if the loop is busy
     // navigating, so the request survives until the loop next awaits.
     display.skip_signal.notify_one();
-    StatusCode::OK
+    StatusCode::OK.into_response()
 }
 
-pub async fn get_current(State(state): State<AppState>) -> impl IntoResponse {
-    // The primary display, because this path carries no display name;
-    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
-    let display = state.primary();
+pub async fn get_current_for(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => get_current_of(&display).await,
+        Err(response) => response,
+    }
+}
+
+pub async fn get_current(State(state): State<AppState>) -> Response {
+    match crate::display::resolve(&state, None) {
+        Ok(display) => get_current_of(&display).await,
+        Err(response) => response,
+    }
+}
+
+async fn get_current_of(display: &Display) -> Response {
     let id = {
         let lock = display.current_item_id.lock().await;
         *lock
     };
-    (StatusCode::OK, Json(CurrentItemResponse { item_id: id }))
+    (StatusCode::OK, Json(CurrentItemResponse { item_id: id })).into_response()
 }
 
-pub async fn get_override(State(state): State<AppState>) -> impl IntoResponse {
-    // The primary display, because this path carries no display name;
-    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
-    let display = state.primary();
+pub async fn get_override_for(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => get_override_of(&display).await,
+        Err(response) => response,
+    }
+}
+
+pub async fn get_override(State(state): State<AppState>) -> Response {
+    match crate::display::resolve(&state, None) {
+        Ok(display) => get_override_of(&display).await,
+        Err(response) => response,
+    }
+}
+
+async fn get_override_of(display: &Display) -> Response {
     let current = {
         let lock = display.override_item.lock().await;
         lock.clone()
@@ -749,13 +797,35 @@ pub async fn get_override(State(state): State<AppState>) -> impl IntoResponse {
         },
     };
 
-    (StatusCode::OK, Json(body))
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+pub async fn set_override_for(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<SetOverrideRequest>,
+) -> Response {
+    match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => set_override_of(&state, &display, payload).await,
+        Err(response) => response,
+    }
 }
 
 pub async fn set_override(
     State(state): State<AppState>,
     Json(payload): Json<SetOverrideRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    match crate::display::resolve(&state, None) {
+        Ok(display) => set_override_of(&state, &display, payload).await,
+        Err(response) => response,
+    }
+}
+
+async fn set_override_of(
+    state: &AppState,
+    display: &Display,
+    payload: SetOverrideRequest,
+) -> Response {
     if payload.asset_id.is_none() && payload.url.is_none() {
         return (StatusCode::BAD_REQUEST, Json(OverrideResponse { active: false })).into_response();
     }
@@ -789,9 +859,6 @@ pub async fn set_override(
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
     };
 
-    // The primary display, because this path carries no display name;
-    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
-    let display = state.primary();
     {
         let mut lock = display.override_item.lock().await;
         *lock = Some(override_item);
@@ -813,12 +880,24 @@ pub async fn set_override(
     (StatusCode::OK, Json(OverrideResponse { active: true })).into_response()
 }
 
-pub async fn clear_override(
+pub async fn clear_override_for(
     State(state): State<AppState>,
-) -> impl IntoResponse {
-    // The primary display, because this path carries no display name;
-    // Task 8 gives it a scoped sibling and makes this one resolve explicitly.
-    let display = state.primary();
+    Path(name): Path<String>,
+) -> Response {
+    match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => clear_override_of(&state, &display).await,
+        Err(response) => response,
+    }
+}
+
+pub async fn clear_override(State(state): State<AppState>) -> Response {
+    match crate::display::resolve(&state, None) {
+        Ok(display) => clear_override_of(&state, &display).await,
+        Err(response) => response,
+    }
+}
+
+async fn clear_override_of(state: &AppState, display: &Display) -> Response {
     {
         let mut lock = display.override_item.lock().await;
         *lock = None;
@@ -830,7 +909,7 @@ pub async fn clear_override(
         .webhooks
         .fire(crate::webhook::Event::OverrideCleared { source: "operator" });
 
-    (StatusCode::OK, Json(OverrideResponse { active: false }))
+    (StatusCode::OK, Json(OverrideResponse { active: false })).into_response()
 }
 
 #[cfg(test)]
