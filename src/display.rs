@@ -275,8 +275,40 @@ pub async fn register(
         // it: `configure` never yields an empty slice, so the early return that
         // used to guard the first element could not fire and only looked like a
         // case somebody had thought about.
-        if index == 0 {
+        //
+        // Only when exactly one display is declared. The rule exists to carry an
+        // *upgrade* across -- a device that played a playlist before this
+        // feature existed must keep playing it -- and a deployment that declares
+        // two screens is not that. Left ungated, a fresh two-screen install
+        // where the operator creates one playlist for the workshop would hand it
+        // to the foyer instead.
+        if index == 0 && configured.len() == 1 {
             inherit_oldest_playlist(&mut tx, &config.name).await?;
+        }
+    }
+    // Say so rather than leaving the operator to wonder. With several screens
+    // declared nothing is inherited, so a device that used to play something and
+    // has just been given two `--display` flags comes up with both screens idle;
+    // that is the intended outcome, but only if it is discoverable.
+    if configured.len() > 1 {
+        let undecided: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM displays WHERE playlist_id IS NULL
+               AND COALESCE(assignment_decided, 0) = 0",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+        let playlists: i64 = sqlx::query_scalar("SELECT count(*) FROM playlists")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap_or(0);
+        if undecided > 0 && playlists > 0 {
+            tracing::info!(
+                "{} display(s) have no playlist yet. With several screens declared \
+                 none is assigned automatically -- pick one per screen on the \
+                 displays page.",
+                undecided
+            );
         }
     }
     tx.commit().await?;
@@ -840,8 +872,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_first_declared_display_inherits_the_oldest_playlist() {
-        let pool = pool("display_register_first_only").await;
+    async fn several_declared_displays_inherit_nothing() {
+        let pool = pool("display_register_several").await;
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Werkstatt')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let configured = configure(&args_with(vec!["foyer".into(), "werkstatt".into()])).unwrap();
+        register(&pool, &configured).await.unwrap();
+
+        // The inheritance carries an *upgrade* across: a device that played a
+        // playlist before this feature existed must keep playing it. A
+        // deployment declaring two screens is not that, and handing the first
+        // one a playlist the operator made for the second would be wrong
+        // content rather than no content -- which is worse, because no content
+        // reads as "configure me" and wrong content reads as deliberate.
+        assert_eq!(assignment(&pool, "foyer").await, Some(None));
+        assert_eq!(assignment(&pool, "werkstatt").await, Some(None));
+    }
+
+    #[tokio::test]
+    async fn a_single_declared_display_still_inherits() {
+        let pool = pool("display_register_single_named").await;
         sqlx::query("INSERT INTO playlists (name) VALUES ('Standard')")
             .execute(&pool)
             .await
@@ -851,13 +904,11 @@ mod tests {
             .await
             .unwrap();
 
-        let configured = configure(&args_with(vec!["foyer".into(), "werkstatt".into()])).unwrap();
+        // Naming the one screen it already had is still an upgrade, so the rule
+        // applies -- it is the count that decides, not whether a flag was used.
+        let configured = configure(&args_with(vec!["foyer".into()])).unwrap();
         register(&pool, &configured).await.unwrap();
 
         assert_eq!(assignment(&pool, "foyer").await, Some(Some(standard)));
-        // The second panel is new hardware nobody has decided about yet, and
-        // mirroring the first one by default is the configuration mistake two
-        // identical screens look like.
-        assert_eq!(assignment(&pool, "werkstatt").await, Some(None));
     }
 }
