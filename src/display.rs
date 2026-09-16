@@ -317,6 +317,37 @@ pub async fn register(
 
 /// Give a display the oldest playlist, once, while its assignment is still
 /// nobody's decision.
+/// Offer the one declared display a playlist the moment one first exists.
+///
+/// `register` runs at startup, and a fresh install has no playlist to inherit
+/// then -- so without this an operator who creates their first playlist watches
+/// the screen stay on the idle page until they also assign it, or restart. The
+/// gate is the same one `register` uses, so a deliberate clearing is still
+/// permanent and a deployment with several screens still chooses explicitly:
+/// handing the first screen a playlist made for the second would be wrong
+/// content, which reads as deliberate, where an idle screen reads as
+/// "configure me".
+pub async fn offer_first_playlist(state: &AppState) {
+    if state.displays.len() != 1 {
+        return;
+    }
+    let name = state.primary().name.clone();
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("Failed to offer a playlist to '{}': {}", name, e);
+            return;
+        }
+    };
+    if let Err(e) = inherit_oldest_playlist(&mut tx, &name).await {
+        tracing::error!("Failed to offer a playlist to '{}': {}", name, e);
+        return;
+    }
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to offer a playlist to '{}': {}", name, e);
+    }
+}
+
 async fn inherit_oldest_playlist(
     tx: &mut sqlx::SqliteConnection,
     name: &str,

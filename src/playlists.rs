@@ -81,7 +81,19 @@ async fn create(State(state): State<AppState>, Json(payload): Json<NameRequest>)
         .fetch_one(&state.pool)
         .await
     {
-        Ok(id) => Json(json!({ "id": id })).into_response(),
+        Ok(id) => {
+            // A fresh install has no playlist when `register` runs at startup, so
+            // the one declared display is still undecided. Offering it this one
+            // now is what keeps "create a playlist, add items, see them" working
+            // without a restart or a curl -- the offer declines itself if the
+            // operator has already decided, or if several screens are declared.
+            crate::display::offer_first_playlist(&state).await;
+            // The loop reads its assignment fresh each pass, but poking it makes
+            // the screen follow now rather than at the end of whatever it is
+            // showing.
+            state.primary().playlist_signal.notify_one();
+            Json(json!({ "id": id })).into_response()
+        }
         Err(e) => {
             error!("Failed to create playlist: {}", e);
             (
