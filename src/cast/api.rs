@@ -1,0 +1,375 @@
+use std::net::{IpAddr, SocketAddr};
+use std::time::Instant;
+
+use axum::extract::ws::Message;
+use axum::extract::{ConnectInfo, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tracing::{info, warn};
+
+use crate::models::{AppState, CastAuth};
+
+use super::{
+    activate_display, codes_match, end_session, generate_code, generate_ticket,
+    watch_pairing_expiry, Attempts, ClaimMode, DisplayLimits, Pairing, Reservation, Showing,
+    LOCKOUT, MAX_CODE_ATTEMPTS, PAIRING_TTL, RESERVATION_TTL,
+};
+use super::url::sender_url;
+
+/// Checks a sender's code against the configured policy, with a per-address
+/// lockout so a four-character code cannot simply be enumerated.
+pub(super) async fn authorize_sender(
+    state: &AppState,
+    addr: IpAddr,
+    provided: Option<&str>,
+    mode: ClaimMode,
+) -> Result<(), String> {
+    let settings = {
+        let settings = state.settings.read().await;
+        (
+            settings.cast_enabled,
+            settings.guest_pages_enabled,
+            settings.cast_auth,
+            settings.cast_code.clone(),
+        )
+    };
+    let (cast_enabled, pages_enabled, auth_mode, configured_code) = settings;
+    // The two capabilities are independent: a device too weak for WebRTC can
+    // still render a page, so refusing one must not refuse the other.
+    let enabled = match mode {
+        ClaimMode::Cast => cast_enabled,
+        ClaimMode::Page => pages_enabled,
+    };
+
+    let mut session = state.cast.lock().await;
+
+    if let Some(entry) = session.attempts.get(&addr) {
+        if let Some(until) = entry.locked_until {
+            if Instant::now() < until {
+                return Err("Zu viele Fehlversuche. Bitte kurz warten.".to_string());
+            }
+        }
+    }
+
+    if !enabled {
+        return Err(match mode {
+            ClaimMode::Cast => "Übertragung ist derzeit deaktiviert.".to_string(),
+            ClaimMode::Page => "Webseiten sind derzeit nicht erlaubt.".to_string(),
+        });
+    }
+
+    let outcome = match auth_mode {
+        CastAuth::None => Ok(()),
+        CastAuth::Code => {
+            // Failing closed matters: falling back to "no code" here would turn a
+            // misconfiguration into an open cast endpoint.
+            if configured_code.is_empty() {
+                Err("Cast-Code ist nicht konfiguriert.".to_string())
+            } else if codes_match(&configured_code, provided.unwrap_or("")) {
+                Ok(())
+            } else {
+                Err("Falscher Code.".to_string())
+            }
+        }
+        CastAuth::Pairing => match session.pairing.as_ref() {
+            None => Err("Kein Pairing angefordert.".to_string()),
+            Some(pairing) if Instant::now() >= pairing.expires_at => {
+                Err("Der Code ist abgelaufen.".to_string())
+            }
+            Some(pairing) => {
+                if codes_match(&pairing.code, provided.unwrap_or("")) {
+                    Ok(())
+                } else {
+                    Err("Falscher Code.".to_string())
+                }
+            }
+        },
+    };
+
+    match outcome {
+        Ok(()) => {
+            session.attempts.remove(&addr);
+            // A pairing code is single-use; leaving it valid would let a second
+            // guest reuse a code they saw on screen minutes ago.
+            session.pairing = None;
+            Ok(())
+        }
+        Err(message) => {
+            let now = Instant::now();
+            // Forget addresses that are neither locked out nor still actively
+            // guessing, so the table does not grow for the lifetime of a device
+            // that runs for months. The window must outlast a burst of wrong
+            // codes, or a slow attacker's counter would reset before it trips.
+            session.attempts.retain(|_, entry| {
+                entry.locked_until.is_some_and(|until| until > now)
+                    || now.duration_since(entry.last_seen) < LOCKOUT
+            });
+
+            let entry = session.attempts.entry(addr).or_insert(Attempts {
+                failures: 0,
+                locked_until: None,
+                last_seen: now,
+            });
+            entry.last_seen = now;
+            entry.failures += 1;
+            if entry.failures >= MAX_CODE_ATTEMPTS {
+                entry.failures = 0;
+                entry.locked_until = Some(Instant::now() + LOCKOUT);
+                warn!("Cast: locking out {} after repeated wrong codes", addr);
+            }
+            Err(message)
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PairingView {
+    code: String,
+    expires_in: u64,
+}
+
+#[derive(Serialize)]
+pub struct CastStateResponse {
+    /// Effective switch: the stored one, forced off by `--disable-cast`.
+    enabled: bool,
+    /// `--disable-cast`: off at deployment level, not changeable from the UI.
+    hard_disabled: bool,
+    auth: CastAuth,
+    /// Only meaningful in `code` mode. Reachable from loopback and the operator,
+    /// never from `/api/cast/info`.
+    code: String,
+    active: bool,
+    /// What is on screen: `null`, `"cast"`, or `{ "page": "<redacted url>" }`.
+    showing: serde_json::Value,
+    /// Somebody passed the code and is in their browser's screen picker.
+    reserved: bool,
+    sender: Option<String>,
+    display_connected: bool,
+    started_at: Option<String>,
+    tls_port: u16,
+    sender_url: String,
+    /// The pairing code currently on the display, with the seconds it has left.
+    ///
+    /// Only ever here, never on `/api/cast/info`: this is the operator's view. It
+    /// exists because a pairing code is created on request and lives 30 seconds,
+    /// so without it whoever is helping a guest by phone is the one person who
+    /// cannot see it.
+    pairing: Option<PairingView>,
+    /// What the display said it can show. Visible here because "the cast is
+    /// black" is otherwise very hard to tell from "the cast is not running".
+    display_limits: Option<DisplayLimits>,
+}
+
+pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
+    let sender_url = sender_url(&state);
+    let settings = state.settings.read().await;
+    let session = state.cast.lock().await;
+    Json(CastStateResponse {
+        enabled: settings.cast_enabled,
+        hard_disabled: state.args.disable_cast,
+        auth: settings.cast_auth,
+        code: settings.cast_code.clone(),
+        active: session.is_active(),
+        // Redacted inside `showing_json`: a guest may have typed credentials
+        // into that address, and this is rendered into the admin page.
+        showing: session.showing_json(),
+        reserved: session.live_reservation().is_some(),
+        sender: session.sender_addr.map(|addr| addr.to_string()),
+        display_connected: session.display.is_some(),
+        started_at: session.started_at.map(|at| at.to_rfc3339()),
+        tls_port: state.cast_tls_port,
+        sender_url,
+        display_limits: session.display_limits,
+        pairing: session.pairing.as_ref().and_then(|pairing| {
+            let remaining = pairing.expires_at.saturating_duration_since(Instant::now());
+            (!remaining.is_zero()).then(|| PairingView {
+                code: pairing.code.clone(),
+                expires_in: remaining.as_secs(),
+            })
+        }),
+    })
+}
+
+/// What a sender needs to render its own page, and nothing more.
+///
+/// Kept separate from `/api/cast/state`, which stays behind operator auth: the
+/// sender has no business learning who else is casting or from which address.
+pub async fn cast_info(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let sender_url = sender_url(&state);
+    let settings = state.settings.read().await;
+    let session = state.cast.lock().await;
+    // Never the code itself: this endpoint is reachable without credentials.
+    Json(json!({
+        "enabled": settings.cast_enabled,
+        // Its own switch, not a detail of `enabled`: a device too weak for
+        // WebRTC can still render a page, so the guest page shows one control
+        // and not the other.
+        "page_enabled": settings.guest_pages_enabled,
+        "auth": settings.cast_auth,
+        "busy": session.taken_by_other(peer.ip()),
+        // What the display can show. The sender needs this *before* it calls
+        // getDisplayMedia, and at that moment it has no socket yet.
+        "display_limits": session.display_limits,
+        // so a page reached over plain HTTP can send itself to the TLS origin,
+        // where getDisplayMedia actually exists
+        "sender_url": sender_url,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ClaimRequest {
+    #[serde(default)]
+    code: Option<String>,
+    /// What the guest intends to do. Defaults to `cast`, so an older page that
+    /// does not send it behaves exactly as before.
+    #[serde(default)]
+    mode: ClaimMode,
+}
+
+/// Validate the code and hold the session for this guest.
+///
+/// Deliberately a separate step from opening the socket: this is what lets the
+/// page tell someone their code is wrong *before* the screen picker appears, and
+/// what stops two guests from both getting that far.
+pub async fn claim_session(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(payload): Json<ClaimRequest>,
+) -> Response {
+    if state.args.disable_cast {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
+
+    let addr = peer.ip();
+
+    {
+        let session = state.cast.lock().await;
+        if session.sender.is_some() {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "Es überträgt bereits jemand."})),
+            )
+                .into_response();
+        }
+        // Someone else is already in the picker. Let the same address re-claim,
+        // so a reload or a second click does not lock a guest out of their own
+        // reservation.
+        if let Some(held) = session.live_reservation() {
+            if held.addr != addr {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": "Jemand anderes bereitet gerade eine Übertragung vor."})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    if let Err(message) = authorize_sender(&state, addr, payload.code.as_deref(), payload.mode).await {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
+    }
+
+    let ticket = generate_ticket();
+    {
+        let mut session = state.cast.lock().await;
+        session.reservation = Some(Reservation {
+            ticket: ticket.clone(),
+            addr,
+            expires_at: Instant::now() + RESERVATION_TTL,
+            mode: payload.mode,
+        });
+    }
+    info!("Cast: session reserved by {}", addr);
+
+    Json(json!({
+        "ticket": ticket,
+        "expires_in": RESERVATION_TTL.as_secs(),
+    }))
+    .into_response()
+}
+
+/// Give the slot back without having streamed -- the guest cancelled the picker
+/// or closed the tab. Without this the next person waits out the full TTL.
+pub async fn release_session(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> impl IntoResponse {
+    let mut session = state.cast.lock().await;
+    let mine = session
+        .reservation
+        .as_ref()
+        .is_some_and(|held| held.addr == peer.ip());
+    if mine {
+        session.reservation = None;
+        info!("Cast: reservation released by {}", peer.ip());
+    }
+    StatusCode::NO_CONTENT
+}
+
+/// Operator override: cut the cast short and put the playlist back.
+pub async fn stop_cast(State(state): State<AppState>) -> impl IntoResponse {
+    end_session(&state, "operator").await;
+    StatusCode::NO_CONTENT
+}
+
+/// Ask the display to show a fresh pairing code (`--cast-auth=pairing` only).
+///
+/// The code is deliberately not in the response: proving you can see the screen
+/// is the entire point, and returning it would reduce this to "no auth".
+pub async fn start_pairing(State(state): State<AppState>) -> Response {
+    if state.args.disable_cast {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
+    if state.settings.read().await.cast_auth != CastAuth::Pairing {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Pairing ist nicht aktiv."})),
+        )
+            .into_response();
+    }
+    if state.cast.lock().await.is_taken() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "Es überträgt bereits jemand."})),
+        )
+            .into_response();
+    }
+
+    let code = generate_code();
+    let display_tx = {
+        let mut session = state.cast.lock().await;
+        session.pairing = Some(Pairing {
+            code: code.clone(),
+            expires_at: Instant::now() + PAIRING_TTL,
+        });
+        session.display.as_ref().map(|peer| peer.tx.clone())
+    };
+
+    // The pairing code is drawn by the cast page, so the display has to be
+    // pinned to it before anybody is streaming. No sender exists yet, which is
+    // also why no `cast.started` comes out of this -- see `register_peer`.
+    activate_display(&state, Showing::Cast, None).await;
+
+    if let Some(tx) = display_tx {
+        let _ = tx.send(Message::Text(
+            json!({
+                "type": "pairing",
+                "code": code,
+                "expires_in": PAIRING_TTL.as_secs(),
+            })
+            .to_string()
+            .into(),
+        ));
+    }
+
+    let epoch = state.cast.lock().await.epoch;
+    watch_pairing_expiry(state.clone(), epoch);
+
+    Json(json!({"expires_in": PAIRING_TTL.as_secs()})).into_response()
+}
