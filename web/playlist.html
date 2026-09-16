@@ -47,6 +47,7 @@
       background: var(--accent); display: inline-block; margin-right: .35rem;
     }
     .screenpick { display: flex; gap: .4rem; align-items: center; }
+    .moveto { display: flex; gap: .3rem; align-items: center; font-size: .85rem; }
 
     /* Scopes everything below it to one playlist. Not sticky like the status
        bar -- it changes rarely, and two sticky bars would eat too much of a
@@ -804,7 +805,34 @@
       const downBtn = el('button', { type: 'button', text: '↓', title: 'nach unten', disabled: index === total - 1 });
       const delBtn = el('button', { type: 'button', class: 'danger', text: 'Löschen' });
 
-      card.append(el('div', { class: 'actions' }, saveBtn, playBtn, upBtn, downBtn, delBtn, feedback));
+      // Every playlist but this one: the server treats a move into the item's
+      // own playlist as a no-op, so offering it would be a button that does
+      // nothing and says it worked.
+      const others = playlists.filter((list) => String(list.id) !== String(currentPlaylist));
+      const moveList = el('select', {});
+      for (const list of others) {
+        const option = el('option', { value: String(list.id), text: list.name });
+        // The raw name, for the confirmation below -- the option text is all
+        // this control shows, so there is nothing to parse it back out of.
+        option.dataset.name = list.name;
+        moveList.append(option);
+      }
+      const moveBtn = el('button', { type: 'button', text: 'Verschieben' });
+      if (others.length === 0) {
+        moveList.append(el('option', { value: '', text: '(keine andere)' }));
+        moveList.disabled = true;
+        moveBtn.disabled = true;
+        moveBtn.title = 'Es gibt keine andere Playlist.';
+      }
+      // The card marks itself dirty on any `change` that bubbles up to it, and
+      // picking a move target is not an unsaved edit -- without this the card
+      // would claim "ungespeichert" for a field that is not part of the form.
+      moveList.addEventListener('change', (e) => e.stopPropagation());
+      const moveWrap = el('span', { class: 'moveto' },
+        el('span', { class: 'muted', text: 'nach' }), moveList, moveBtn);
+
+      card.append(el('div', { class: 'actions' },
+        saveBtn, playBtn, upBtn, downBtn, delBtn, moveWrap, feedback));
 
       const markDirty = () => {
         dirty.add(item.id);
@@ -870,6 +898,48 @@
           res.ok ? `läuft gleich auf „${screenLabel()}“…` : await readError(res, 'Play now fehlgeschlagen'),
           !res.ok);
         setTimeout(refreshStatus, 700);
+      });
+
+      // Moving the item to another playlist. Its own request and its own button:
+      // the server refuses a `playlist_id` carrying any other edit, because the
+      // move decides the item's new `play_order` and a combined write could only
+      // half-apply. So this is not part of Speichern, exactly like ↑/↓.
+      moveBtn.addEventListener('click', async () => {
+        const target = moveList.value;
+        if (!target) return;
+        const name = moveList.selectedOptions[0].dataset.name || '';
+        // The card leaves this list on success, taking anything typed into it
+        // with it -- so an unsaved edit is worth asking about first.
+        if (dirty.has(item.id)
+            && !confirm(`Item #${item.id} hat ungespeicherte Änderungen. `
+                        + 'Beim Verschieben gehen sie verloren. Trotzdem verschieben?')) {
+          return;
+        }
+        moveBtn.disabled = true;
+        let res;
+        try {
+          res = await fetch(`/api/playlist/${item.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ playlist_id: Number(target) }),
+          });
+        } catch (_) {
+          flash(feedback, 'Server nicht erreichbar', true);
+          return;
+        } finally {
+          moveBtn.disabled = false;
+        }
+        if (!res.ok) { flash(feedback, await readError(res, 'Verschieben fehlgeschlagen'), true); return; }
+        dirty.delete(item.id);
+        // Reported above the list, not on the card: the card is about to
+        // disappear, and a confirmation that vanishes with it would leave the
+        // operator watching an item go with nothing saying where.
+        flash(document.getElementById('playlistFeedback'),
+          `#${item.id} nach „${name}“ verschoben ✓`);
+        // Both playlists were renumbered and both item counts moved, so the
+        // picker is reloaded as well as the list.
+        await loadPlaylists();
+        await loadPlaylist();
       });
 
       const move = async (direction) => {

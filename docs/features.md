@@ -42,6 +42,12 @@ items never play.
 **Play now** jumps to a chosen item. **Keep loaded** holds an item in its own
 background tab so a heavy dashboard is already rendered when its turn comes.
 
+An item can be **moved to another playlist**, which appends it to the end of the
+target and renumbers both lists. It is its own button rather than part of saving
+the card: the move decides the item's new position, so a move carrying other
+edits is refused — and an item that has just left the list it was being edited in
+should say so in one place rather than half-save in two.
+
 ## Several screens
 
 One controller can drive more than one screen. Each declared display gets its own
