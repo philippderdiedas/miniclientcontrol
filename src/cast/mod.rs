@@ -935,6 +935,70 @@ mod tests {
         );
     }
 
+    /// The `?screen=` value in a pinned override must name the screen it was
+    /// pinned to, not merely be present. `cast_display_url` feeds three things
+    /// that must agree -- the override itself, the `override.set` webhook
+    /// payload and the teardown "is this still ours" comparison -- and every
+    /// assertion above (`is_active()`, `override_item.is_some()`/`is_none()`)
+    /// stays green even if a future edit crossed the wires and handed foyer's
+    /// session a `screen=werkstatt` URL. Both screens are activated so a swap
+    /// is visible: checking only one active screen would pass just as well
+    /// with the two names exchanged throughout `activate_display`.
+    #[tokio::test]
+    async fn each_screens_override_names_itself() {
+        let receiver = receiver().await;
+        let state = state_for_displays(&receiver, &["foyer", "werkstatt"]).await;
+        let foyer = state.display("foyer").unwrap();
+        let werkstatt = state.display("werkstatt").unwrap();
+
+        activate_display(
+            &state,
+            &foyer,
+            Showing::Cast,
+            Some("10.0.0.5".parse().unwrap()),
+        )
+        .await;
+        activate_display(
+            &state,
+            &werkstatt,
+            Showing::Cast,
+            Some("10.0.0.6".parse().unwrap()),
+        )
+        .await;
+
+        let foyer_url = foyer
+            .override_item
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|item| item.url.clone())
+            .expect("foyer has no override url");
+        let werkstatt_url = werkstatt
+            .override_item
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|item| item.url.clone())
+            .expect("werkstatt has no override url");
+
+        assert!(
+            foyer_url.contains("screen=foyer"),
+            "foyer's override does not name foyer: {foyer_url}"
+        );
+        assert!(
+            !foyer_url.contains("screen=werkstatt"),
+            "foyer's override names werkstatt instead: {foyer_url}"
+        );
+        assert!(
+            werkstatt_url.contains("screen=werkstatt"),
+            "werkstatt's override does not name werkstatt: {werkstatt_url}"
+        );
+        assert!(
+            !werkstatt_url.contains("screen=foyer"),
+            "werkstatt's override names foyer instead: {werkstatt_url}"
+        );
+    }
+
     /// The venue has one speaker pair. Whichever screen claims the room audio
     /// first holds it until its own cast ends -- and ending it must free the
     /// audio by itself, or the room stays mute until a restart.
