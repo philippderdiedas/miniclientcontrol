@@ -46,6 +46,19 @@
       width: .6rem; height: .6rem; border-radius: 50%;
       background: var(--accent); display: inline-block; margin-right: .35rem;
     }
+    .screenpick { display: flex; gap: .4rem; align-items: center; }
+    .moveto { display: flex; gap: .3rem; align-items: center; font-size: .85rem; }
+
+    /* Scopes everything below it to one playlist. Not sticky like the status
+       bar -- it changes rarely, and two sticky bars would eat too much of a
+       small display's viewport. */
+    .playlistbar {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: .8rem;
+    }
 
     .block {
       border: 1px solid var(--line);
@@ -115,14 +128,33 @@
 </head>
 <body>
   <h1>Playlist</h1>
-  <nav><a href="/admin.html">Verwaltung</a> · <a href="/assets.html">Assets</a></nav>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/displays.html">Displays</a> · <a href="/assets.html">Assets</a></nav>
 
+  <div class="playlistbar">
+    <strong>Playlist</strong>
+    <select id="playlistPick"></select>
+    <button id="playlistNewBtn" type="button">Neu</button>
+    <button id="playlistRenameBtn" type="button">Umbenennen</button>
+    <button id="playlistDeleteBtn" type="button" class="danger">Löschen</button>
+    <span class="feedback" id="playlistFeedback"></span>
+  </div>
+  <p class="err" id="playlistLoadError" hidden>Playlists konnten nicht geladen werden – Server nicht erreichbar.</p>
+
+  <!-- The screen picker sits in the status bar and not in the playlist bar,
+       because everything it scopes is in this bar: what is running, the override
+       and "Play now". The list below belongs to the playlist picker above. -->
   <div class="statusbar">
+    <span class="screenpick" id="screenBar" hidden>
+      <strong>Bildschirm</strong>
+      <select id="screenPick"></select>
+    </span>
     <strong id="nowPlaying">läuft: –</strong>
     <span id="overrideState" class="muted"></span>
+    <span id="screenNote" class="muted"></span>
     <span style="flex:1"></span>
     <button id="reloadBtn" type="button">Neu laden</button>
   </div>
+  <p class="err" id="screenLoadError" hidden>Bildschirme konnten nicht geladen werden – Server nicht erreichbar.</p>
 
   <details class="block" id="overrideBlock">
     <summary>Override – ein Inhalt dauerhaft anzeigen</summary>
@@ -177,8 +209,16 @@
     </div>
   </details>
 
+  <p class="err" id="assetLoadError" hidden>
+    Asset-Liste konnte nicht geladen werden – die Auswahl oben kann veraltet sein.
+  </p>
+
   <div id="list"></div>
+  <p class="err" id="itemsLoadError" hidden>
+    Items konnten nicht geladen werden – die Liste kann veraltet sein.
+  </p>
   <p class="muted" id="emptyHint" hidden>Noch keine Items.</p>
+  <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
   <script>
     // Every node here is built with createElement/textContent. Filenames and URLs are
@@ -424,9 +464,297 @@
     const dirty = new Set();      // cards with unsaved edits, kept across reloads
     const cardNodes = new Map();  // id -> rendered card element
 
+    // --- playlist selector ------------------------------------------------------
+    // The selected playlist scopes everything below. Kept in the URL so a
+    // reload, or a link an operator sends a colleague, lands on the same one.
+    let currentPlaylist = null;
+    // The playlists as the server last listed them, for the per-item move
+    // control -- it offers every playlist except the one the item is in.
+    let playlists = [];
+
+    // `dirty` and `cardNodes` are keyed by item id alone, and item ids are global
+    // across playlists. Switching the playlist being viewed must clear both
+    // together: otherwise a `dirty` id left over from playlist A can collide with
+    // an id in playlist B, wrongly flagging a freshly-loaded card "ungespeichert",
+    // while the node in `cardNodes` that actually held the typed-in text for A is
+    // simply dropped on the next `loadPlaylist()` -- the edit is lost and the
+    // operator is told the opposite. Call this instead of assigning
+    // `currentPlaylist` directly.
+    function setCurrentPlaylist(id) {
+      if (id !== currentPlaylist) {
+        dirty.clear();
+        cardNodes.clear();
+      }
+      currentPlaylist = id;
+    }
+
+    function setPlaylistParam(id) {
+      const params = new URLSearchParams(location.search);
+      if (id) params.set('playlist', id);
+      else params.delete('playlist');
+      const query = params.toString();
+      history.replaceState(null, '', location.pathname + (query ? `?${query}` : ''));
+    }
+
+    async function loadPlaylists() {
+      const pick = document.getElementById('playlistPick');
+      const loadError = document.getElementById('playlistLoadError');
+      let lists;
+      try {
+        const res = await fetch('/api/playlists');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        lists = await res.json();
+      } catch (_) {
+        // A network failure and a genuine empty install must not read the same:
+        // only the success path below may claim "no playlists exist". Leave
+        // whatever was on screen alone and just say the fetch failed.
+        loadError.hidden = false;
+        return [];
+      }
+      loadError.hidden = true;
+      playlists = lists;
+
+      pick.replaceChildren();
+      for (const list of lists) {
+        const option = el('option', {
+          value: String(list.id),
+          text: `${list.name} (${list.items})`,
+        });
+        // The raw name, untouched by the "(count)" suffix appended above, so
+        // Umbenennen can prefill it without parsing that suffix back out of
+        // text this same function formatted.
+        option.dataset.name = list.name;
+        pick.append(option);
+      }
+      const wanted = new URLSearchParams(location.search).get('playlist');
+      setCurrentPlaylist((wanted && lists.some((l) => String(l.id) === wanted))
+        ? wanted
+        : (lists[0] ? String(lists[0].id) : null));
+      if (currentPlaylist) pick.value = currentPlaylist;
+
+      // An item form with nowhere to put the item is a form that produces a 400
+      // for a reason the operator cannot see, so it is hidden rather than shown
+      // disabled.
+      const empty = lists.length === 0;
+      document.getElementById('addBlock').hidden = empty;
+      document.getElementById('list').hidden = empty;
+      document.getElementById('noPlaylistHint').hidden = !empty;
+      document.getElementById('playlistRenameBtn').disabled = empty;
+      document.getElementById('playlistDeleteBtn').disabled = empty;
+
+      return lists;
+    }
+
+    document.getElementById('playlistPick').addEventListener('change', async (e) => {
+      setCurrentPlaylist(e.target.value || null);
+      setPlaylistParam(currentPlaylist);
+      await loadPlaylist();
+      await refreshStatus();
+    });
+
+    document.getElementById('playlistNewBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      const name = prompt('Name der neuen Playlist:');
+      if (name === null) return;
+      const btn = document.getElementById('playlistNewBtn');
+      btn.disabled = true;
+      // `finally`, not a plain re-enable after the await: a network-level
+      // rejection skips everything after it, and the button would stay dead
+      // until the page is reloaded.
+      let res;
+      try {
+        res = await fetch('/api/playlists', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
+      if (!res.ok) { flash(feedback, await readError(res, 'Anlegen fehlgeschlagen'), true); return; }
+      const { id } = await res.json();
+      setPlaylistParam(String(id));
+      await loadPlaylists();
+      flash(feedback, 'angelegt ✓');
+      await loadPlaylist();
+    });
+
+    document.getElementById('playlistRenameBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      if (!currentPlaylist) return;
+      const pick = document.getElementById('playlistPick');
+      const currentName = pick.selectedOptions[0] ? pick.selectedOptions[0].dataset.name : '';
+      const name = prompt('Neuer Name:', currentName);
+      if (name === null) return;
+      const btn = document.getElementById('playlistRenameBtn');
+      btn.disabled = true;
+      let res;
+      try {
+        res = await fetch(`/api/playlists/${currentPlaylist}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
+      if (!res.ok) { flash(feedback, await readError(res, 'Umbenennen fehlgeschlagen'), true); return; }
+      flash(feedback, 'umbenannt ✓');
+      await loadPlaylists();
+    });
+
+    document.getElementById('playlistDeleteBtn').addEventListener('click', async () => {
+      const feedback = document.getElementById('playlistFeedback');
+      if (!currentPlaylist) return;
+      if (!confirm('Diese Playlist wirklich löschen?')) return;
+      const btn = document.getElementById('playlistDeleteBtn');
+      btn.disabled = true;
+      let res;
+      try {
+        res = await fetch(`/api/playlists/${currentPlaylist}`, { method: 'DELETE' });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      } finally {
+        btn.disabled = false;
+      }
+      // The server counts the items and this is its own message -- do not
+      // pre-empt it here, or the page would have to count them again.
+      if (!res.ok) { flash(feedback, await readError(res, 'Löschen fehlgeschlagen'), true); return; }
+      flash(feedback, 'gelöscht ✓');
+      setPlaylistParam(null);
+      await loadPlaylists();
+      setPlaylistParam(currentPlaylist);
+      await loadPlaylist();
+    });
+
+    // --- screen selector --------------------------------------------------------
+    // The screen scopes the *status bar*: what is running, the override, and
+    // "Play now". It says nothing about the list below, which belongs to the
+    // playlist picker -- an operator routinely edits a playlist no screen is
+    // showing, so the two are independent and `screenNote` spells out when they
+    // point at different things.
+    //
+    // Every request goes through `/api/displays/{name}/…`, including when one
+    // screen is declared: the unscoped paths answer `409` as soon as a second
+    // one is, and one code path cannot drift from itself.
+    const SCREEN_KEY = 'miniclientcontrol.display';
+    let screens = [];          // declared screens only -- see loadScreens()
+    let currentScreen = null;  // the name, which is what the paths carry
+    let screenSignature = '';
+
+    // Private browsing and blocked site data both make this throw rather than
+    // return nothing, and a remembered selection is a convenience -- losing it
+    // must not take the page with it.
+    const remembered = () => { try { return localStorage.getItem(SCREEN_KEY); } catch (_) { return null; } };
+    const remember = (name) => { try { localStorage.setItem(SCREEN_KEY, name); } catch (_) { /* ignore */ } };
+
+    const screenOf = (name) => screens.find((s) => s.name === name) || null;
+    const screenLabel = () => {
+      const screen = screenOf(currentScreen);
+      return screen ? (screen.label || screen.name) : '–';
+    };
+    const screenPath = (suffix) =>
+      `/api/displays/${encodeURIComponent(currentScreen)}/${suffix}`;
+    const playlistName = (id) => {
+      const list = playlists.find((p) => p.id === id);
+      return list ? list.name : `#${id}`;
+    };
+
+    async function loadScreens() {
+      const pick = document.getElementById('screenPick');
+      const loadError = document.getElementById('screenLoadError');
+      let all;
+      try {
+        const res = await fetch('/api/displays');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        all = await res.json();
+      } catch (_) {
+        loadError.hidden = false;
+        return false;
+      }
+      loadError.hidden = true;
+      // Declared only. A stored row for a screen this deployment no longer
+      // drives stays writable on /displays.html so its playlist can be handed
+      // on, but its playback routes answer `404` -- offering it here would be a
+      // control that cannot work.
+      screens = all.filter((d) => d.declared);
+
+      // This runs on the poll, so the options are rebuilt only when they really
+      // changed: replacing them on every tick would drop the dropdown an
+      // operator has just opened.
+      const signature = JSON.stringify(screens.map((d) => [d.name, d.label]));
+      if (signature !== screenSignature) {
+        screenSignature = signature;
+        pick.replaceChildren(...screens.map((d) =>
+          el('option', { value: d.name, text: d.label || d.name })));
+      }
+
+      // Validated against the list every time, not just at startup: a remembered
+      // name -- or one selected before the deployment changed -- that is no
+      // longer declared must fall back rather than leave the page addressing a
+      // screen that does not exist. The stored name is deliberately not
+      // overwritten when it fails to resolve: a screen taken off the command
+      // line for an afternoon comes back, and the operator's actual choice
+      // should come back with it rather than having been replaced by a fallback
+      // nobody chose.
+      if (!screenOf(currentScreen)) {
+        const wanted = remembered();
+        currentScreen = screenOf(wanted) ? wanted : (screens[0] ? screens[0].name : null);
+      }
+      if (currentScreen) pick.value = currentScreen;
+      // Nothing to choose: a one-screen deployment looks exactly as it did.
+      document.getElementById('screenBar').hidden = screens.length < 2;
+      return true;
+    }
+
+    // Says out loud when the screen in the status bar and the playlist in the
+    // list below are not about the same thing.
+    function updateScreenNote() {
+      const note = document.getElementById('screenNote');
+      const screen = screenOf(currentScreen);
+      if (!screen || !currentPlaylist) { note.textContent = ''; return; }
+      if (screen.playlist_id === null || screen.playlist_id === undefined) {
+        note.textContent = `„${screenLabel()}“ spielt zurzeit keine Playlist.`;
+        return;
+      }
+      if (String(screen.playlist_id) !== String(currentPlaylist)) {
+        note.textContent = `„${screenLabel()}“ spielt „${playlistName(screen.playlist_id)}“ `
+          + '– unten wird eine andere Playlist bearbeitet.';
+        return;
+      }
+      note.textContent = '';
+    }
+
+    document.getElementById('screenPick').addEventListener('change', async (e) => {
+      currentScreen = e.target.value || null;
+      if (currentScreen) remember(currentScreen);
+      await refreshStatus();
+    });
+
     async function loadAssets() {
-      const res = await fetch('/api/assets');
-      assets = res.ok ? await res.json() : [];
+      const loadError = document.getElementById('assetLoadError');
+      let fetched;
+      try {
+        const res = await fetch('/api/assets');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fetched = await res.json();
+      } catch (_) {
+        // Same rule as loadPlaylists(): a refusal is not an answer. Rebuilding
+        // the pickers from an empty list would drop the asset an operator has
+        // just selected and offer nothing in its place, so the last known list
+        // stays and only the failure is reported.
+        loadError.hidden = false;
+        return;
+      }
+      loadError.hidden = true;
+      assets = fetched;
       for (const sel of [document.getElementById('addAsset'), document.getElementById('ovAsset')]) {
         const keep = sel.value;
         sel.textContent = '';
@@ -498,7 +826,34 @@
       const downBtn = el('button', { type: 'button', text: '↓', title: 'nach unten', disabled: index === total - 1 });
       const delBtn = el('button', { type: 'button', class: 'danger', text: 'Löschen' });
 
-      card.append(el('div', { class: 'actions' }, saveBtn, playBtn, upBtn, downBtn, delBtn, feedback));
+      // Every playlist but this one: the server treats a move into the item's
+      // own playlist as a no-op, so offering it would be a button that does
+      // nothing and says it worked.
+      const others = playlists.filter((list) => String(list.id) !== String(currentPlaylist));
+      const moveList = el('select', {});
+      for (const list of others) {
+        const option = el('option', { value: String(list.id), text: list.name });
+        // The raw name, for the confirmation below -- the option text is all
+        // this control shows, so there is nothing to parse it back out of.
+        option.dataset.name = list.name;
+        moveList.append(option);
+      }
+      const moveBtn = el('button', { type: 'button', text: 'Verschieben' });
+      if (others.length === 0) {
+        moveList.append(el('option', { value: '', text: '(keine andere)' }));
+        moveList.disabled = true;
+        moveBtn.disabled = true;
+        moveBtn.title = 'Es gibt keine andere Playlist.';
+      }
+      // The card marks itself dirty on any `change` that bubbles up to it, and
+      // picking a move target is not an unsaved edit -- without this the card
+      // would claim "ungespeichert" for a field that is not part of the form.
+      moveList.addEventListener('change', (e) => e.stopPropagation());
+      const moveWrap = el('span', { class: 'moveto' },
+        el('span', { class: 'muted', text: 'nach' }), moveList, moveBtn);
+
+      card.append(el('div', { class: 'actions' },
+        saveBtn, playBtn, upBtn, downBtn, delBtn, moveWrap, feedback));
 
       const markDirty = () => {
         dirty.add(item.id);
@@ -546,13 +901,75 @@
       });
 
       playBtn.addEventListener('click', async () => {
-        const res = await fetch('/api/control/current', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ item_id: item.id }),
-        });
-        flash(feedback, res.ok ? 'wird abgespielt…' : 'Play now fehlgeschlagen', !res.ok);
+        if (!currentScreen) { flash(feedback, 'Kein Bildschirm ausgewählt.', true); return; }
+        let res;
+        try {
+          res = await fetch(screenPath('control/current'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id }),
+          });
+        } catch (_) {
+          flash(feedback, 'Server nicht erreichbar', true);
+          return;
+        }
+        // The server's own words on a refusal: it knows which screens exist and
+        // this page would only be guessing at why it said no.
+        flash(feedback,
+          res.ok ? `läuft gleich auf „${screenLabel()}“…` : await readError(res, 'Play now fehlgeschlagen'),
+          !res.ok);
         setTimeout(refreshStatus, 700);
+      });
+
+      // Moving the item to another playlist. Its own request and its own button:
+      // the server refuses a `playlist_id` carrying any other edit, because the
+      // move decides the item's new `play_order` and a combined write could only
+      // half-apply. So this is not part of Speichern, exactly like ↑/↓.
+      moveBtn.addEventListener('click', async () => {
+        const target = moveList.value;
+        if (!target) return;
+        const name = moveList.selectedOptions[0].dataset.name || '';
+        // The card leaves this list on success, taking anything typed into it
+        // with it -- so an unsaved edit is worth asking about first.
+        if (dirty.has(item.id)
+            && !confirm(`Item #${item.id} hat ungespeicherte Änderungen. `
+                        + 'Beim Verschieben gehen sie verloren. Trotzdem verschieben?')) {
+          return;
+        }
+        moveBtn.disabled = true;
+        // The guard has to outlast the reloads, not just the request: a
+        // `finally` around the fetch alone re-enables the button while
+        // loadPlaylists()/loadPlaylist() are still in flight -- the card is
+        // still on screen and still says "Verschieben" -- and a second click in
+        // that window sends the move a second time. Still a `finally`, so a
+        // network-level rejection or a reload that throws cannot leave the
+        // button dead until the page is reloaded.
+        try {
+          let res;
+          try {
+            res = await fetch(`/api/playlist/${item.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ playlist_id: Number(target) }),
+            });
+          } catch (_) {
+            flash(feedback, 'Server nicht erreichbar', true);
+            return;
+          }
+          if (!res.ok) { flash(feedback, await readError(res, 'Verschieben fehlgeschlagen'), true); return; }
+          dirty.delete(item.id);
+          // Reported above the list, not on the card: the card is about to
+          // disappear, and a confirmation that vanishes with it would leave the
+          // operator watching an item go with nothing saying where.
+          flash(document.getElementById('playlistFeedback'),
+            `#${item.id} nach „${name}“ verschoben ✓`);
+          // Both playlists were renumbered and both item counts moved, so the
+          // picker is reloaded as well as the list.
+          await loadPlaylists();
+          await loadPlaylist();
+        } finally {
+          moveBtn.disabled = false;
+        }
       });
 
       const move = async (direction) => {
@@ -593,9 +1010,35 @@
     }
 
     async function loadPlaylist() {
-      const res = await fetch('/api/playlist');
-      items = res.ok ? await res.json() : [];
       const list = document.getElementById('list');
+      // No playlist selected (none exist, or none picked yet): omitting
+      // `playlist_id` would fetch every item across every playlist, which is
+      // the legacy behaviour this page must never rely on.
+      const loadError = document.getElementById('itemsLoadError');
+      if (!currentPlaylist) {
+        items = [];
+        list.textContent = '';
+        cardNodes.clear();
+        document.getElementById('emptyHint').hidden = true;
+        // Nothing was asked for, so there is no failed answer to report either.
+        loadError.hidden = true;
+        return;
+      }
+      let fetched;
+      try {
+        const res = await fetch('/api/playlist?playlist_id=' + currentPlaylist);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fetched = await res.json();
+      } catch (_) {
+        // Same rule as loadPlaylists(): a failed fetch says nothing about
+        // whether this playlist has items, so nothing below it may claim the
+        // playlist is empty. The cards stay as they are -- one of them may be
+        // holding an edit in progress -- and only the failure is reported.
+        loadError.hidden = false;
+        return;
+      }
+      loadError.hidden = true;
+      items = fetched;
 
       // Cards with unsaved edits are carried over instead of re-rendered, so a save or
       // reorder elsewhere on the page does not silently throw away typed-in values.
@@ -622,19 +1065,50 @@
     }
 
     async function refreshStatus() {
+      updateScreenNote();
+      const nowPlaying = document.getElementById('nowPlaying');
+      // No screen to ask: `/api/displays` has not answered yet, or answered
+      // with nothing declared. Saying "läuft: –" here would be an affirmative
+      // about a screen nobody asked.
+      if (!currentScreen) {
+        nowPlaying.textContent = 'läuft: unbekannt';
+        document.getElementById('overrideState').textContent = '';
+        currentItemId = null;
+        refreshCards();
+        return;
+      }
+      const prefix = screens.length > 1 ? `${screenLabel()} – ` : '';
       try {
         const [curRes, ovRes] = await Promise.all([
-          fetch('/api/control/current'),
-          fetch('/api/override'),
+          fetch(screenPath('control/current')),
+          fetch(screenPath('override')),
         ]);
 
-        currentItemId = curRes.ok ? (await curRes.json()).item_id : null;
-        const item = items.find((x) => x.id === currentItemId);
-        document.getElementById('nowPlaying').textContent = currentItemId
-          ? `▶ läuft: #${currentItemId} – ${item ? sourceLabel(item) : '…'}`
-          : 'läuft: –';
+        // A refusal is not an absence: the screen may have been dropped from the
+        // command line while this page was open, and reporting that as "läuft:
+        // –" would be the false affirmative this bar exists to avoid.
+        if (!curRes.ok || !ovRes.ok) {
+          currentItemId = null;
+          nowPlaying.textContent = `${prefix}läuft: unbekannt`;
+          document.getElementById('overrideState').textContent = '';
+          refreshCards();
+          return;
+        }
 
-        const ov = ovRes.ok ? await ovRes.json() : { active: false };
+        currentItemId = (await curRes.json()).item_id;
+        const item = items.find((x) => x.id === currentItemId);
+        // The running item belongs to the screen's playlist, which need not be
+        // the one on screen here -- so an id the list cannot explain says where
+        // it is rather than trailing off into "…".
+        const screen = screenOf(currentScreen);
+        const elsewhere = screen && String(screen.playlist_id) !== String(currentPlaylist);
+        const source = item ? sourceLabel(item)
+          : (elsewhere ? 'in einer anderen Playlist' : '…');
+        nowPlaying.textContent = currentItemId
+          ? `${prefix}▶ läuft: #${currentItemId} – ${source}`
+          : `${prefix}läuft: –`;
+
+        const ov = await ovRes.json();
         const ovState = document.getElementById('overrideState');
         ovState.textContent = '';
         if (ov.active) {
@@ -656,6 +1130,7 @@
       const feedback = document.getElementById('addFeedback');
       const assetVal = document.getElementById('addAsset').value;
       const urlVal = document.getElementById('addUrl').value.trim();
+      if (!currentPlaylist) { flash(feedback, 'Keine Playlist ausgewählt.', true); return; }
       if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
       if (assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
 
@@ -668,6 +1143,7 @@
         start_date: toIso(document.getElementById('addStart').value),
         end_date: toIso(document.getElementById('addEnd').value),
         scroll_config: addScroll.read(),
+        playlist_id: Number(currentPlaylist),
       };
 
       const res = await fetch('/api/playlist', {
@@ -693,38 +1169,72 @@
       const assetVal = document.getElementById('ovAsset').value;
       const urlVal = document.getElementById('ovUrl').value.trim();
       if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
+      if (!currentScreen) { flash(feedback, 'Kein Bildschirm ausgewählt.', true); return; }
 
-      const res = await fetch('/api/override', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          asset_id: assetVal ? Number(assetVal) : null,
-          url: urlVal || null,
-          scroll_config: ovScroll.read(),
-        }),
-      });
-      flash(feedback, res.ok ? 'Override aktiv' : await readError(res, 'Override fehlgeschlagen'), !res.ok);
+      let res;
+      try {
+        res = await fetch(screenPath('override'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            asset_id: assetVal ? Number(assetVal) : null,
+            url: urlVal || null,
+            scroll_config: ovScroll.read(),
+          }),
+        });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      }
+      flash(feedback,
+        res.ok ? `Override aktiv auf „${screenLabel()}“` : await readError(res, 'Override fehlgeschlagen'),
+        !res.ok);
       await refreshStatus();
     });
 
     document.getElementById('ovStop').addEventListener('click', async () => {
       const feedback = document.getElementById('ovFeedback');
-      const res = await fetch('/api/override', { method: 'DELETE' });
-      flash(feedback, res.ok ? 'Override beendet' : 'Beenden fehlgeschlagen', !res.ok);
+      if (!currentScreen) { flash(feedback, 'Kein Bildschirm ausgewählt.', true); return; }
+      let res;
+      try {
+        res = await fetch(screenPath('override'), { method: 'DELETE' });
+      } catch (_) {
+        flash(feedback, 'Server nicht erreichbar', true);
+        return;
+      }
+      // `readError` here too: the server says why it refused -- an unknown
+      // screen, say -- and "Beenden fehlgeschlagen" said nothing an operator
+      // could act on.
+      flash(feedback,
+        res.ok ? 'Override beendet' : await readError(res, 'Beenden fehlgeschlagen'),
+        !res.ok);
       await refreshStatus();
     });
 
     document.getElementById('reloadBtn').addEventListener('click', async () => {
+      await loadPlaylists();
+      await loadScreens();
       await loadAssets();
       await loadPlaylist();
       await refreshStatus();
     });
 
+    // The screen list is re-read on every tick like the status it scopes: a
+    // screen dropped from the command line, relabelled, or given a different
+    // playlist has to reach this bar without a reload. The dropdown is only
+    // rebuilt when it really changed, so the poll cannot eat an open one.
+    async function poll() {
+      await loadScreens();
+      await refreshStatus();
+    }
+
     (async function init() {
+      await loadPlaylists();
+      await loadScreens();
       await loadAssets();
       await loadPlaylist();
       await refreshStatus();
-      setInterval(refreshStatus, 2000);
+      setInterval(poll, 2000);
     })();
   </script>
 </body>

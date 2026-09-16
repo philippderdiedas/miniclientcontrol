@@ -37,6 +37,27 @@ pub struct Args {
     #[arg(long, env, default_value = "http://127.0.0.1:9222")]
     pub cdp_url: String,
 
+    /// A screen this deployment drives, as `name` or `name:cdp-port`.
+    ///
+    /// Repeat it once per screen. The name is the identity an operator's
+    /// playlist assignment is stored against, and it is what the window-manager
+    /// config matches on — `miniclientcontrol-<name>` becomes the Wayland
+    /// `app_id`. Passing none keeps the single-display behaviour exactly as it
+    /// was, which is why this is a `Vec` with no clap default rather than an
+    /// `Option`.
+    #[arg(long = "display", env = "DISPLAYS", value_delimiter = ',')]
+    pub display: Vec<String>,
+
+    /// Which declared display a cast pins. Defaults to the first declared.
+    ///
+    /// One session for the whole controller, on one screen: a cast per display
+    /// is its own piece of work, because `cast.rs` carries the session state
+    /// machine and one session is all a venue with a single guest needs. The
+    /// name is checked against the declared displays at startup, so a typo is a
+    /// refusal to boot rather than a cast landing on the wrong panel.
+    #[arg(long, env = "CAST_DISPLAY")]
+    pub cast_display: Option<String>,
+
     /// Basic auth username (set together with basic_auth_password)
     #[arg(long, env)]
     pub basic_auth_user: Option<String>,
@@ -275,7 +296,13 @@ pub struct PlaylistItemWithAsset {
     pub end_date: Option<String>,
     #[sqlx(default)]
     pub keep_loaded: bool,
-    
+
+    /// Which playlist this item belongs to. `Option` because the column is added
+    /// by migration and an item written by an older binary has none until the
+    /// backfill runs.
+    #[sqlx(default)]
+    pub playlist_id: Option<i64>,
+
     // Serialized JSON stored in DB
     #[sqlx(default)]
     pub scroll_config: sqlx::types::Json<ScrollMode>,
@@ -303,26 +330,64 @@ pub struct PlaylistItemWithAsset {
 
 // --- Application State ---
 
+/// One screen's playback state.
+///
+/// These were fields on `AppState` when there was one screen. They are the only
+/// things that had to become per-display: everything else the controller owns —
+/// assets, settings, the overlay, credentials, audio, webhook targets — is
+/// shared, because duplicating *configuration* was never the problem.
+pub struct Display {
+    pub name: String,
+    pub cdp_url: String,
+    /// What this display's loop is currently showing. Owned by the loop; the API only reads it.
+    pub current_item_id: Mutex<Option<i64>>,
+    /// "Play now" for this display. Written by the API; cleared by the loop only once the
+    /// target has been looked up in a freshly fetched playlist. It must survive a lookup
+    /// miss: the loop's playlist snapshot can be a whole item duration stale, so an item
+    /// added or re-enabled since the last fetch is not in it yet. Kept separate from
+    /// `current_item_id`, which the loop overwrites at the start of every item and would
+    /// therefore clobber the request.
+    pub pending_jump: Mutex<Option<i64>>,
+    pub override_item: Mutex<Option<OverrideItem>>,
+    /// PID of the browser we launched for this display, when we launched it. Used to
+    /// tell the cast's own audio stream apart from everything else making sound.
+    ///
+    /// An `Arc` rather than a bare `Mutex` because `chromium::supervise` is handed the
+    /// slot itself and outlives no particular borrow of the `Display`.
+    pub browser_pid: crate::chromium::PidSlot,
+    pub skip_signal: Notify,
+    pub playlist_signal: Notify,
+    pub override_signal: Notify,
+    /// Poked when the overlay configuration changes, so the badge appears on the
+    /// item that is already on screen instead of at the next navigation.
+    pub overlay_signal: Notify,
+}
+
+impl Display {
+    pub fn new(name: &str, cdp_url: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            cdp_url: cdp_url.to_string(),
+            current_item_id: Mutex::new(None),
+            pending_jump: Mutex::new(None),
+            override_item: Mutex::new(None),
+            browser_pid: Default::default(),
+            skip_signal: Notify::new(),
+            playlist_signal: Notify::new(),
+            override_signal: Notify::new(),
+            overlay_signal: Notify::new(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
     pub args: Arc<Args>,
-    pub skip_signal: Arc<Notify>,
-    pub playlist_signal: Arc<Notify>,
-    pub override_signal: Arc<Notify>,
-    /// Poked when the overlay configuration changes, so the badge appears on the
-    /// item that is already on screen instead of at the next navigation.
-    pub overlay_signal: Arc<Notify>,
-    /// What the browser loop is currently showing. Owned by the loop; the API only reads it.
-    pub current_item_id: Arc<Mutex<Option<i64>>>,
-    /// "Play now" request. Written by the API; cleared by the loop only once the target
-    /// has been looked up in a freshly fetched playlist. It must survive a lookup miss:
-    /// the loop's playlist snapshot can be a whole item duration stale, so an item added
-    /// or re-enabled since the last fetch is not in it yet. Kept separate from
-    /// `current_item_id`, which the loop overwrites at the start of every item and would
-    /// therefore clobber the request.
-    pub pending_jump: Arc<Mutex<Option<i64>>>,
-    pub override_item: Arc<Mutex<Option<OverrideItem>>>,
+    /// The screens this deployment drives, in declaration order. Built once at
+    /// startup and never changed, so nothing guards the list itself — only the
+    /// fields inside each `Display`.
+    pub displays: Arc<Vec<Arc<Display>>>,
     /// The port the cast listener actually bound, which is not necessarily the
     /// one in `args` — see `tls::bind_cast_listener`.
     pub cast_tls_port: u16,
@@ -344,12 +409,88 @@ pub struct AppState {
     pub auth_cache: Arc<Mutex<Option<String>>>,
     /// How the venue's audio is controlled, decided once at startup.
     pub audio: Arc<crate::audio::Backend>,
-    /// PID of the browser we launched, when we launched it. Used to tell the
-    /// cast's own audio stream apart from everything else making sound.
-    pub browser_pid: Arc<Mutex<Option<u32>>>,
-    /// Screen-cast session. A running cast owns `override_item`; see `cast.rs`.
+    /// Screen-cast session. A running cast owns the `override_item` of the
+    /// display `cast_display()` names; see `cast.rs`.
     pub cast: crate::cast::SharedCastSession,
     /// Outbound webhooks. `fire` is synchronous and infallible, which is what
     /// lets the control loop call it.
     pub webhooks: Arc<crate::webhook::Dispatcher>,
+}
+
+impl AppState {
+    /// The display of that name, if this deployment declares one.
+    ///
+    /// Resolved out of a request path by the display-scoped API
+    /// (`display::resolve`), which is also where an unknown name turns into a
+    /// `404` listing the real ones.
+    pub fn display(&self, name: &str) -> Option<Arc<Display>> {
+        self.displays.iter().find(|d| d.name == name).cloned()
+    }
+
+    /// The first declared display. What an unscoped legacy API path resolves to
+    /// when only one display exists, and the fallback for anything that has to
+    /// name one screen without being told which.
+    ///
+    /// The index cannot panic: `display::configure` returns at least the
+    /// implicit `default` display, so the list is never empty.
+    pub fn primary(&self) -> Arc<Display> {
+        self.displays[0].clone()
+    }
+
+    /// The display a cast pins. `--cast-display` when given, else the first
+    /// declared.
+    ///
+    /// Every site in `cast.rs` that needs a screen resolves it through here, so
+    /// the pinned override, the webhook events and the audio subtree all name
+    /// the same one. The lookup cannot miss in practice -- `display::configure`
+    /// refuses an undeclared name at startup -- and falling back to the primary
+    /// display rather than panicking keeps a mistake here from taking the
+    /// signage down.
+    pub fn cast_display(&self) -> Arc<Display> {
+        self.args
+            .cast_display
+            .as_deref()
+            .and_then(|name| self.display(name))
+            .unwrap_or_else(|| self.primary())
+    }
+
+    /// Tell every display that the playlist content changed.
+    ///
+    /// Not display-scoped, unlike playback: an edited item can be on any screen
+    /// showing the playlist it belongs to, and a loop that was not told carries
+    /// a stale snapshot until its next pass. Poking a display that does not show
+    /// the item costs one extra read of a table with single-digit rows.
+    ///
+    /// `notify_one` and never `notify_waiters`: a loop is only parked for part
+    /// of its cycle, and `notify_waiters` drops the notification when nobody is
+    /// parked, which is a silently lost edit.
+    pub fn notify_playlist_changed(&self) {
+        for display in self.displays.iter() {
+            display.playlist_signal.notify_one();
+        }
+    }
+
+    /// Tell every display that an overlay changed.
+    ///
+    /// The global overlay is the building's, not one panel's, and an item's own
+    /// overlay travels with the item wherever it is shown. Both reach every
+    /// screen for the same reason, so both come through here.
+    pub fn notify_overlay_changed(&self) {
+        for display in self.displays.iter() {
+            display.overlay_signal.notify_one();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_display_starts_with_nothing_playing() {
+        let display = Display::new("foyer", "http://127.0.0.1:9222");
+        assert_eq!(display.name, "foyer");
+        assert!(display.current_item_id.try_lock().unwrap().is_none());
+        assert!(display.override_item.try_lock().unwrap().is_none());
+    }
 }

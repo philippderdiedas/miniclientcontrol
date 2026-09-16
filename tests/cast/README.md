@@ -16,9 +16,19 @@ python3 test_basicauth.py   # credentials from the admin panel, CLI as the way b
 python3 test_port.py        # TLS port clash: fatal when explicit, next free otherwise
 python3 test_public.py      # --public-url modes and the QR endpoint
 python3 test_guestpage.py   # a guest showing a web page instead of casting (~45s)
+python3 test_audio.py       # venue audio, and who is allowed to touch it
+python3 test_limits.py      # the frame size the display announces to the sender
+python3 test_managed.py     # the managed certificate (needs the network, else skips)
 python3 test_browser.py     # real WebRTC between two Chrome instances
+python3 test_overlay.py     # the settings, and the badge really on the page
 python3 test_webhook.py     # outbound webhooks, end to end (~50s, needs Chrome)
+python3 test_display.py     # several screens at once (needs a Chrome per screen)
 ```
+
+Four of them need a real Chrome — `test_browser.py`, `test_overlay.py`,
+`test_webhook.py` and `test_display.py`, each for its own reason, given below.
+**`test_display.py` and `test_webhook.py` both use CDP port 9242, so they must not
+run at the same time.**
 
 `test_guestpage.py` is slow on purpose: the last case waits out the guest page's
 thirty-second grace period, which is the whole liveness contract of that feature.
@@ -35,9 +45,23 @@ most important case -- a receiver that never answers must not stall the playlist
 so it shares a synthetic camera rather than a screen — a headless Chrome has no
 desktop to pick from. Everything after the `getMedia` call is the same code path.
 
+`test_display.py` (cases `[70]`-`[77]`) declares two displays, `foyer` and
+`werkstatt`, and starts one headless Chrome per screen on its own profile
+directory — two Chromiums sharing a profile corrupt it, which is why the
+controller derives one profile per display in the first place. Its cases are about
+the properties a unit test cannot see: that two loops really are independent, and
+that a caller who does not say which screen they mean is told rather than guessed
+at. The cases that want *no* control loop (the routing, the refusals and the
+playlist guard are answered by an HTTP handler) declare their screens on CDP ports
+9 and 10, where nothing ever listens, rather than leaving a display implicit — an
+undeclared display falls back to 9222 and would attach to a stray Chrome there and
+write item ids into cases that are asserting an absence of them. A playlist item
+pointed at `127.0.0.1:9` is likewise never loaded: Chromium refuses port 9 outright
+with `ERR_UNSAFE_PORT`, so the navigation never leaves the browser.
+
 `wsclient.py` is the minimal stdlib WebSocket client from the picklecast test
 suite (MIT, Evan Widloski); `cdp.py` layers just enough DevTools Protocol on top
 to navigate a page and evaluate expressions.
 
-These tests bind fixed ports (3021/3031 HTTP, 3464/3474 TLS, 9222/9223/9242 CDP) and
-write scratch files next to themselves.
+These tests bind fixed ports (3021/3031/3041 HTTP, 3464/3474/3484 TLS,
+9222/9223/9232/9242/9243 CDP) and write scratch files next to themselves.

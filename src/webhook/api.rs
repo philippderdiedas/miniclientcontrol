@@ -186,10 +186,14 @@ pub fn catalogue() -> Vec<Value> {
 /// `{{ test }}` chip would render as the empty string on every real
 /// (non-test) delivery -- a placeholder that looks fine in the test send and
 /// silently disappears from every delivery that matters.
-fn events_payload() -> Value {
+// `pub(super)` rather than private: `webhook::mod`'s test module asserts
+// against this directly, on the same principle the catalogue itself
+// encodes -- the server's payload and the test that guards it must read
+// from the one function, not from a copy of what it is expected to contain.
+pub(super) fn events_payload() -> Value {
     json!({
         "events": catalogue(),
-        "envelope": ["event", "timestamp", "device"],
+        "envelope": ["event", "timestamp", "device", "display"],
         "field_prefix": "data.",
         "placeholder_suffix": " | tojson",
     })
@@ -449,9 +453,13 @@ async fn test_send(
     // The envelope is flagged `"test": true`, so a receiver can tell this from
     // something that actually happened -- and so can the admin page, through
     // `LastResult::test`.
+    // This route takes no display in its path -- a test send is about proving
+    // a target's URL and headers work, not about any one screen -- so there is
+    // nothing to resolve. The primary display is the stand-in an operator's
+    // template can render against.
     let outcome = state
         .webhooks
-        .deliver_one(&target, &sample_event(wanted), true)
+        .deliver_one(&target, &state.primary().name, &sample_event(wanted), true)
         .await;
     Json(json!({
         "ok": outcome.ok(),
@@ -645,7 +653,7 @@ mod tests {
     #[test]
     fn the_events_payload_describes_how_to_build_a_placeholder() {
         let payload = events_payload();
-        assert_eq!(payload["envelope"], json!(["event", "timestamp", "device"]));
+        assert_eq!(payload["envelope"], json!(["event", "timestamp", "device", "display"]));
         assert_eq!(payload["field_prefix"], "data.");
         assert_eq!(payload["placeholder_suffix"], " | tojson");
 

@@ -23,6 +23,35 @@ LAN = subprocess.run(["python3", "-c",
 procs = []
 
 
+
+def a_playlist(port=None):
+    """The playlist items get added to, created on first use.
+
+    An item belongs to a playlist since playlists became objects, and a fresh
+    database has none -- the one-time backfill only fires for a database that
+    already had items. Without this the POST fails deserialisation and no item
+    is created, which reads as "the loop never picked it up".
+    """
+    rows = http("GET", "/api/playlists", port=port)[1] or []
+    playlist_id = (rows[0]["id"] if rows
+                   else http("POST", "/api/playlists", {"name": "Test"}, port=port)[1]["id"])
+    assign(playlist_id, port=port)
+    return playlist_id
+
+
+def assign(playlist_id, port=None):
+    """Point every declared display at that playlist.
+
+    The control loop plays the playlist its display is assigned and nothing
+    else, and a database created fresh here has no playlist at startup for the
+    registration to hand over -- so without this the screen sits on the idle
+    page and every case below reads as "the loop never picked the item up".
+    This is the operator's step on the displays page, done from the test.
+    """
+    for row in http("GET", "/api/displays", port=port)[1] or []:
+        if row.get("playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id}, port=port)
+
 def spawn(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     procs.append(p)
@@ -217,7 +246,8 @@ async def settings_flow():
               and f"127.0.0.1:{CAST_HTTP}" not in json.dumps(payload), payload)
 
         print("\n[41b] a playlist item can add a layer of its own")
-        http("POST", "/api/playlist", {"url": "http://127.0.0.1:1/x", "duration": 60})
+        http("POST", "/api/playlist",
+             {"url": "http://127.0.0.1:1/x", "duration": 60, "playlist_id": a_playlist()})
         items = http("GET", "/api/playlist")[1]
         item_id = items[-1]["id"]
         status, _ = http("PUT", f"/api/playlist/{item_id}",
@@ -458,7 +488,9 @@ async def browser_flow():
         # Served by the controller itself: the device is often offline, and a test
         # that needs the internet fails for the wrong reason.
         page_url = f"http://127.0.0.1:{HTTP}/empty_playlist.html"
-        http("POST", "/api/playlist", {"url": page_url, "duration": 600}, port=HTTP)
+        http("POST", "/api/playlist",
+             {"url": page_url, "duration": 600, "playlist_id": a_playlist(port=HTTP)},
+             port=HTTP)
         item = wait_for(lambda: http("GET", "/api/control/current", port=HTTP)[1].get("item_id"), 40)
         check("the loop picked the item up", item is not None)
 

@@ -28,16 +28,18 @@ unrebuilt change looks exactly like a change that did not work.
 
 **Stop any locally running instance before the Python suite.** `test_port.py`
 needs the default `3443` free to test the fallback, and
-`test_browser.py`/`test_overlay.py`/`test_webhook.py` launch their own Chrome on
-`9222`/`9232`/`9242`. A dev instance holding those makes them fail in a way that
-reads exactly like a code regression — they pass again the moment it is stopped.
+`test_browser.py`/`test_overlay.py`/`test_webhook.py`/`test_display.py` launch
+their own Chrome on `9222`+`9223`/`9232`/`9242`/`9242`+`9243`. A dev instance
+holding those makes them fail in a way that reads exactly like a code regression —
+they pass again the moment it is stopped. `test_display.py` and `test_webhook.py`
+share `9242`, so they must not run concurrently.
 A stray Chrome on `9222` is worse than none for `test_webhook.py`: the loop
 attaches to it and injects `display.connected` and `playback.playlist_empty`
 deliveries into receivers that are counting.
 
 `tests/cast/` is stdlib-only Python, wired into no CI. Run it by hand after
-touching `cast.rs`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/` or the route
-table.
+touching `cast.rs`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/`,
+`display.rs`, `playlists.rs` or the route table.
 
 When testing casting locally, share a single *window* rather than the whole
 screen, or the display shows an infinite mirror.
@@ -59,6 +61,9 @@ the rules that break it:
   `into_make_service_with_connect_info::<SocketAddr>()`. The loopback exemption in
   `basic_auth_middleware` reads the peer from `ConnectInfo<SocketAddr>`, and **the
   extractor panics without it** — including on the TLS listener.
+- **`/api/displays*`, `/api/playlists*` and `/displays.html` are operator-only**,
+  in neither list. The display browser never asks which screen it is — the
+  controller drives it — and a guest has no business reading the venue's screens.
 - **The site root is the guest page**, not the operator page; `/admin.html` is the
   operator landing page and `/cast.html` 301s to `/`. Moving a page between the
   two sets means moving it between `is_cast_public_path` and authenticated
@@ -72,23 +77,115 @@ exempt from auth, so it would admit the whole LAN. Both end in
 **Loopback is not a way around auth**: the exemption covers `is_display_path`
 only, so the admin page asks for credentials even on the device itself.
 
+## Displays (`src/display.rs`)
+
+The concept and the operator's side:
+[docs/features.md](docs/features.md#several-screens); declaring them:
+[docs/deployment.md](docs/deployment.md#declaring-the-screens-a-deployment-drives).
+The rules:
+
+**Displays are declared, not discovered.** Discovery was prototyped against sway
+1.12 and *works* — `swaymsg -t get_outputs`, `[app_id="…"] move container to
+output …`, and an unplugged output hands its window on rather than losing it. It
+was dropped anyway, because it puts compositor-specific knowledge inside the
+controller (`HDMI-A-1` under sway, `HDMI-1` under i3) and takes placement away
+from the window manager, which is where this project already puts it. What the
+prototype did establish is the thing this design rests on: **`--chromium-class`
+becomes the Wayland `app_id`**, which is what lets the window manager tell our
+windows apart with no help from us.
+
+**One Chromium per display, not one Chromium with several windows.** Measured:
+515 MB PSS for one browser with two windows against 494 MB for two browsers with
+one each — Chromium's cost is per renderer, not per browser process. One browser
+would also have cost the placement mechanism, because every window of one process
+shares an `app_id`, and `Browser.setWindowBounds` does not move a window under
+native Wayland: the size takes effect and the position does not.
+
+**`--display` is the identity**, stored against the assignment so it survives a
+restart — which is why it cannot be an index. A name reaches a window-manager
+config *and* a filesystem path, so it is restricted to `[A-Za-z0-9_-]`.
+The CDP port is `<name>:<port>` when given, otherwise `9222 + declaration index`,
+counted from the base — so pinning one display's port does not shift another's.
+
+**With no `--display`, behaviour is exactly as before**: one implicit display
+named `default`, using `--cdp-url` and the port-derived class and profile. These
+run unattended in venues; an upgrade must not move a CDP port.
+
+**Alongside any `--display`, three flags are refused rather than ignored**:
+`--chromium-class`, `--chromium-user-data-dir` and a non-default `--cdp-url`. The
+declared branch derives all three and never reads them back, so honouring the
+command line by silently doing nothing is the exact failure "a flag actually
+passed pins that setting" exists to prevent. The `--cdp-url` comparison is whole,
+not by port — `http://192.168.1.5:9222` names a different host on the default
+port, and a port-only check waves it through to be silently rewritten to
+loopback. `--class` inside `--chromium-arg` is refused for a
+different reason: Chromium is last-wins for a repeated switch, so it would
+collapse every display onto one `app_id`. All of this is **below** the no-display
+early return on purpose: with one implicit screen there is nothing to collide
+with, and refusing there would turn a working command line into a refusal to boot.
+
+**An unknown `--cast-display` fails at startup**, not at use.
+`AppState::cast_display()` falls back to the primary rather than panicking, so
+without the check the mistake surfaces hours later as a guest scanning a QR code
+and the picture landing on the wrong panel.
+
+**An unscoped legacy API path refuses with `409` once several displays exist**
+(`display::resolve` with `None`), naming the declared screens. It still resolves
+to the one display while one is declared, because that is every venue running
+today and an upgrade must keep their scripts working. Picking one of several
+would be a coin flip a script cannot see.
+
+**A playlist is never deleted with a display**, and the schema enforces it:
+`displays.playlist_id` is `ON DELETE SET NULL`, so deleting a playlist unassigns
+it and deleting a display cannot reach the playlist at all. The other direction is
+the handler's, because no `ON DELETE` would do it: deleting a playlist that still
+holds items is a `409` that says how many.
+
+**`settings.rs` pokes every display's `overlay_signal`** — via
+`AppState::notify_overlay_changed`, and playlist edits likewise go through
+`notify_playlist_changed`. The overlay configuration is global and an edited item
+can be in a playlist two screens share, so both have to reach every screen. Same
+rule as ever: `notify_one`, never `notify_waiters`.
+
+**Each loop re-reads its assignment every inner pass** (`SELECT playlist_id FROM
+displays WHERE name = ?`), so a reassignment lands on the next item; the `PUT`
+pokes `playlist_signal` as well so it lands now rather than at the end of a
+ten-minute item. An assignment that *changed* restarts at the playlist's
+beginning rather than resuming at a `play_order` that means nothing in the new
+list.
+
+**`displays.assignment_decided` separates "nobody has chosen yet" from "somebody
+chose none".** Both are `playlist_id IS NULL`. It is stored rather than inferred
+from the insert because the question outlives the process — a fresh install has no
+playlist to inherit at startup, so `offer_first_playlist` picks the decision up
+when the operator creates the first one — and it is written in the *same*
+statement as every assignment, so a power loss cannot leave a screen that will
+never be offered a playlist. Inheritance is only for **one** declared display: it
+exists to carry an upgrade across, and handing the foyer a playlist made for the
+workshop is wrong content, which reads as deliberate, where an idle screen reads
+as "configure me".
+
 ## The control loop (`src/browser.rs`)
 
 Shape of the three nested loops:
-[docs/architecture.md](docs/architecture.md#the-control-loop). The loop **owns
-what is on screen**; the API writes state and pokes a signal, and never navigates.
+[docs/architecture.md](docs/architecture.md#the-control-loop). **`browser_loop` is
+spawned once per declared display and takes its `Arc<Display>`**; everything below
+is per screen, and the playlist it reads is the one that display is assigned. The
+loop **owns what is on screen**; the API writes state and pokes a signal, and
+never navigates.
 Any `is_connection_lost` error breaks all the way back to the outer loop and
 reconnects; `keep_loaded` tabs are reconciled once per inner pass.
 
-**Always `notify_one()`, never `notify_waiters()`** on the `AppState` notifies
-(`skip_signal`, `playlist_signal`, `override_signal`, `overlay_signal`). The loop
-is only parked for part of its cycle — navigation and readiness waiting can take
-ten seconds or more — and `notify_waiters()` drops a notification when nobody is
-parked, silently losing a "Play now" click. `notify_one()` stores a permit.
+**Always `notify_one()`, never `notify_waiters()`** on a `Display`'s notifies
+(`skip_signal`, `playlist_signal`, `override_signal`, `overlay_signal` — they live
+on `Display`, not on `AppState`). The loop is only parked for part of its cycle —
+navigation and readiness waiting can take ten seconds or more — and
+`notify_waiters()` drops a notification when nobody is parked, silently losing a
+"Play now" click. `notify_one()` stores a permit.
 
-**`POST /api/control/current` writes `pending_jump`, not `current_item_id`.**
-`current_item_id` is loop-owned and overwritten at the top of every item, so a
-request writing there is clobbered.
+**`POST /api/control/current` writes the resolved display's `pending_jump`, not
+its `current_item_id`.** `current_item_id` is loop-owned and overwritten at the
+top of every item, so a request writing there is clobbered.
 
 **Never consume `pending_jump` before the target has been found in a freshly
 fetched playlist.** The loop *peeks* on `skip_signal`: target in the current
@@ -217,15 +314,24 @@ not `127.0.0.1`.** Loopback-to-loopback is not gated, so a foreign page on
 `127.0.0.1` passes while a real display fails. That blind spot is how the first
 version shipped a QR that only worked after a permission click.
 
+**`GET /api/overlay` is the primary display's.** It resolves the item on screen
+through `state.primary()` and is not display-scoped, so with several screens
+declared the admin preview shows whatever the *first* one is showing. The overlay
+configuration itself is global, so only that one line of the preview is affected —
+do not "fix" it by widening `overlay_payload`.
+
 `settings::overlay_payload` is the **only** place that builds the runtime's
 configuration. The admin preview fetches `/api/overlay` and runs the display's own
 runtime against the identical payload rather than rebuilding the badge in the
 page — two renderings of the same settings drift, and then somebody hunts a
 display bug that is really a UI bug.
 
-`AppState::overlay_signal` is what makes an edit land on the item *already* on
-screen. `PUT /api/playlist/{id}` pokes it too, because the item being edited may
-be the one showing. **All three places the loop can park must handle it**: the
+`Display::overlay_signal` is what makes an edit land on the item *already* on
+screen — poked for **every** screen through `AppState::notify_overlay_changed`,
+because the global overlay is the building's and an edited item can be on any
+screen showing its playlist. `PUT /api/playlist/{id}` pokes it too, because the
+item being edited may be the one showing. **All three places the loop can park
+must handle it**: the
 per-item `select!` (which recomputes the remaining time rather than restarting it,
 so an overlay edit cannot extend an item), the idle-screen wait, and
 `run_override_loop` — a cast or a pinned page can stand for hours, which is
@@ -265,10 +371,17 @@ The subsystem in full: [docs/casting.md](docs/casting.md). The controller relays
 opaque `{sdp}` / `{ice}` blobs and **never parses WebRTC payloads** — not parsing
 them means it cannot break them.
 
-**A cast is an override.** Starting one pins `override_item` to
-`http://127.0.0.1:<port>/cast_display.html`. `browser.rs` needed no changes for
-this, because two things there already do the right thing and both are
-load-bearing:
+**A cast is an override.** Starting one pins the *cast display's* `override_item`
+to `http://127.0.0.1:<port>/cast_display.html`. Which screen that is comes from
+`AppState::cast_display()` — `--cast-display` when given, else `primary()` — and
+**every part of a cast resolves through it**, not through `primary()`: activation,
+teardown, the `override.set` emit and `cast.started`. Casting is still one session
+for the whole controller, not one per screen, and the guest URL, the QR code, the
+idle screen's invitation and `is_active()` stay global with it — what that leaves
+a second screen with is spelled out in
+[docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
+`browser.rs` needed no changes for this, because two things there already do the
+right thing and both are load-bearing:
 
 - `run_override_loop` skips a notification whose override is unchanged. Without
   that guard a redundant `notify_one()` re-navigates the page and tears down the
@@ -432,6 +545,15 @@ What they are and what an operator sees:
 [docs/features.md](docs/features.md#webhooks). The credential question:
 [docs/deployment.md](docs/deployment.md#a-webhook-target-may-hold-somebody-elses-secret).
 The rules:
+
+**The envelope names the screen**: `display` sits beside `device`, which is why
+`fire` takes the display name as its first argument and every emit site has to
+pass the screen the event is about — `browser.rs` its own loop's display,
+`cast.rs` the cast display. It is in the envelope rather than in one event's
+`data` because all ten events are about a particular screen, and it is additive,
+so a target configured before several displays existed keeps working.
+`api::catalogue()`'s `envelope` array carries it, so the admin page's chips offer
+it without being told.
 
 **`Dispatcher::fire` is synchronous, infallible, and returns `()`.** `browser.rs`
 calls it from inside the control loop, so a version that could block, await or
@@ -633,6 +755,15 @@ target, i.e. once per connection. Two traps found on the way:
 `ALTER TABLE ADD COLUMN`. Add new columns the same way. `main.rs` must not create
 tables — a partial duplicate there caused schema drift.
 
+`playlists`, `displays` and `playlist_items.playlist_id` arrived through exactly
+that path, plus **one** backfill: only when there are no playlists at all and
+items exist without one, a playlist named `Standard` takes them. Gated that way
+because a database that already has playlists and a stray item without one is not
+an upgrade — sweeping it into a new `Standard` would be the migration inventing a
+decision. Filling the `displays` table is *not* schema and is not here: it depends
+on what the command line declared, which is `display::register`, called from
+`main.rs` after the migration and before any loop reads an assignment.
+
 `PRAGMA foreign_keys` is enabled per connection via `SqliteConnectOptions`. It is
 off by default in SQLite, which made `ON DELETE CASCADE` a no-op and left orphaned
 playlist rows behind.
@@ -653,9 +784,32 @@ The endpoint list is in [README.md](README.md#api-overview). The traps behind it
   half-changed row plays the wrong thing with no error anywhere. `asset_id` is
   checked against `assets` first; a dangling id yields a `NULL` `local_path` from
   the loop's `LEFT JOIN` and a blank screen.
+- **A move (`playlist_id`) stands alone and appends.** It is a different axis
+  from the source, so like-for-like has nothing to say about it — but the rest of
+  the handler is field-by-field writes with swallowed errors while the move is a
+  transaction over two playlists, so a combined request could answer one status
+  for a half-applied write, and an explicit `play_order` beside it is two answers
+  to one question. The item takes `MAX(play_order) + 1` in the target and **both**
+  playlists are renumbered `1..n`, for the same reason `/move` renumbers. The
+  target is checked against `playlists` in the statement that writes it —
+  `playlist_items.playlist_id` was added by `ALTER TABLE` and has **no** foreign
+  key, so nothing below would catch a dangling id. `null` is refused rather than
+  ignored (hence `double_option` for a field that is not clearable): an item in no
+  playlist is the broken state the field exists to repair.
 - The item `overlay` object is stored as SQL `null` unless it would actually draw
   something, so read paths never have to tell "switched off" from "empty".
-- **`POST /api/playlist/{id}/move` renumbers every row to `1..n`** instead of
+- **`POST /api/playlist` requires `playlist_id`.** An item in no playlist is one
+  no screen would ever play, and nothing would say so. `GET /api/playlist` with no
+  `?playlist_id=` still returns everything, which is the legacy shape.
+- **`DELETE /api/playlists/{id}` counts and deletes in one statement**
+  (`DELETE … AND NOT EXISTS (SELECT 1 FROM playlist_items …)`). Counting first and
+  deleting second leaves a window for a `POST /api/playlist` to land in between,
+  which is exactly the dangling item the guard exists to prevent. The second query
+  runs only on the already-refused path, to tell the operator how many are in the
+  way.
+- **`POST /api/playlist/{id}/move` renumbers every row to `1..n`** within the
+  item's *own* playlist — `ordered_ids_in_playlist` uses `IS`, not `=`, because
+  `playlist_id` is nullable and SQL never matches two `NULL`s — instead of
   swapping two values. `play_order` is typed by hand in the UI, so duplicates and
   gaps accumulate, and a pairwise swap between two rows sharing an order does
   nothing.
@@ -677,6 +831,11 @@ The endpoint list is in [README.md](README.md#api-overview). The traps behind it
   polls every 2 s and updates badges and highlight classes only; the cards *are*
   the edit form, so a re-render wipes whatever the operator is typing. Cards with
   unsaved edits are tracked in a `dirty` set and carried across list reloads.
+  `displays.html` polls the same way and keeps that **per card**, not per page:
+  every card but the ones being edited is rebuilt from what the server just said.
+  Skipping the whole reload while one card is dirty would hide a display losing
+  its `declared` status — the screen-was-removed case that page exists to carry
+  out — for as long as an edit sits open elsewhere.
 - **Clamp `duration` before casting `i64` to `u64`.** A negative value became
   about 584 billion years of `Duration` and froze the playlist on one item.
 - Sizes that reach the screen are in `vmin`/`vw`, not pixels.

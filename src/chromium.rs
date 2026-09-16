@@ -68,7 +68,7 @@ pub fn detect_executable(configured: Option<&Path>) -> Result<PathBuf> {
 /// The port `--cdp-url` points at, which is the port we must tell Chromium to
 /// open. Keeping one source of truth avoids the classic "launched on 9222,
 /// connecting to 9223" afternoon.
-fn debugging_port(cdp_url: &str) -> Result<u16> {
+pub(crate) fn debugging_port(cdp_url: &str) -> Result<u16> {
     let rest = cdp_url.split("://").nth(1).unwrap_or(cdp_url);
     let host_port = rest.split('/').next().unwrap_or(rest);
     host_port
@@ -154,10 +154,16 @@ pub fn window_class(args: &Args, port: u16) -> String {
         .unwrap_or_else(|| format!("miniclientcontrol-{}", port))
 }
 
-fn spawn(args: &Args) -> Result<Child> {
+/// Launch the browser for one display.
+///
+/// The port, the profile and the class all come from the `DisplayConfig` and
+/// none of them from `args`: `display::configure` is the single place that
+/// resolves them, so that a browser is launched on exactly the port its control
+/// loop connects to.
+fn spawn(args: &Args, display: &crate::display::DisplayConfig) -> Result<Child> {
     let executable = detect_executable(args.chromium.as_deref())?;
-    let port = debugging_port(&args.cdp_url)?;
-    let profile = user_data_dir(args, port);
+    let port = debugging_port(&display.cdp_url)?;
+    let profile = display.user_data_dir.clone();
     write_preferences(&profile, &args.browser_language)?;
 
     let mut command = Command::new(&executable);
@@ -165,7 +171,16 @@ fn spawn(args: &Args) -> Result<Child> {
         .arg(format!("--remote-debugging-port={}", port))
         .arg(format!("--user-data-dir={}", profile.display()))
         // WM_CLASS's second field, which is what i3's `class` matcher reads.
-        .arg(format!("--class={}", window_class(args, port)))
+        // On Wayland this is what becomes the compositor's `app_id` --
+        // measured, not assumed: on a real sway 1.12 session a Chromium
+        // launched with `--class=screen-A` showed
+        // up in `swaymsg -t get_tree` as `app_id: "screen-A"`, and the window
+        // was then moved with
+        // `[app_id="screen-A"] move container to output HEADLESS-1` and the
+        // move confirmed by reading the tree back. Not verified under
+        // GNOME/mutter, which matches `app-id` against `.desktop` files
+        // differently.
+        .arg(format!("--class={}", display.window_class))
         .args(BASE_ARGS);
 
     if !args.no_kiosk {
@@ -185,18 +200,31 @@ fn spawn(args: &Args) -> Result<Child> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
+    // Bound out of the macro's reach: `tracing`'s own `display()` field helper is
+    // in scope inside `info!`, so `display.name` there resolves to that function
+    // and not to this binding.
+    let display_name = display.name.as_str();
+    let class = display.window_class.as_str();
     info!(
-        "Starting {} on debugging port {} (class {}, profile {})",
+        "Starting {} for display '{}' on debugging port {} (class {}, profile {})",
         executable.display(),
+        display_name,
         port,
-        window_class(args, port),
+        class,
         profile.display()
     );
     command.spawn().context("spawning the browser")
 }
 
-/// Keep a browser available on the CDP port for the control loop to drive.
-pub async fn supervise(args: std::sync::Arc<Args>, pid_slot: PidSlot) {
+/// Keep a browser available on this display's CDP port for its control loop.
+pub async fn supervise(
+    args: std::sync::Arc<Args>,
+    display: crate::display::DisplayConfig,
+    pid_slot: PidSlot,
+) {
+    // See `spawn`: `display.name` inside a `tracing` macro would resolve to the
+    // macro's own `display()` helper rather than to this value.
+    let display_name = display.name.clone();
     let mut child: Option<Child> = None;
 
     loop {
@@ -204,28 +232,37 @@ pub async fn supervise(args: std::sync::Arc<Args>, pid_slot: PidSlot) {
         if let Some(running) = child.as_mut() {
             match running.try_wait() {
                 Ok(Some(status)) => {
-                    warn!("Browser exited ({}), restarting", status);
+                    warn!(
+                        "Browser for display '{}' exited ({}), restarting",
+                        display_name, status
+                    );
                     child = None;
                     *pid_slot.lock().await = None;
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    error!("Failed to poll the browser process: {}", e);
+                    error!(
+                        "Failed to poll the browser process for display '{}': {}",
+                        display_name, e
+                    );
                     child = None;
                     *pid_slot.lock().await = None;
                 }
             }
         }
 
-        if child.is_none() && !cdp_reachable(&args.cdp_url).await {
-            match spawn(&args) {
+        if child.is_none() && !cdp_reachable(&display.cdp_url).await {
+            match spawn(&args, &display) {
                 Ok(spawned) => {
                     *pid_slot.lock().await = spawned.id();
                     child = Some(spawned);
                 }
                 // Keep retrying rather than giving up: on a slow boot the display
                 // server may simply not be ready yet.
-                Err(e) => error!("Could not start the browser: {:#}", e),
+                Err(e) => error!(
+                    "Could not start the browser for display '{}': {:#}",
+                    display_name, e
+                ),
             }
         }
 

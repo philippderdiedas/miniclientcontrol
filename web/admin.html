@@ -49,20 +49,25 @@
     input:disabled, select:disabled { background: #f3f3f3; color: #888; }
     .muted { color: #666; }
     .status { font-weight: 600; }
+    /* One line per screen, so several of them read as a list rather than as
+       paragraphs with a blank line between each. */
+    #status p { margin: .25rem 0; }
+    #status .screen { color: #0b6b3a; }
   </style>
 </head>
 <body>
   <h1>Mini Client Control</h1>
-  <p class="muted">Steuerung für das Display an diesem Gerät.</p>
+  <p class="muted" id="subtitle">Steuerung für das Display an diesem Gerät.</p>
 
   <div class="card">
-    <p class="status" id="status">Status wird geladen…</p>
+    <div id="status"><p class="status">Status wird geladen…</p></div>
   </div>
 
   <div class="card">
     <a class="button" href="/playlist.html">Playlist</a>
     <a class="button" href="/assets.html">Assets</a>
     <a class="button" href="/webhooks.html">Webhooks</a>
+    <a class="button" href="/displays.html">Displays</a>
   </div>
 
   <div class="card" id="castCard" hidden>
@@ -271,34 +276,140 @@
 
   <script src="/audio.js"></script>
   <script>
-    // Same polling contract as the playlist page: report what is on screen right now,
-    // so the landing page answers the first question an operator has.
-    async function refresh() {
-      const status = document.getElementById('status');
-      try {
-        const [curRes, ovRes, plRes] = await Promise.all([
-          fetch('/api/control/current'),
-          fetch('/api/override'),
-          fetch('/api/playlist'),
-        ]);
-        const current = curRes.ok ? (await curRes.json()).item_id : null;
-        const override = ovRes.ok ? await ovRes.json() : { active: false };
-        const playlist = plRes.ok ? await plRes.json() : [];
+    // Same node-building rule as the other operator pages: a display label, a
+    // playlist name and an item URL are all operator- or guest-supplied, so
+    // nothing here is interpolated into innerHTML.
+    const el = (tag, props = {}, ...children) => {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') node.className = v;
+        else if (k === 'text') node.textContent = v;
+        else node[k] = v;
+      }
+      for (const c of children) if (c) node.append(c);
+      return node;
+    };
 
-        if (override.active) {
-          const what = override.url || (override.asset_id ? `Asset #${override.asset_id}` : '?');
-          status.textContent = `Override aktiv: ${what} – Playlist pausiert`;
+    // The items of one playlist, cached for a few seconds.
+    //
+    // The status poll runs every three seconds and several screens can name
+    // several playlists, so this is the one fetch worth not repeating. The cache
+    // is dropped early when it cannot explain the item id the loop reports --
+    // an item added a moment ago must resolve to its URL rather than to "…".
+    const itemsCache = new Map();
+
+    async function itemsOf(playlistId, wantedId) {
+      const hit = itemsCache.get(playlistId);
+      const usable = hit && Date.now() - hit.at < 10000
+        && (wantedId === null || hit.items.some((x) => x.id === wantedId));
+      if (usable) return hit.items;
+      const res = await fetch(`/api/playlist?playlist_id=${encodeURIComponent(playlistId)}`);
+      // A stale copy still answers "what is playing" more honestly than a
+      // fabricated empty list would, and `null` is what says nothing is known.
+      if (!res.ok) return hit ? hit.items : null;
+      const items = await res.json();
+      itemsCache.set(playlistId, { at: Date.now(), items });
+      return items;
+    }
+
+    // What one screen is showing. Scoped throughout: the unscoped playback paths
+    // answer `409` the moment a second display is declared, and a `409` read as
+    // "nothing is playing" is what made this page claim "Playlist läuft an…"
+    // forever. Nothing below may read as an affirmative when a fetch failed --
+    // a connection failure throws to the caller's catch, and a refusal on one
+    // screen says its state is unknown rather than inventing one.
+    async function screenLine(display) {
+      const scoped = (suffix) =>
+        `/api/displays/${encodeURIComponent(display.name)}/${suffix}`;
+      const [curRes, ovRes] = await Promise.all([
+        fetch(scoped('control/current')),
+        fetch(scoped('override')),
+      ]);
+      if (!curRes.ok || !ovRes.ok) return 'Status unbekannt';
+
+      const override = await ovRes.json();
+      if (override.active) {
+        const what = override.url || (override.asset_id ? `Asset #${override.asset_id}` : '?');
+        return `Override aktiv: ${what} – Playlist pausiert`;
+      }
+      const current = (await curRes.json()).item_id;
+      if (display.playlist_id === null || display.playlist_id === undefined) {
+        return 'keine Playlist zugewiesen';
+      }
+      // The screen's own playlist, never the unscoped list: counting every item
+      // on the device is what let an empty screen report that something was
+      // about to start.
+      const items = await itemsOf(display.playlist_id, current ?? null);
+      if (!items) return current ? `▶ läuft: #${current} – …` : 'Status unbekannt';
+      if (!current) return items.length ? 'Playlist läuft an…' : 'Playlist ist leer';
+      const item = items.find((x) => x.id === current);
+      const source = item ? (item.url || `Asset #${item.asset_id}`) : '…';
+      return `▶ läuft: #${current} – ${source}`;
+    }
+
+    // Same polling contract as the playlist page: report what is on the screens
+    // right now, so the landing page answers the first question an operator has.
+    async function refresh() {
+      const host = document.getElementById('status');
+      const problem = (text) =>
+        host.replaceChildren(el('p', { class: 'status', text }));
+      try {
+        const [dpRes, plRes] = await Promise.all([
+          fetch('/api/displays'),
+          fetch('/api/playlists'),
+        ]);
+        // An answer that says "I could not read this" is not the same event as
+        // no answer at all, and this is the first line an operator reads.
+        // `display::list` returns `500` on a failed DB read precisely so this
+        // page does not invent a state; folding that into "nicht erreichbar"
+        // would name a cause that is demonstrably false -- the controller is
+        // right there, answering.
+        if (!dpRes.ok || !plRes.ok) {
+          problem('Status konnte nicht gelesen werden – der Controller meldet einen Fehler.');
           return;
         }
-        if (!current) {
-          status.textContent = playlist.length ? 'Playlist läuft an…' : 'Playlist ist leer';
-          return;
+        // Declared only: a stored row for a screen this deployment no longer
+        // drives keeps its playlist on /displays.html, but it has no playback
+        // routes and nothing to report here.
+        const displays = (await dpRes.json()).filter((d) => d.declared);
+        const names = new Map((await plRes.json()).map((p) => [p.id, p.name]));
+        const lines = await Promise.all(displays.map(async (display) => ({
+          display,
+          text: await screenLine(display),
+          playlist: display.playlist_id === null || display.playlist_id === undefined
+            ? null
+            : (names.get(display.playlist_id) || `#${display.playlist_id}`),
+        })));
+
+        // One screen renders exactly the line this page always showed; the name
+        // is only worth the space once there is another screen to tell it from.
+        const single = lines.length === 1;
+        document.getElementById('subtitle').textContent = single
+          ? 'Steuerung für das Display an diesem Gerät.'
+          : 'Steuerung für die Displays an diesem Gerät.';
+
+        host.replaceChildren();
+        for (const line of lines) {
+          const row = el('p', { class: 'status' });
+          if (!single) {
+            row.append(el('span', {
+              class: 'screen',
+              text: `${line.display.label || line.display.name}: `,
+            }));
+          }
+          row.append(document.createTextNode(line.text));
+          if (!single && line.playlist) {
+            row.append(el('span', { class: 'muted', text: ` — Playlist: ${line.playlist}` }));
+          }
+          host.append(row);
         }
-        const item = playlist.find((x) => x.id === current);
-        const source = item ? (item.url || `Asset #${item.asset_id}`) : '…';
-        status.textContent = `▶ läuft: #${current} – ${source}`;
+        if (!lines.length) {
+          host.append(el('p', { class: 'status', text: 'Kein Display deklariert.' }));
+        }
       } catch (_) {
-        status.textContent = 'Controller nicht erreichbar';
+        // Nothing answered: the fetch itself was rejected, here or inside
+        // screenLine(), which is the one case this message is true of.
+        problem('Controller nicht erreichbar');
       }
     }
 

@@ -1566,23 +1566,231 @@ git commit -m "Scope playback and override to a display"
 
 - [ ] **Step 1: Write the page**
 
-Follow `web/webhooks.html` — it is the newest page and carries the current conventions: the `el()` helper, `flash()`/`readError()` lifted from `playlist.html`, `r.ok` checked on every fetch, and an explicit error line distinguishing "nothing configured" from "cannot reach the server".
+Create `web/displays.html`. The `<style>` block, the `el()` helper and the
+`flash()`/`readError()` pair are lifted from `web/webhooks.html` so the three
+operator pages share one set of conventions rather than three.
 
-One card per display, showing:
+```html
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Displays</title>
+  <style>
+    :root {
+      --line: #d8d8d8; --muted: #666; --accent: #0b6b3a;
+      --warn: #8a5a00; --warn-bg: #fff5e0; --err: #a11;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif; max-width: 1000px;
+      margin: 0 auto 4rem; padding: 0 1rem; line-height: 1.45;
+    }
+    h1 { margin-bottom: .2rem; }
+    nav { margin: 0 0 1rem; color: var(--muted); }
+    .muted { color: var(--muted); }
+    .err { color: var(--err); }
+    .card {
+      border: 1px solid var(--line); border-radius: 6px;
+      padding: .8rem; margin: .8rem 0;
+    }
+    .card.dirty { border-color: var(--warn); background: var(--warn-bg); }
+    .card.gone { border-style: dashed; }
+    .grid { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: flex-end; }
+    .f { display: flex; flex-direction: column; gap: .15rem; }
+    .f span { font-size: .8rem; color: var(--muted); }
+    .name { font-family: ui-monospace, monospace; font-size: .85rem; color: var(--muted); }
+    .badge {
+      display: inline-block; font-size: .75rem; color: var(--warn);
+      border: 1px solid var(--warn); border-radius: 10px; padding: .05rem .5rem;
+    }
+    .note { font-size: .85rem; color: var(--muted); margin: .4rem 0 0; }
+    .actions { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; }
+    .feedback { font-size: .85rem; }
+    button.primary {
+      background: var(--accent); color: #fff; border: 0;
+      padding: .35rem .8rem; border-radius: 4px; cursor: pointer;
+    }
+    button { padding: .35rem .7rem; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Displays</h1>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/webhooks.html">Webhooks</a></nav>
+  <p class="muted">
+    Welche Playlist auf welchem Schirm läuft. Welche Schirme es gibt, entscheidet
+    das Deployment über <code>--display</code>; die Fensterplatzierung macht der
+    Fenstermanager.
+  </p>
 
-- the **label**, editable, defaulting to the declared name
-- the declared **name** as fixed text — it is the identity, and an operator editing it would silently orphan the assignment
-- a **playlist dropdown** built from `GET /api/playlists`, with an explicit `(keine)` option that sends `playlist_id: null`
-- a badge reading `nicht deklariert` when `declared` is `false`, with one line of explanation: `Dieses Display ist im Deployment nicht mehr deklariert. Seine Playlist bleibt erhalten und kann einem anderen Display zugewiesen werden.`
+  <p class="err" id="loadError" hidden>Displays konnten nicht geladen werden – Server nicht erreichbar.</p>
+  <div id="list"></div>
+  <p class="muted" id="emptyHint" hidden>Keine Displays.</p>
 
-That last one is the case the whole playlist-as-object decision exists for: a screen is removed for good, and its playlist is picked up by the one that remains. Make it readable rather than a greyed-out mystery.
+  <script>
+    // Every node is built with createElement/textContent. A label and a playlist
+    // name are both operator-supplied, so string-interpolated innerHTML would be
+    // an injection sink.
+    const el = (tag, props = {}, ...children) => {
+      const node = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') node.className = v;
+        else if (k === 'text') node.textContent = v;
+        else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+        else if (v !== null && v !== undefined && v !== false) node[k] = v;
+      }
+      for (const c of children) if (c) node.append(c);
+      return node;
+    };
 
-Requirements carried from the sibling pages:
+    const field = (labelText, input) =>
+      el('label', { class: 'f' }, el('span', { text: labelText }), input);
 
-- **Never `innerHTML` interpolation.** A label and a playlist name both reach the DOM and both are operator-supplied.
-- **Poll every 2 s and update only the status badge**, never re-render a card — the cards hold the label input and the dropdown.
-- Cards with unsaved edits go in a `dirty` set and are skipped by the poll.
-- Copy is **German**.
+    // Lifted from playlist.html so all the operator pages report the same way:
+    // a success message clears itself, an error one sits until the next attempt.
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+      if (!isError) setTimeout(() => { if (node.textContent === message) node.textContent = ''; }, 2500);
+    }
+
+    async function readError(res, fallback) {
+      try {
+        const body = await res.json();
+        if (body && body.error) return body.error;
+      } catch (_) { /* not a JSON error body */ }
+      return fallback;
+    }
+
+    let PLAYLISTS = [];
+    // Cards the operator has touched since their last save. Skipped by the poll,
+    // because a card holds the label input and the playlist dropdown.
+    const dirty = new Set();
+    // name -> the card's DOM node, so the poll can update one line inside it.
+    const cards = new Map();
+
+    function buildCard(display) {
+      const card = el('div', { class: display.declared ? 'card' : 'card gone' });
+      const markDirty = () => { dirty.add(display.name); card.classList.add('dirty'); };
+
+      const label = el('input', {
+        value: display.label || display.name, style: 'width:200px', oninput: markDirty,
+      });
+
+      // The declared name is the identity the assignment is stored against.
+      // Shown, never editable: renaming it here would orphan the assignment
+      // without saying so.
+      const name = el('span', { class: 'name', text: display.name });
+
+      const playlist = el('select', { onchange: markDirty },
+        el('option', { value: '', text: '(keine)' }),
+        ...PLAYLISTS.map((list) => el('option', {
+          value: String(list.id),
+          text: `${list.name} (${list.items})`,
+          selected: display.playlist_id === list.id,
+        })));
+
+      const feedback = el('span', { class: 'feedback' });
+
+      const save = async () => {
+        flash(feedback, 'Speichern…', false);
+        let response;
+        try {
+          response = await fetch(`/api/displays/${encodeURIComponent(display.name)}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              label: label.value,
+              // null, not omitted: the server distinguishes "clear it" from
+              // "not given", so an empty selection has to travel as null.
+              playlist_id: playlist.value === '' ? null : Number(playlist.value),
+            }),
+          });
+        } catch (_) {
+          flash(feedback, 'Server nicht erreichbar.', true);
+          return;
+        }
+        if (!response.ok) {
+          flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
+          return;
+        }
+        dirty.delete(display.name);
+        card.classList.remove('dirty');
+        flash(feedback, 'Gespeichert.', false);
+      };
+
+      card.append(
+        el('div', { class: 'grid' },
+          field('Name', label),
+          field('Playlist', playlist),
+          el('div', { class: 'f' }, el('span', { text: 'Bezeichner' }), name),
+          display.declared ? null : el('span', { class: 'badge', text: 'nicht deklariert' })),
+        display.declared ? null : el('p', {
+          class: 'note',
+          text: 'Dieses Display ist im Deployment nicht mehr deklariert. Seine '
+              + 'Playlist bleibt erhalten und kann einem anderen Display '
+              + 'zugewiesen werden.',
+        }),
+        el('div', { class: 'actions' },
+          el('button', { type: 'button', class: 'primary', text: 'Speichern', onclick: save }),
+          feedback));
+
+      cards.set(display.name, card);
+      return card;
+    }
+
+    async function loadAll() {
+      const list = document.getElementById('list');
+      let displays;
+      try {
+        const [pl, dp] = await Promise.all([
+          fetch('/api/playlists'),
+          fetch('/api/displays'),
+        ]);
+        if (!pl.ok || !dp.ok) throw new Error('nicht erreichbar');
+        PLAYLISTS = await pl.json();
+        displays = await dp.json();
+      } catch (_) {
+        // A failed fetch must not read as "nothing configured": the hint below
+        // is an affirmative statement and would be a lie here.
+        document.getElementById('loadError').hidden = false;
+        document.getElementById('emptyHint').hidden = true;
+        return;
+      }
+      document.getElementById('loadError').hidden = true;
+      list.replaceChildren();
+      cards.clear();
+      for (const display of displays) list.append(buildCard(display));
+      document.getElementById('emptyHint').hidden = displays.length > 0;
+    }
+
+    // Nothing on this page changes on its own except whether a display is still
+    // declared, so the poll reloads only while no card is being edited. A card
+    // is the edit form; re-rendering one eats what is being typed.
+    async function poll() {
+      if (dirty.size > 0) return;
+      await loadAll();
+    }
+
+    (async () => {
+      await loadAll();
+      setInterval(poll, 2000);
+    })();
+  </script>
+</body>
+</html>
+```
+
+Two choices in there are deliberate and worth keeping:
+
+- **`playlist_id` travels as `null`, not omitted**, because the server uses
+  `double_option` to tell "clear the assignment" from "not given". Omitting it
+  would make `(keine)` silently do nothing.
+- **The poll reloads the whole list, but only while nothing is dirty.** This page
+  has no per-card status line to update in place the way `webhooks.html` does, so
+  the cheap correct thing is to skip the reload entirely while an edit is open.
+
 
 - [ ] **Step 2: Link it**
 

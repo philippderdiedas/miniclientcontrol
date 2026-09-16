@@ -1,4 +1,5 @@
 mod db;
+mod display;
 mod handlers;
 mod models;
 mod browser;
@@ -12,6 +13,7 @@ mod chromium;
 mod mdns;
 mod audio;
 mod webhook;
+mod playlists;
 
 use anyhow::Result;
 use axum::{
@@ -29,7 +31,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use models::{AppState, Args};
 use base64::Engine;
@@ -233,17 +235,43 @@ async fn main() -> Result<()> {
     };
     let managed_cert_active = managed.is_some();
 
+    // Resolved before `AppState` exists, because the per-display playback state
+    // is built from it. A bad `--display` exits rather than degrading: a typo
+    // that silently dropped a screen would show up as a black panel in a venue,
+    // with nothing saying why.
+    let configured = match display::configure(&args) {
+        Ok(configured) => configured,
+        Err(message) => {
+            tracing::error!("{}", message);
+            std::process::exit(1);
+        }
+    };
+    tracing::info!(
+        "Driving {} display(s): {}",
+        configured.len(),
+        configured
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let displays: Vec<Arc<models::Display>> = configured
+        .iter()
+        .map(|c| Arc::new(models::Display::new(&c.name, &c.cdp_url)))
+        .collect();
+
+    // Every declared display needs a row before any loop reads its assignment:
+    // nothing else writes this table, so without it a fresh upgrade would have
+    // every screen unassigned and therefore idle. Placed here rather than in
+    // `db::run_migrations` because it is not schema -- it depends on what this
+    // command line declared, which the migration has no business knowing.
+    display::register(&pool, &configured).await?;
+
     // 3. Init State
     let state = AppState {
         pool: pool.clone(),
         args: Arc::new(args.clone()),
-        skip_signal: Arc::new(Notify::new()),
-        playlist_signal: Arc::new(Notify::new()),
-        override_signal: Arc::new(Notify::new()),
-        overlay_signal: Arc::new(Notify::new()),
-        current_item_id: Arc::new(Mutex::new(None)),
-        pending_jump: Arc::new(Mutex::new(None)),
-        override_item: Arc::new(Mutex::new(None)),
+        displays: Arc::new(displays),
         cast: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
         managed_cert: managed_cert_active,
@@ -251,7 +279,6 @@ async fn main() -> Result<()> {
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
-        browser_pid: Arc::new(Mutex::new(None)),
         webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 
@@ -259,20 +286,38 @@ async fn main() -> Result<()> {
     let mdns_args = state.args.clone();
     tokio::spawn(async move { mdns::supervise(mdns_args).await });
 
-    // Keep a browser alive on the CDP port. Skipped when something else manages
-    // it (an existing sway `exec` line), which the supervisor detects by finding
-    // the port already answering.
+    // Keep a browser alive on each display's CDP port. Skipped when something
+    // else manages them (an existing sway `exec` line), which the supervisor
+    // detects by finding the port already answering.
     if !args.no_launch_browser {
-        let browser_args = state.args.clone();
-        let pid_slot = state.browser_pid.clone();
-        tokio::spawn(async move { chromium::supervise(browser_args, pid_slot).await });
+        // `state.displays` is built by mapping over `configured` a few lines
+        // up, so the two are the same length by construction today -- but
+        // construction is not a proof that survives a later edit, and a zip
+        // that silently drops the tail of the longer side would leave a
+        // display with no supervisor and nothing saying why.
+        debug_assert_eq!(
+            configured.len(),
+            state.displays.len(),
+            "state.displays should be built by mapping over configured"
+        );
+        for (config, display) in configured.iter().zip(state.displays.iter()) {
+            let browser_args = state.args.clone();
+            let config = config.clone();
+            let pid_slot = display.browser_pid.clone();
+            tokio::spawn(async move { chromium::supervise(browser_args, config, pid_slot).await });
+        }
     }
 
-    // 4. Spawn Browser Controller Task
-    let browser_state = state.clone();
-    tokio::spawn(async move {
-        browser_loop(browser_state).await;
-    });
+    // 4. One control loop per display. Each owns its own screen and reads the
+    // playlist that screen is assigned; nothing is shared between them but the
+    // database, the settings and the webhook dispatcher.
+    for display in state.displays.iter() {
+        let loop_state = state.clone();
+        let loop_display = display.clone();
+        tokio::spawn(async move {
+            browser_loop(loop_state, loop_display).await;
+        });
+    }
 
     // 5. Start Web Server
     let uploaded_assets_dir = args.assets_dir.clone();
@@ -292,6 +337,8 @@ async fn main() -> Result<()> {
         .merge(cast::routes())
         .merge(settings::routes())
         .merge(audio::routes())
+        .merge(playlists::routes())
+        .merge(display::routes())
         .nest_service("/uploads", serve_dir)
         .fallback(serve_embedded_ui)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 500)) 

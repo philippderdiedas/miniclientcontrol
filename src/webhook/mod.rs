@@ -132,12 +132,16 @@ impl Event {
 /// The object a target receives, and the context a template renders against.
 ///
 /// One shape for both, so a target with a template and a target without one see
-/// identical data.
-pub fn envelope(event: &Event, device: &str, test: bool) -> Value {
+/// identical data. `display` sits beside `device`, additive to what a target
+/// configured before several displays existed already receives: with two
+/// screens, `playback.item_changed` now fires once per screen and a receiver
+/// needs this to tell the deliveries apart.
+pub fn envelope(event: &Event, device: &str, display: &str, test: bool) -> Value {
     let mut value = json!({
         "event": event.name(),
         "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "device": device,
+        "display": display,
         "data": event.data(),
     });
     if test {
@@ -644,9 +648,13 @@ impl Dispatcher {
     /// **Never blocks, never fails, never awaits the network.** This is called
     /// from inside the control loop in `browser.rs`; a version that could wait
     /// would put a stranger's HTTP server in the path of what is on the screen.
-    pub fn fire(&self, event: Event) {
+    ///
+    /// `display` names the screen the event is about, so a receiver watching
+    /// several can tell one `playback.item_changed` from another.
+    pub fn fire(&self, display: &str, event: Event) {
         let pool = self.pool.clone();
         let device = self.device.clone();
+        let display = display.to_string();
         let inflight = self.inflight.clone();
         let last = self.last.clone();
 
@@ -661,7 +669,7 @@ impl Dispatcher {
                 return;
             }
 
-            let context = envelope(&event, &device, false);
+            let context = envelope(&event, &device, &display, false);
             for target in targets {
                 let permit = match inflight.clone().try_acquire_owned() {
                     Ok(permit) => permit,
@@ -693,8 +701,8 @@ impl Dispatcher {
 
     /// Render and deliver one target synchronously, for the test-send endpoint
     /// and for the unit tests. Records the result like a real delivery.
-    pub async fn deliver_one(&self, target: &Target, event: &Event, test: bool) -> Outcome {
-        let context = envelope(event, &self.device, test);
+    pub async fn deliver_one(&self, target: &Target, display: &str, event: &Event, test: bool) -> Outcome {
+        let context = envelope(event, &self.device, display, test);
         let outcome = run(target, &context).await;
         record(&self.last, target, event.name(), &outcome, test).await;
         outcome
@@ -772,10 +780,12 @@ mod tests {
         let value = envelope(
             &Event::CastStarted { sender_ip: "192.168.1.44".into(), mode: "cast".into() },
             "foyer-pi",
+            "werkstatt",
             false,
         );
         assert_eq!(value["event"], "cast.started");
         assert_eq!(value["device"], "foyer-pi");
+        assert_eq!(value["display"], "werkstatt");
         assert_eq!(value["data"]["sender_ip"], "192.168.1.44");
         assert_eq!(value["data"]["mode"], "cast");
         assert!(value["timestamp"].as_str().unwrap().ends_with('Z'));
@@ -784,8 +794,34 @@ mod tests {
 
     #[test]
     fn a_test_delivery_says_so() {
-        let value = envelope(&Event::PlaylistEmpty, "foyer-pi", true);
+        let value = envelope(&Event::PlaylistEmpty, "foyer-pi", "werkstatt", true);
         assert_eq!(value["test"], true);
+    }
+
+    #[test]
+    fn the_envelope_names_the_display() {
+        let value = envelope(&Event::PlaylistEmpty, "kiosk-pi-1", "werkstatt", false);
+        assert_eq!(value["device"], "kiosk-pi-1");
+        assert_eq!(value["display"], "werkstatt");
+        // Additive: a target configured before several displays existed keeps
+        // receiving everything it received before, in the same shape.
+        assert_eq!(value["event"], "playback.playlist_empty");
+        assert!(value["timestamp"].as_str().unwrap().ends_with('Z'));
+    }
+
+    #[test]
+    fn the_catalogue_offers_display_as_a_placeholder() {
+        let payload = crate::webhook::api::events_payload();
+        let envelope: Vec<&str> = payload["envelope"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            envelope.contains(&"display"),
+            "the catalogue is the only source the admin page has: {envelope:?}"
+        );
     }
 
     #[test]
@@ -902,6 +938,7 @@ mod tests {
                 sender_ip: "192.168.1.44".into(),
             },
             "foyer-pi",
+            "werkstatt",
             false,
         )
     }
@@ -1349,7 +1386,7 @@ mod tests {
 
         let dispatcher = Dispatcher::new(pool);
         let before = std::time::Instant::now();
-        dispatcher.fire(Event::PlaylistEmpty);
+        dispatcher.fire("werkstatt", Event::PlaylistEmpty);
         assert!(
             before.elapsed() < Duration::from_millis(50),
             "fire blocked for {:?}",
@@ -1368,7 +1405,7 @@ mod tests {
 
         let dispatcher = Dispatcher::new(pool);
         let outcome = dispatcher
-            .deliver_one(&target, &Event::PlaylistEmpty, false)
+            .deliver_one(&target, "werkstatt", &Event::PlaylistEmpty, false)
             .await;
         assert!(outcome.ok());
 
@@ -1393,7 +1430,7 @@ mod tests {
 
         let dispatcher = Dispatcher::new(pool);
         let outcome = dispatcher
-            .deliver_one(&target, &Event::PlaylistEmpty, false)
+            .deliver_one(&target, "werkstatt", &Event::PlaylistEmpty, false)
             .await;
 
         match outcome {
@@ -1440,7 +1477,7 @@ mod tests {
         }
 
         let dispatcher = Dispatcher::new(pool);
-        dispatcher.fire(Event::PlaylistEmpty);
+        dispatcher.fire("werkstatt", Event::PlaylistEmpty);
 
         // The deliveries start on the runtime's own schedule -- a DB read stands
         // between `fire` and the first `try_acquire_owned` -- so wait for them
@@ -1489,7 +1526,7 @@ mod tests {
         }
 
         let dispatcher = Dispatcher::new(pool);
-        dispatcher.fire(Event::PlaylistEmpty);
+        dispatcher.fire("werkstatt", Event::PlaylistEmpty);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let last = loop {

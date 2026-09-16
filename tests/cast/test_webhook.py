@@ -241,9 +241,32 @@ def add_item(url="http://127.0.0.1:9/x", duration=LONG):
     back. The URL is never reachable; the loop navigates, fails, and moves on,
     which is enough -- `item_changed` fires before the navigation.
     """
-    http("POST", "/api/playlist", {"url": url, "duration": duration})
+    http("POST", "/api/playlist",
+         {"url": url, "duration": duration, "playlist_id": a_playlist()})
     rows = http("GET", "/api/playlist")[1] or []
     return rows[-1]["id"] if rows else None
+
+
+def a_playlist():
+    """The playlist items get added to, created on first use.
+
+    An item belongs to a playlist since playlists became objects, and a fresh
+    database has none -- the one-time backfill only fires for a database that
+    already had items. Without this every POST here would fail deserialisation
+    and no item would ever be created, which reads as "the loop never ran".
+    """
+    rows = http("GET", "/api/playlists")[1] or []
+    playlist_id = (rows[0]["id"] if rows
+                   else http("POST", "/api/playlists", {"name": "Test"})[1]["id"])
+    # The control loop plays the playlist its display is assigned and nothing
+    # else, and a database created fresh here has none at startup for the
+    # registration to hand over -- so without this nothing ever reaches the
+    # screen and every playback event below goes missing. This is the
+    # operator's step on the displays page, done from the test.
+    for row in http("GET", "/api/displays")[1] or []:
+        if row.get("playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id})
+    return playlist_id
 
 
 AUTH = ("ops", "hunter2!!")
@@ -605,7 +628,7 @@ async def case_62():
               cat["field_prefix"] == "data." and cat["placeholder_suffix"] == " | tojson",
               cat)
         check("the envelope fields are published",
-              cat["envelope"] == ["event", "timestamp", "device"], cat["envelope"])
+              cat["envelope"] == ["event", "timestamp", "device", "display"], cat["envelope"])
         check('"test" is not offered as a placeholder', "test" not in cat["envelope"], cat)
 
         _, hook_id = add_hook(receiver.url, names, name="All")
@@ -917,9 +940,31 @@ async def case_69():
               authed("GET", "/api/webhooks/events")[0] == 401)
 
 
+async def case_70():
+    print("\n[70] a delivery names the display it is about")
+    # Not `Display`: that helper defaults `--cdp-url` to the running Chrome,
+    # and `--display` refuses to coexist with a pinned `--cdp-url` (its port is
+    # derived from the display's position instead). Naming the port after the
+    # colon points this one declared display at the same Chrome directly.
+    with Receiver() as receiver, Server(display=f"werkstatt:{CDP_PORT}"):
+        add_hook(receiver.url, ["playback.item_changed"])
+        add_item()
+        check("a request arrived", receiver.wait(1), receiver.count())
+        if receiver.count():
+            payload = receiver.bodies()[0]
+            check("the display names the screen the event is about",
+                  payload.get("display") == "werkstatt", payload)
+            # Additive: a target configured before several displays existed
+            # keeps receiving everything it received before, in the same shape.
+            check("the device is still named beside it",
+                  isinstance(payload.get("device"), str), payload)
+            check("and the event itself is unaffected",
+                  payload.get("event") == "playback.item_changed", payload)
+
+
 CASES = [case_52, case_53, case_54, case_55, case_56, case_57, case_58, case_59,
          case_60, case_61, case_62, case_63, case_64, case_65, case_66, case_67,
-         case_68, case_69]
+         case_68, case_69, case_70]
 
 
 async def main(wanted):

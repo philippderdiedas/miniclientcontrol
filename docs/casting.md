@@ -64,6 +64,38 @@ status code, because the only client that ever asks is our own Chromium.
 Every one of these ends the same way: the override is released and the playlist
 resumes where it left off.
 
+## Which screen a cast lands on
+
+A controller can drive several screens (see
+[deployment.md](deployment.md#declaring-the-screens-a-deployment-drives)), but
+casting is **one session for the whole controller, on one screen** — not one
+session per screen. `--cast-display <name>` says which declared display a cast
+pins; with no flag it is the first one declared. A name that is not declared is
+refused at startup, rather than surfacing hours later as a guest scanning a QR
+code and the picture appearing on the wrong panel.
+
+Everything a cast touches follows that one display: the override that pins
+`cast_display.html`, the restore on teardown, and the `override.set` webhook,
+which names that screen.
+
+What does **not** follow it yet, and is worth knowing before a venue declares a
+second screen:
+
+- **The guest URL and the QR code are global.** There is one sender address, one
+  `/api/cast/qr.svg`, and neither says which screen it reaches.
+- **The idle screen invites a cast on every display.** `empty_playlist.html` is
+  the same page everywhere and shows the cast address, the QR code and — in code
+  mode — the standing code whenever casting is enabled. A second panel standing
+  idle therefore advertises a cast that will appear somewhere else.
+- **`hide_during_cast` and the cast-sourced QR drop are global too**, because
+  they follow `CastSession::is_active()`, which is one session's state and not
+  one screen's.
+
+Per-display casting — a session per screen, a QR that names its own screen — is
+its own piece of work. `cast.rs` carries the session state machine, and one
+session is what a venue with one guest at a time actually needs; the honest
+position until then is that a second screen is a playlist screen.
+
 ## Authentication
 
 `--cast-auth` picks how a guest proves themselves:
@@ -195,9 +227,10 @@ shorter to type, and fewer modules in the QR code.
 
 Binding a port below 1024 needs a privilege this process does not have by
 default, so failing to get it is ordinary and silent. Granting it is a deployment
-decision — see [deployment.md](deployment.md#giving-the-controller-port-443). On a
-machine driving two displays only one of the two can have 443; the other takes
-3443 and its URL keeps the port.
+decision — see [deployment.md](deployment.md#giving-the-controller-port-443). One
+controller needs 443 once however many screens it drives; it is two *controllers*
+on one machine that compete for it, and the one that loses takes 3443 and keeps
+the port in its URL.
 
 ## HTTPS is not optional
 

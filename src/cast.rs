@@ -436,8 +436,11 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
         Showing::Page { url, scroll } => (url.to_string(), scroll.clone()),
         Showing::Nothing => return,
     };
+    // The one screen a cast pins, which `--cast-display` chooses and every other
+    // cast site resolves the same way.
+    let display = state.cast_display();
     {
-        let mut current = state.override_item.lock().await;
+        let mut current = display.override_item.lock().await;
         session.previous_override = current.clone();
         *current = Some(OverrideItem {
             asset_id: None,
@@ -454,7 +457,7 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
     let epoch = session.epoch;
     drop(session);
 
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
 
     match &showing {
         Showing::Cast => {
@@ -465,7 +468,7 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
             // above means it never runs a second time. `register_peer` announces
             // the cast instead. `override.set` stays, because pinning the
             // display is exactly what did happen.
-            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+            state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
                 url: cast_display_url(state.args.port),
                 source: "cast",
             });
@@ -476,11 +479,11 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
         }
         Showing::Page { url, .. } => {
             info!("Cast: guest page pinned to {}", redact(url));
-            state.webhooks.fire(crate::webhook::Event::GuestPageShown {
+            state.webhooks.fire(&display.name, crate::webhook::Event::GuestPageShown {
                 url: redact(url),
                 sender_ip: sender_ip.map(|addr| addr.to_string()).unwrap_or_default(),
             });
-            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+            state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
                 url: redact(url),
                 source: "guest_page",
             });
@@ -505,8 +508,10 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
         Showing::Page { url, .. } => Some(url.to_string()),
         Showing::Nothing => None,
     };
+    // The same screen `activate_display` pinned.
+    let display = state.cast_display();
     {
-        let mut current = state.override_item.lock().await;
+        let mut current = display.override_item.lock().await;
         // Only restore if what is on screen is still the override we installed.
         // An operator who set a different one mid-session made a newer decision,
         // and silently reverting it would look like the UI ignoring them.
@@ -538,7 +543,7 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
     session.epoch += 1;
     drop(session);
 
-    state.override_signal.notify_one();
+    display.override_signal.notify_one();
     info!("Cast: display released, playlist resumes");
 
     // Both `override.cleared` fires sit outside the `still_ours` branch above,
@@ -562,19 +567,19 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
             if announced {
                 state
                     .webhooks
-                    .fire(crate::webhook::Event::CastEnded { reason, duration_secs });
+                    .fire(&display.name, crate::webhook::Event::CastEnded { reason, duration_secs });
             }
             state
                 .webhooks
-                .fire(crate::webhook::Event::OverrideCleared { source: "cast" });
+                .fire(&display.name, crate::webhook::Event::OverrideCleared { source: "cast" });
         }
         Showing::Page { .. } => {
             state
                 .webhooks
-                .fire(crate::webhook::Event::GuestPageEnded { reason, duration_secs });
+                .fire(&display.name, crate::webhook::Event::GuestPageEnded { reason, duration_secs });
             state
                 .webhooks
-                .fire(crate::webhook::Event::OverrideCleared { source: "guest_page" });
+                .fire(&display.name, crate::webhook::Event::OverrideCleared { source: "guest_page" });
         }
         Showing::Nothing => {}
     }
@@ -1186,7 +1191,11 @@ async fn register_peer(
         // the state the event describes is already settled here: the sender slot
         // is filled and its address recorded.
         if announce {
-            state.webhooks.fire(crate::webhook::Event::CastStarted {
+            // No `Display` is bound at this point -- `activate_display` runs
+            // below -- so the name is resolved the same way it resolves it, and
+            // the event therefore names the screen this cast is about to land
+            // on.
+            state.webhooks.fire(&state.cast_display().name, crate::webhook::Event::CastStarted {
                 sender_ip: addr.to_string(),
                 mode: "cast".to_string(),
             });
@@ -1434,7 +1443,10 @@ async fn caster_only(state: &AppState, peer: IpAddr) -> bool {
 
 /// Processes whose audio counts as "the cast's own".
 pub async fn cast_process_ids(state: &AppState) -> Vec<u32> {
-    let Some(pid) = *state.browser_pid.lock().await else {
+    // The casting display's own browser: the stream to single out belongs to
+    // the screen the cast is on, so this resolves it exactly as the two override
+    // sites do.
+    let Some(pid) = *state.cast_display().browser_pid.lock().await else {
         // Someone else started the browser, so we cannot claim a subtree. The
         // panel still works; it just cannot mark one stream as the caster's.
         return Vec::new();
@@ -1660,6 +1672,16 @@ mod tests {
     /// A state whose only webhook target is `receiver`, subscribed to every
     /// event this module can emit.
     async fn state_for(receiver: &Receiver) -> AppState {
+        state_for_displays(receiver, &["default"], None).await
+    }
+
+    /// The same state, driving the named screens, with `--cast-display` set to
+    /// `cast_display` when given.
+    async fn state_for_displays(
+        receiver: &Receiver,
+        names: &[&str],
+        cast_display: Option<&str>,
+    ) -> AppState {
         // `max_connections(1)` rather than a bare `sqlite::memory:`: every test
         // in this module fires webhooks, which deliver from a spawned task
         // holding a second pool connection, and a second connection to a fresh
@@ -1683,25 +1705,30 @@ mod tests {
             .await
             .unwrap();
 
-        let args = crate::models::Args::parse_from(["miniclientcontrol"]);
+        let mut args = crate::models::Args::parse_from(["miniclientcontrol"]);
+        args.display = names.iter().map(|n| n.to_string()).collect();
+        args.cast_display = cast_display.map(|n| n.to_string());
         let settings = crate::settings::load(&pool, &args).await;
+        let displays = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Arc::new(crate::models::Display::new(
+                    name,
+                    &format!("http://127.0.0.1:{}", 9222 + index),
+                ))
+            })
+            .collect();
         AppState {
             pool: pool.clone(),
             args: Arc::new(args),
-            skip_signal: Default::default(),
-            playlist_signal: Default::default(),
-            override_signal: Default::default(),
-            overlay_signal: Default::default(),
-            current_item_id: Default::default(),
-            pending_jump: Default::default(),
-            override_item: Default::default(),
+            displays: Arc::new(displays),
             cast_tls_port: 0,
             managed_cert: false,
             settings: Arc::new(tokio::sync::RwLock::new(settings)),
             locks: Default::default(),
             auth_cache: Default::default(),
             audio: Arc::new(crate::audio::Backend::Unavailable),
-            browser_pid: Default::default(),
             cast: Default::default(),
             webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
         }
@@ -1786,6 +1813,53 @@ mod tests {
         // The whole point of moving the fire: in `activate_display` there was no
         // sender yet and this field was empty.
         assert!(body.contains("192.168.1.44"), "the sender's address is missing: {body}");
+    }
+
+    #[tokio::test]
+    async fn a_cast_pins_the_display_the_deployment_chose() {
+        let receiver = receiver().await;
+        let state =
+            state_for_displays(&receiver, &["foyer", "werkstatt"], Some("werkstatt")).await;
+
+        pin_for_pairing(&state).await;
+
+        let chosen = state.display("werkstatt").expect("werkstatt is not declared");
+        let other = state.display("foyer").expect("foyer is not declared");
+        assert!(
+            chosen.override_item.lock().await.is_some(),
+            "the cast did not pin --cast-display"
+        );
+        assert!(
+            other.override_item.lock().await.is_none(),
+            "the cast pinned a screen it was not sent to"
+        );
+
+        let addr: IpAddr = "192.168.1.44".parse().unwrap();
+        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
+        let body = {
+            let bodies = receiver.bodies.lock().await;
+            bodies
+                .iter()
+                .find(|b| b.contains("\"event\":\"cast.started\""))
+                .cloned()
+                .expect("no cast.started body")
+        };
+        // `register_peer` fires this before `activate_display` runs, so it has
+        // no display bound and resolves the name itself. If the two ever resolve
+        // differently, a receiver is told about a screen the cast is not on.
+        assert!(
+            body.contains("\"display\":\"werkstatt\""),
+            "cast.started named the wrong screen: {body}"
+        );
+
+        // The teardown has to find the same screen, or the cast page stays up
+        // for good and the playlist never comes back.
+        deactivate_display(&state, "test").await;
+        assert!(
+            chosen.override_item.lock().await.is_none(),
+            "the teardown released a different screen than the one it pinned"
+        );
     }
 
     #[tokio::test]

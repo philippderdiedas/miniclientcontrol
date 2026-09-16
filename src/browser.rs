@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
@@ -11,16 +12,32 @@ use chromiumoxide::listeners::EventStream;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use crate::models::{AppState, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use urlencoding::encode;
 
-pub async fn browser_loop(state: AppState) {
-    info!("Starting browser loop...");
+/// Drive one screen.
+///
+/// One task per declared display, each owning its own browser and its own
+/// playback state. Nothing is shared between two of them but the database, the
+/// settings and the webhook dispatcher -- which is why the edge-tracking locals
+/// below are locals: a second screen gets its own copy for free.
+pub async fn browser_loop(state: AppState, display: Arc<Display>) {
+    // Bound out of the macro's reach: `tracing`'s own `display()` field helper is
+    // in scope inside `info!`, so `display.name` there resolves to that function
+    // and not to this local.
+    let display_name = display.name.clone();
+    let cdp_url = display.cdp_url.clone();
+    info!("Starting browser loop for display '{}'...", display_name);
 
     // play_order of the last item we finished. The playlist is re-fetched whenever it
     // changes, and without this every edit (or reconnect) restarted playback at item
     // one — on a device whose playlist is touched regularly, later items never played.
     let mut resume_after_order: Option<i64> = None;
+
+    // The assignment the pass before this one played, so that a reassignment can
+    // be told from a plain re-read. A function-local like the edge-tracking
+    // below, which is what makes it per display.
+    let mut last_assigned: Option<i64> = None;
 
     // Edge-tracking for the two events that would otherwise repeat themselves.
     // The empty-playlist branch re-runs every five seconds for as long as the
@@ -45,14 +62,14 @@ pub async fn browser_loop(state: AppState) {
             ..Default::default()
         };
         let (mut browser, mut handler) = match Browser::connect_with_config(
-            &state.args.cdp_url,
+            &cdp_url,
             handler_config,
         )
         .await
         {
             Ok(res) => res,
             Err(_) => {
-                info!("Could not launch browser, trying to connect to {}", state.args.cdp_url);
+                info!("Could not launch browser, trying to connect to {}", cdp_url);
                 sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -169,7 +186,7 @@ pub async fn browser_loop(state: AppState) {
         // crash reports `reconnect: false` while the browser it attached to never
         // went anywhere. Widening it would mean persisting the flag, which is an
         // SD-card write for a field nobody acts on.
-        state.webhooks.fire(crate::webhook::Event::DisplayConnected {
+        state.webhooks.fire(&display_name, crate::webhook::Event::DisplayConnected {
             reconnect: connected_before,
         });
         connected_before = true;
@@ -178,12 +195,12 @@ pub async fn browser_loop(state: AppState) {
         let mut reconnect_needed = false;
         loop {
             let active_override = {
-                let lock = state.override_item.lock().await;
+                let lock = display.override_item.lock().await;
                 lock.clone()
             };
 
             if let Some(override_item) = active_override {
-                if let Err(e) = run_override_loop(&state, &browser, &mut attached_events, &page, override_item).await {
+                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, override_item).await {
                     error!("Override playback failed: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -194,8 +211,45 @@ pub async fn browser_loop(state: AppState) {
             }
 
             // 2. Fetch Playlist
-            let playlist = match sqlx::query_as::<_, PlaylistItemWithAsset>(
-                r#"
+            // Which playlist this screen plays is read per pass and never
+            // cached: an operator reassigning it expects the next item to come
+            // from the new one, and this is a single row out of a table with
+            // single-digit rows. A failure to read it is *not* treated as "no
+            // playlist" -- a locked database would then blank a screen that is
+            // playing perfectly well -- so it takes the same log-and-retry path
+            // as a failed playlist read below and leaves the page alone.
+            let assigned = match sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT playlist_id FROM displays WHERE name = ?",
+            )
+            .bind(&display_name)
+            .fetch_optional(&state.pool)
+            .await
+            {
+                Ok(row) => row.flatten(),
+                Err(e) => {
+                    error!("Failed to read the playlist assignment: {}", e);
+                    sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            // A playlist just assigned starts at its beginning. `play_order` is
+            // numbered per playlist, so `resume_after_order` -- an order within
+            // the list it was recorded in -- means nothing in a different one,
+            // and carrying it across would drop the operator into the middle of
+            // the playlist they just picked.
+            if assigned != last_assigned {
+                resume_after_order = None;
+                last_assigned = assigned;
+            }
+
+            // A screen nobody has chosen a playlist for plays nothing and takes
+            // the idle branch below. Falling back to every item in the table
+            // would mean a second screen mirrors the first the moment it is
+            // declared, which is the opposite of what declaring it asked for.
+            let playlist = match assigned {
+                Some(playlist_id) => match sqlx::query_as::<_, PlaylistItemWithAsset>(
+                    r#"
                 SELECT
                     p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
                     p.start_date, p.end_date,
@@ -205,19 +259,24 @@ pub async fn browser_loop(state: AppState) {
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
                                 WHERE p.is_enabled = 1
+                                    AND p.playlist_id = ?
                                     AND (p.start_date IS NULL OR datetime(p.start_date) <= datetime('now'))
                                     AND (p.end_date IS NULL OR datetime('now') <= datetime(p.end_date))
                 ORDER BY p.play_order ASC
-                "#
-            )
-            .fetch_all(&state.pool)
-            .await {
-                Ok(list) => list,
-                Err(e) => {
-                    error!("DB Error: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
+                "#,
+                )
+                .bind(playlist_id)
+                .fetch_all(&state.pool)
+                .await
+                {
+                    Ok(list) => list,
+                    Err(e) => {
+                        error!("DB Error: {}", e);
+                        sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                },
+                None => Vec::new(),
             };
 
             if let Err(e) = reconcile_keep_loaded_tabs(
@@ -257,13 +316,13 @@ pub async fn browser_loop(state: AppState) {
                 }
                 // Update state
                 {
-                    let mut lock = state.current_item_id.lock().await;
+                    let mut lock = display.current_item_id.lock().await;
                     *lock = None;
                 }
 
                 if !announced_empty {
                     announced_empty = true;
-                    state.webhooks.fire(crate::webhook::Event::PlaylistEmpty);
+                    state.webhooks.fire(&display_name, crate::webhook::Event::PlaylistEmpty);
                 }
 
                 // The idle screen is a page like any other. It is also the one
@@ -275,16 +334,16 @@ pub async fn browser_loop(state: AppState) {
                 // Wait a bit before checking DB again
                 tokio::select! {
                     _ = sleep(Duration::from_secs(5)) => {},
-                    _ = state.skip_signal.notified() => {
+                    _ = display.skip_signal.notified() => {
                         info!("Skip signal received (while empty), reloading playlist...");
                     }
-                    _ = state.playlist_signal.notified() => {
+                    _ = display.playlist_signal.notified() => {
                         info!("Playlist changed while empty, reloading playlist...");
                     }
-                    _ = state.override_signal.notified() => {
+                    _ = display.override_signal.notified() => {
                         info!("Override signal received while empty.");
                     }
-                    _ = state.overlay_signal.notified() => {
+                    _ = display.overlay_signal.notified() => {
                         info!("Overlay settings changed while empty.");
                     }
                 }
@@ -308,7 +367,7 @@ pub async fn browser_loop(state: AppState) {
             // it has been checked against a fresh list: consuming it on a miss drops
             // the click and resumes playback on an unrelated item.
             {
-                let mut pending = state.pending_jump.lock().await;
+                let mut pending = display.pending_jump.lock().await;
                 if let Some(target_id) = *pending {
                     match playlist.iter().position(|x| x.id == target_id) {
                         Some(pos) => {
@@ -328,7 +387,7 @@ pub async fn browser_loop(state: AppState) {
                 let item = &playlist[index];
                 // Update current item ID
                 {
-                    let mut lock = state.current_item_id.lock().await;
+                    let mut lock = display.current_item_id.lock().await;
                     *lock = Some(item.id);
                 }
 
@@ -344,7 +403,7 @@ pub async fn browser_loop(state: AppState) {
                 // Something is playing again, so the next empty playlist is worth
                 // announcing afresh.
                 announced_empty = false;
-                state.webhooks.fire(crate::webhook::Event::ItemChanged {
+                state.webhooks.fire(&display_name, crate::webhook::Event::ItemChanged {
                     item_id: item.id,
                     kind: if item.asset_id.is_some() { "asset" } else { "url" },
                     // A URL item has no name but its URL, and that URL can carry
@@ -451,16 +510,16 @@ pub async fn browser_loop(state: AppState) {
                             info!("Duration ended.");
                             break;
                         },
-                        _ = state.skip_signal.notified() => {
+                        _ = display.skip_signal.notified() => {
                             info!("Skip signal received.");
                             skip_requested = true;
                             break;
                         },
-                        _ = state.override_signal.notified() => {
+                        _ = display.override_signal.notified() => {
                             info!("Override signal received, interrupting item.");
                             break;
                         },
-                        _ = state.overlay_signal.notified() => {
+                        _ = display.overlay_signal.notified() => {
                             // Applied to the page already on screen, and the
                             // remaining time is recomputed rather than restarted
                             // -- an overlay edit must not silently extend the
@@ -483,8 +542,9 @@ pub async fn browser_loop(state: AppState) {
                                 .checked_sub(item_started_at.elapsed())
                                 .unwrap_or(Duration::from_secs(0));
                         },
-                        _ = state.playlist_signal.notified() => {
-                            let still_active = is_playlist_item_active_now(&state, item.id).await;
+                        _ = display.playlist_signal.notified() => {
+                            let still_active =
+                                is_playlist_item_active_now(&state, &display_name, item.id).await;
                             if still_active {
                                 reload_before_next = true;
                                 let elapsed_now = item_started_at.elapsed();
@@ -499,7 +559,7 @@ pub async fn browser_loop(state: AppState) {
                 }
 
                 let override_active = {
-                    let lock = state.override_item.lock().await;
+                    let lock = display.override_item.lock().await;
                     lock.is_some()
                 };
 
@@ -524,11 +584,11 @@ pub async fn browser_loop(state: AppState) {
                     // snapshot the playlist is re-read at the top of the loop and the
                     // jump is resolved there. Consuming it here threw the click away,
                     // because the snapshot can be a whole item duration out of date.
-                    let target_id = *state.pending_jump.lock().await;
+                    let target_id = *display.pending_jump.lock().await;
                     if let Some(target_id) = target_id {
                         match playlist.iter().position(|x| x.id == target_id) {
                             Some(pos) => {
-                                *state.pending_jump.lock().await = None;
+                                *display.pending_jump.lock().await = None;
                                 index = pos;
                                 continue;
                             }
@@ -570,7 +630,7 @@ pub async fn browser_loop(state: AppState) {
             // loses a connection that was working. The guard is belt and braces
             // against a future early `continue` slipping in above.
             if connected_before {
-                state.webhooks.fire(crate::webhook::Event::DisplayDisconnected {
+                state.webhooks.fire(&display_name, crate::webhook::Event::DisplayDisconnected {
                     error: "the CDP connection was lost".to_string(),
                 });
             }
@@ -608,6 +668,10 @@ async fn ensure_single_control_page(browser: &mut Browser) -> Result<Page, chrom
 
 async fn run_override_loop(
     state: &AppState,
+    // The display `browser_loop` is driving, passed in rather than resolved a
+    // second time: resolving here would pin every screen's override loop to the
+    // first display's signals.
+    display: &Display,
     browser: &Browser,
     attached_events: &mut EventStream<EventAttachedToTarget>,
     page: &Page,
@@ -638,8 +702,8 @@ async fn run_override_loop(
             // matters. Re-applying does not touch the page otherwise, so a live
             // RTCPeerConnection survives it.
             tokio::select! {
-                _ = state.override_signal.notified() => {},
-                _ = state.overlay_signal.notified() => {
+                _ = display.override_signal.notified() => {},
+                _ = display.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
                     if let Err(e) = apply_overlay(state, page, None).await {
                         error!("Failed to re-apply overlay: {}", e);
@@ -649,7 +713,7 @@ async fn run_override_loop(
             }
 
             let current_override = {
-                let lock = state.override_item.lock().await;
+                let lock = display.override_item.lock().await;
                 lock.clone()
             };
 
@@ -820,18 +884,31 @@ fn empty_playlist_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/empty_playlist.html", port)
 }
 
-async fn is_playlist_item_active_now(state: &AppState, id: i64) -> bool {
+/// Whether the item on screen is still one this display should be showing.
+///
+/// The join against `displays` is what makes a reassignment land on the item
+/// already playing: an item that belongs to a playlist this screen is no longer
+/// assigned -- including no playlist at all, since SQL never matches two `NULL`s
+/// -- is as gone from here as a deleted one. Waiting out its duration instead
+/// would leave an operator standing in front of the screen they just reassigned
+/// watching it ignore them for up to a whole item. The assignment is read here
+/// rather than taken from the pass's snapshot for the same reason that snapshot
+/// cannot be trusted anywhere else: it may have changed since.
+async fn is_playlist_item_active_now(state: &AppState, display_name: &str, id: i64) -> bool {
     let row: Result<(i64,), _> = sqlx::query_as(
         r#"
         SELECT COUNT(*)
         FROM playlist_items p
+        JOIN displays d ON d.playlist_id = p.playlist_id
         WHERE p.id = ?
+          AND d.name = ?
           AND p.is_enabled = 1
           AND (p.start_date IS NULL OR datetime(p.start_date) <= datetime('now'))
           AND (p.end_date IS NULL OR datetime('now') <= datetime(p.end_date))
         "#,
     )
     .bind(id)
+    .bind(display_name)
     .fetch_one(&state.pool)
     .await;
 

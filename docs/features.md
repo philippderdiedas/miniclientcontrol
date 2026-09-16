@@ -1,11 +1,34 @@
 # What it does
 
-## The playlist
+## Playlists
+
+A **playlist** is a named list an operator creates, and every playlist item
+belongs to one. A screen is assigned a playlist, so two screens can show
+different things — the foyer showing opening hours while the workshop shows
+machine status — and two screens assigned the *same* playlist mirror it, which
+falls out for free rather than being a feature of its own.
+
+A playlist is a first-class object rather than a column on an item, and the case
+that decided it is the unglamorous one: a screen is taken away for good and the
+remaining screen should take over what it was showing. As an object that is a
+dropdown; as a column it would be a data migration. It follows that **a playlist
+is never deleted with a display** — it outlives the screen, unassigned, until
+somebody picks it up again.
+
+Deleting a playlist that still holds items is refused, and the refusal says how
+many are in the way. The alternative is items left belonging to nothing, which no
+screen would ever play and nothing would report.
+
+A device upgraded from a version before playlists existed finds its items in a
+playlist called `Standard`, assigned to its one screen, and plays exactly what it
+played the day before.
+
+## Items
 
 The unit of work is a **playlist item**: either an uploaded asset or a URL, with
 a duration, an optional date window, and an enable switch. The controller walks
-the active items in `play_order`, navigating one Chromium page from one to the
-next.
+the active items of its display's playlist in `play_order`, navigating one
+Chromium page from one to the next.
 
 "Active" means enabled *and* inside its date window, which is how a notice can be
 scheduled to appear on Monday and stop mattering on Friday without anyone
@@ -18,6 +41,54 @@ items never play.
 
 **Play now** jumps to a chosen item. **Keep loaded** holds an item in its own
 background tab so a heavy dashboard is already rendered when its turn comes.
+
+An item can be **moved to another playlist**, which appends it to the end of the
+target and renumbers both lists. It is its own button rather than part of saving
+the card: the move decides the item's new position, so a move carrying other
+edits is refused — and an item that has just left the list it was being edited in
+should say so in one place rather than half-save in two.
+
+## Several screens
+
+One controller can drive more than one screen. Each declared display gets its own
+Chromium, its own control loop and its own assigned playlist, while the asset
+library, the settings, the overlay configuration, the credentials, the audio and
+the webhook targets stay shared — duplicating *configuration* was never the
+complaint. What made two controllers painful was uploading the same PDF twice,
+remembering which screen was on which port, and having two admin pages to choose
+between before any edit.
+
+**The screens are declared, not discovered**: `--display foyer --display
+werkstatt`, once per installation. Placing the windows stays the window manager's
+job, which is where this project already puts it — the controller only gives each
+browser a window class of its own to match on. See
+[deployment.md](deployment.md#declaring-the-screens-a-deployment-drives).
+
+On the operator's side a display is a card on `/displays.html`: a label they can
+change, and a dropdown for the playlist it plays. A screen with no playlist shows
+the idle page rather than erroring, and a screen that was removed from the command
+line keeps its row so that its playlist can be handed to another one.
+
+Playback is per screen and so is the override, so `/playlist.html` has a **screen
+picker** beside its playlist picker, and everything in its status bar — what is
+running, the override, **Play now** — is about the selected screen while the list
+below is about the selected playlist. The two are independent, because an
+operator routinely edits a playlist no screen is currently showing, and the bar
+says so when they point at different things. The picker is remembered per browser
+and disappears when there is only one screen to choose. `/admin.html` answers the
+same question for all of them at once: one line per declared screen, naming what
+it plays and whether an override is on it.
+
+That the API grew `/api/displays/{name}/…` paths for both follows from the same
+split, and the pages use them always — a page with one code path for one screen
+and another for several is a page that only works on whichever the author had.
+The old unscoped paths still work while one screen is declared, and answer `409`
+naming the declared screens once several are — an existing script gets told it
+has become ambiguous rather than having a coin flipped for it.
+
+Casting is the exception that is not per screen yet: one session for the whole
+controller, landing on the display `--cast-display` names. See
+[casting.md](casting.md#which-screen-a-cast-lands-on).
 
 ## Assets
 
@@ -128,12 +199,21 @@ server shows no panel at all rather than a set of controls that do nothing.
 
 ## Operator surface
 
-`/admin.html` shows what is on screen, what is casting, and the runtime settings:
+`/admin.html` shows what is on the screens — one line per declared display, with
+its playlist and any override — what is casting, and the runtime settings:
 whether casting is allowed, how a guest authenticates, the overlay, the language
 for dates and times, and the credentials for the operator UI itself. It also
 carries the room-audio panel and, while one is alive, the **pairing code the
 display is currently showing** with its remaining seconds — otherwise the person
 helping a guest over the phone is the only one who cannot see it.
+
+`/displays.html`, linked from there, is the one page about screens: one card per
+declared display with its label and the playlist it plays. `/playlist.html` opens
+with a playlist picker, and everything below it edits the playlist that is
+selected; the selection is kept in the URL, so a link to one playlist is a link
+somebody can send. Its screen picker is the other half of that, and is kept in
+the browser rather than in the URL — which screen you are standing in front of is
+not part of what a link about a playlist means.
 
 Settings live in the database, so they survive restarts. Anything passed on the
 command line pins that setting and the UI shows it as locked — which is also the
@@ -169,8 +249,12 @@ Ten events, in four families:
 | `display.connected` | `reconnect` |
 
 Every one of them arrives in the same envelope — `event`, `timestamp`, `device`
-(the machine's hostname), and a `data` object with the fields above. A target
-with no template gets exactly that, as JSON, which is what most receivers want.
+(the machine's hostname), `display` (the screen the event is about), and a `data`
+object with the fields above. A target with no template gets exactly that, as
+JSON, which is what most receivers want. `display` sits in the envelope rather
+than in one event's `data` because every one of the ten is about a particular
+screen, and it is additive: a target configured before several screens existed
+keeps working and simply receives one more key.
 
 **With a template, the envelope is the context.** The body is a
 [minijinja](https://docs.rs/minijinja) template rendered against it, so a Discord

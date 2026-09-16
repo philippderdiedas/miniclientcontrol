@@ -689,7 +689,13 @@ pub fn routes() -> Router<AppState> {
 /// Includes the layer of the item *currently on screen*, so the admin preview
 /// shows what is really out there rather than the global half of it.
 pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
-    let current = *state.current_item_id.lock().await;
+    // The primary display's item, permanently: the overlay configuration is
+    // global, so the only per-display thing in this payload is which item the
+    // layer belongs to. Answering for the first screen is the compromise --
+    // refusing an unscoped request the way the display-owned paths do would take
+    // the preview away from every multi-screen deployment to tell it something
+    // that is the same on all of them.
+    let current = *state.primary().current_item_id.lock().await;
     let item = match current {
         Some(id) => crate::db::load_item_overlay(&state.pool, id).await,
         None => None,
@@ -1121,11 +1127,15 @@ pub async fn update_settings(
 
     persist(&state.pool, &next).await;
 
+    // Every display, not just one: the overlay configuration is global -- a
+    // notice put up for the building is not put up for one panel.
+    //
     // notify_one(), never notify_waiters(): the loop is only parked on this for
     // part of its cycle, and a dropped notification here means an overlay edit
-    // that silently never reaches the screen.
+    // that silently never reaches the screen. `notify_overlay_changed` is what
+    // keeps that rule in one place.
     if overlay_changed {
-        state.overlay_signal.notify_one();
+        state.notify_overlay_changed();
     }
 
     // Turning casting off has to interrupt whatever is running, or the switch
