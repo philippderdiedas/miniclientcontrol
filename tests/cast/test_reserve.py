@@ -68,7 +68,7 @@ async def main():
         check("claim again", status == 200, (status, body))
         check("blocked for others", claim_from_lan()[0] == 409)
 
-        status, _ = http("DELETE", "/api/cast/claim")
+        status, _ = http("DELETE", "/api/cast/claim", {})
         check("release returns 204", status == 204, status)
         check("state no longer reserved", http("GET", "/api/cast/state")[1]["reserved"] is False)
         check("another address can claim now", claim_from_lan()[0] == 200)

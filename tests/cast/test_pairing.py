@@ -64,7 +64,7 @@ async def main():
     print("\n[9] a pairing code nobody uses releases the display")
     with Server(cast_auth="pairing"):
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
-        http("POST", "/api/cast/pair")
+        http("POST", "/api/cast/pair", {})
         await asyncio.sleep(0.4)
         check("display pinned while the code is up",
               http("GET", "/api/override")[1]["active"] is True)

@@ -443,26 +443,12 @@ pub struct ReleaseRequest {
 
 /// Give the slot back without having streamed -- the guest cancelled the picker
 /// or closed the tab. Without this the next person waits out the full TTL.
-///
-/// TEMPORARY: `web/index.html:315` sends this with no body at all on
-/// `pagehide` (`fetch(..., { method: 'DELETE', keepalive: true })`, no
-/// `Content-Type`), so the extractor tolerates an absent one exactly like
-/// `start_pairing` does, and for the same reason: `Option<Json<ReleaseRequest>>`
-/// also yields `None` for a request whose `Content-Type` is not JSON, body and
-/// all. Until Task 10 sends `{}` at minimum with the header, a cancel with no
-/// screen named goes through `display::resolve(None)` exactly like an unscoped
-/// claim: on the single-display deployment every venue runs today it still
-/// releases the right (only) screen; on a multi-display one it is refused with
-/// `409` rather than releasing the wrong screen, so the reservation the guest
-/// meant to cancel is left to expire on its own TTL instead. Once the page
-/// always sends a body, this can become a plain `Json<ReleaseRequest>`.
 pub async fn release_session(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    payload: Option<Json<ReleaseRequest>>,
+    Json(payload): Json<ReleaseRequest>,
 ) -> Response {
-    let display_name = payload.and_then(|Json(p)| p.display);
-    let display = match crate::display::resolve(&state, display_name.as_deref()) {
+    let display = match crate::display::resolve(&state, payload.display.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,
     };
@@ -503,20 +489,9 @@ pub struct PairRequest {
 ///
 /// The code is deliberately not in the response: proving you can see the screen
 /// is the entire point, and returning it would reduce this to "no auth".
-///
-/// TEMPORARY: `web/index.html:664` posts no body today, so the extractor has to
-/// tolerate an absent one (`Option<Json<PairRequest>>`) rather than requiring
-/// `Json<PairRequest>` outright. The same tolerance also swallows a body with
-/// the wrong (or missing) `Content-Type`: under axum 0.8, `Option<Json<T>>`
-/// yields `None` for that too, body and all, so a request naming a screen
-/// without the JSON header pairs the primary display instead of refusing.
-/// Task 10 updates the page to send `{}` at minimum, with the header; once it
-/// does, this can become a plain `Json<PairRequest>`, which is what turns a
-/// missing or wrong `Content-Type` back into a visible error instead of a
-/// silently wrong screen.
 pub async fn start_pairing(
     State(state): State<AppState>,
-    payload: Option<Json<PairRequest>>,
+    Json(payload): Json<PairRequest>,
 ) -> Response {
     if state.args.disable_cast {
         return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
@@ -528,8 +503,7 @@ pub async fn start_pairing(
         )
             .into_response();
     }
-    let display_name = payload.and_then(|Json(p)| p.display);
-    let display = match crate::display::resolve(&state, display_name.as_deref()) {
+    let display = match crate::display::resolve(&state, payload.display.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,
     };
