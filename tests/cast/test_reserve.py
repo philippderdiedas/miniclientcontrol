@@ -49,12 +49,12 @@ async def main():
         # is a dead end they cannot act on, and the claim endpoint already lets the
         # same address re-claim -- the two answers have to agree.
         check("not busy for the address that holds it",
-              http("GET", "/api/cast/info")[1]["busy"] is False,
+              http("GET", "/api/cast/info")[1]["screens"][0]["busy"] is False,
               http("GET", "/api/cast/info")[1])
         req = urllib.request.Request(f"https://{LAN}:{TLS}/api/cast/info")
         with urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context()) as res:
             other = json.load(res)
-        check("but busy for a different address", other["busy"] is True, other)
+        check("but busy for a different address", other["screens"][0]["busy"] is True, other)
 
         print("\n[19] the ticket is what opens the socket")
         sr, sw = await ws("sender", ticket="deadbeef" * 4)

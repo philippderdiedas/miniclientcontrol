@@ -38,7 +38,7 @@ async def main():
 
         status, info = http("GET", "/api/cast/info")
         check("the public info carries the limit, so a sender can constrain its capture",
-              (info.get("display_limits") or {}).get("max_edge") == 2048, info)
+              info["screens"][0].get("max_edge") == 2048, info)
 
         print("\n[31] a sender joining later is told in its welcome")
         sr, sw = await ws("sender")
@@ -57,13 +57,13 @@ async def main():
         await asyncio.sleep(0.4)
         status, info = http("GET", "/api/cast/info")
         check("an absurdly small limit is ignored rather than shrinking the cast to nothing",
-              (info.get("display_limits") or {}).get("max_edge") == 1600, info)
+              info["screens"][0].get("max_edge") == 1600, info)
 
         await wsclient.send_json(sw, {"type": "limits", "max_edge": 99999})
         await asyncio.sleep(0.4)
         status, info = http("GET", "/api/cast/info")
         check("a sender cannot announce limits on the display's behalf",
-              (info.get("display_limits") or {}).get("max_edge") == 1600, info)
+              info["screens"][0].get("max_edge") == 1600, info)
 
         sw.close()
         dw.close()
@@ -73,7 +73,7 @@ async def main():
     with Server(fresh=True):
         status, info = http("GET", "/api/cast/info")
         check("a controller that has not seen a display reports no limit",
-              info.get("display_limits") is None, info)
+              info["screens"][0].get("max_edge") is None, info)
 
     print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
     sys.exit(1 if failures else 0)

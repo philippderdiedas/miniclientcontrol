@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::Message;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -184,13 +184,26 @@ pub struct CastStateResponse {
     display_limits: Option<DisplayLimits>,
 }
 
-pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Deserialize)]
+pub struct ScreenQuery {
+    /// Which screen to report on. Same rule as every other scoped cast route --
+    /// `display::resolve`: a named screen resolves or 404s, an omitted one
+    /// resolves while exactly one display is declared and 409s once several are.
+    #[serde(default)]
+    screen: Option<String>,
+}
+
+pub async fn cast_state(
+    State(state): State<AppState>,
+    Query(query): Query<ScreenQuery>,
+) -> Response {
     let sender_url = sender_url(&state);
-    // The cast routes are not display-scoped yet, so they answer for the first
-    // declared screen. Resolved once per handler and passed on, never resolved
-    // again further down: one request must not read one session and write
-    // another.
-    let display = state.primary();
+    // Resolved once per handler and passed on, never resolved again further
+    // down: one request must not read one session and write another.
+    let display = match crate::display::resolve(&state, query.screen.as_deref()) {
+        Ok(display) => display,
+        Err(response) => return response,
+    };
     let settings = state.settings.read().await;
     let session = display.cast.lock().await;
     Json(CastStateResponse {
@@ -217,32 +230,91 @@ pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
             })
         }),
     })
+    .into_response()
 }
 
-/// What a sender needs to render its own page, and nothing more.
+/// What a sender -- or the screen chooser in front of it -- needs, and nothing
+/// more.
 ///
 /// Kept separate from `/api/cast/state`, which stays behind operator auth: the
-/// sender has no business learning who else is casting or from which address.
+/// sender has no business learning *who* else is casting or from which address.
+///
+/// Exempt from authentication regardless of address
+/// (`cast::is_cast_public_path`): the guest is by definition not loopback, so
+/// the screen list below is readable by anyone on the LAN. That is why a
+/// disabled feature reports `enabled: false` and carries no `screens` key at
+/// all -- a switched-off feature must not enumerate the venue.
 pub async fn cast_info(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let sender_url = sender_url(&state);
-    let display = state.primary();
-    let settings = state.settings.read().await;
-    let session = display.cast.lock().await;
-    // Never the code itself: this endpoint is reachable without credentials.
+    let (cast_enabled, page_enabled, auth) = {
+        let settings = state.settings.read().await;
+        (
+            settings.cast_enabled,
+            settings.guest_pages_enabled,
+            settings.cast_auth,
+        )
+    };
+    // `--disable-cast` is the deployment-level kill switch; `cast_enabled` is
+    // the operator's. Either one hides the screen list.
+    let enabled = cast_enabled && !state.args.disable_cast;
+
+    if !enabled {
+        return Json(json!({
+            "enabled": false,
+            "page_enabled": page_enabled,
+            "auth": auth,
+            "sender_url": sender_url,
+        }));
+    }
+
+    // The operator's name for each screen, not the internal name it is
+    // declared with -- same source `display::list` reads.
+    let labels: Vec<(String, Option<String>)> =
+        match sqlx::query_as("SELECT name, label FROM displays")
+            .fetch_all(&state.pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!("Failed to read display labels for cast info: {}", e);
+                Vec::new()
+            }
+        };
+
+    // One session's lock at a time, released before the next is taken: lock
+    // order is settings -> cast_attempts -> cast -> override_item, and nothing
+    // here needs two sessions held together.
+    let mut screens = Vec::with_capacity(state.displays.len());
+    for display in state.displays.iter() {
+        let label = labels
+            .iter()
+            .find(|(name, _)| name == &display.name)
+            .and_then(|(_, label)| label.clone())
+            .unwrap_or_else(|| display.name.clone());
+        let session = display.cast.lock().await;
+        screens.push(json!({
+            "name": display.name,
+            "label": label,
+            // Relative to the asking address, like `claim` -- a guest already
+            // holding this screen's reservation must not be told it is busy.
+            "busy": session.taken_by_other(peer.ip()),
+            // What the display can show. The sender needs this *before* it
+            // calls getDisplayMedia, and at that moment it has no socket yet.
+            "max_edge": session.display_limits.map(|limits| limits.max_edge),
+        }));
+    }
+
     Json(json!({
-        "enabled": settings.cast_enabled,
+        "enabled": enabled,
         // Its own switch, not a detail of `enabled`: a device too weak for
         // WebRTC can still render a page, so the guest page shows one control
         // and not the other.
-        "page_enabled": settings.guest_pages_enabled,
-        "auth": settings.cast_auth,
-        "busy": session.taken_by_other(peer.ip()),
-        // What the display can show. The sender needs this *before* it calls
-        // getDisplayMedia, and at that moment it has no socket yet.
-        "display_limits": session.display_limits,
+        "page_enabled": page_enabled,
+        "auth": auth,
+        "screens": screens,
         // so a page reached over plain HTTP can send itself to the TLS origin,
         // where getDisplayMedia actually exists
         "sender_url": sender_url,

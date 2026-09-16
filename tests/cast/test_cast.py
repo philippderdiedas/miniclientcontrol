@@ -235,7 +235,7 @@ async def main_flow():
               status == 403 and "Falscher Code" in body.get("error", ""), (status, body))
         await asyncio.sleep(0.3)
         check("a refused sender does not touch the display", http("GET", "/api/override")[1]["active"] is False)
-        check("and does not hold the session", http("GET", "/api/cast/info")[1]["busy"] is False)
+        check("and does not hold the session", http("GET", "/api/cast/info")[1]["screens"][0]["busy"] is False)
 
         status, body = claim("QT7X")
         check("correct code reserves the session",
