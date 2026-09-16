@@ -205,6 +205,37 @@ in use hands its URL to the running instance and exits, taking its debugging por
 with it — so that display silently never appears and nothing looks wrong except
 that it is not there.
 
+### Upgrading a device that is already running
+
+**Do not run an older binary against an upgraded database.** The schema migration
+is harmless to roll back over — the old code simply ignores the columns it does
+not know — but the old *behaviour* is not. Its `add_to_playlist` writes no
+`playlist_id` at all, so everything added while it runs lands with a `NULL` one:
+no display's loop selects those rows and the playlist page, which lists by
+playlist, never shows them. And its `move_playlist_item` reads
+`SELECT id FROM playlist_items ORDER BY play_order` across the *whole table* and
+renumbers every row it finds to `1..n`, so one arrow click on one screen's
+playlist interleaves the order of all of them. The new code anticipates the
+first half of that — `ordered_ids_in_playlist` matches the playlist with `IS`, so
+`NULL` rows form their own list rather than joining someone's — but nothing
+anticipates the renumbering, and nothing can undo it: the order it overwrote is
+gone. Keep a copy of the database file before upgrading, and use it if the binary
+goes back.
+
+**Declaring displays for the first time: kill the running Chromium, or reboot.**
+The controller deliberately does not kill the browser when it stops, and it skips
+starting one whenever the CDP port already answers — that is what lets an existing
+deployment launch Chromium from a session file. So on a machine that has been
+running, adding `--display foyer --display werkstatt` and restarting leaves
+`foyer` attached to the *pre-existing* browser on 9222, which was started under
+the old class `miniclientcontrol-9222`: the `assign [app_id="miniclientcontrol-foyer"]`
+rule never matches it, so that screen is placed by whatever the window manager
+would have done anyway. It also leaves that display's `browser_pid` unset, because
+the controller did not start the process — and without it the audio panel cannot
+single out a cast's own stream on that screen. `werkstatt` spawns correctly on
+9223. A reboot resolves it on its own; killing the old Chromium before the restart
+resolves it now.
+
 ### Placing the windows
 
 Still the window manager's job, which is where this project has always put it.

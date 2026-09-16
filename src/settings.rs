@@ -689,8 +689,12 @@ pub fn routes() -> Router<AppState> {
 /// Includes the layer of the item *currently on screen*, so the admin preview
 /// shows what is really out there rather than the global half of it.
 pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
-    // The primary display's item: the preview is unscoped, like the legacy API
-    // paths, and Task 8 is where an unscoped request learns to name a display.
+    // The primary display's item, permanently: the overlay configuration is
+    // global, so the only per-display thing in this payload is which item the
+    // layer belongs to. Answering for the first screen is the compromise --
+    // refusing an unscoped request the way the display-owned paths do would take
+    // the preview away from every multi-screen deployment to tell it something
+    // that is the same on all of them.
     let current = *state.primary().current_item_id.lock().await;
     let item = match current {
         Some(id) => crate::db::load_item_overlay(&state.pool, id).await,

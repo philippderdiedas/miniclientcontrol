@@ -90,8 +90,11 @@ async fn create(State(state): State<AppState>, Json(payload): Json<NameRequest>)
             crate::display::offer_first_playlist(&state).await;
             // The loop reads its assignment fresh each pass, but poking it makes
             // the screen follow now rather than at the end of whatever it is
-            // showing.
-            state.primary().playlist_signal.notify_one();
+            // showing. Every screen, like every other playlist-affecting write:
+            // the offer above may have just handed this playlist to the one
+            // declared display, and a helper that skips nobody cannot be the
+            // reason a screen misses it.
+            state.notify_playlist_changed();
             Json(json!({ "id": id })).into_response()
         }
         Err(e) => {
