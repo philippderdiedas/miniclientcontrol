@@ -117,7 +117,7 @@ has three kinds of client, and they need different treatment:
 |---|---|---|
 | **Operator** | `/admin.html`, `/playlist.html`, `/assets.html`, `/displays.html`, `/webhooks.html`, `/api/*` | required, when configured |
 | **Display browser** | `/uploads/*`, `/pdf_viewer.html`, the pdf.js files, `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`, `/api/cast/state` | exempt, **loopback only** |
-| **Cast guest** | `/`, `/index.html`, `/cast.html`, `/cast.js`, `/cast_display.html`, `/api/cast/{ws,claim,pair,info,qr.svg,audio}` | exempt, **from any address** |
+| **Cast guest** | `/`, `/index.html`, `/cast.html`, `/cast.js`, `/audio.js`, `/cast_display.html`, `/api/cast/{ws,claim,pair,info,qr.svg,audio}` | exempt, **from any address** |
 
 The display browser is driven over CDP and cannot present credentials, so
 requiring them there blanks the signage. The guest is somebody's laptop on the

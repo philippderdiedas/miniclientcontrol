@@ -227,9 +227,10 @@ shorter to type, and fewer modules in the QR code.
 
 Binding a port below 1024 needs a privilege this process does not have by
 default, so failing to get it is ordinary and silent. Granting it is a deployment
-decision — see [deployment.md](deployment.md#giving-the-controller-port-443). On a
-machine driving two displays only one of the two can have 443; the other takes
-3443 and its URL keeps the port.
+decision — see [deployment.md](deployment.md#giving-the-controller-port-443). One
+controller needs 443 once however many screens it drives; it is two *controllers*
+on one machine that compete for it, and the one that loses takes 3443 and keeps
+the port in its URL.
 
 ## HTTPS is not optional
 

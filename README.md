@@ -92,17 +92,20 @@ If credentials are enabled, the control UI and the API require authentication.
 
 The operator UI (`/admin.html`, `/playlist.html`, `/assets.html`,
 `/displays.html`, `/webhooks.html`, `/api/*`) requires the credentials. The pages
-the *display* browser renders are exempt, but
-**only when requested from loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
-`/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`,
-`/cast_display.html`, `/cast.js` and `/api/cast/state`.
+the *display* browser renders are exempt, but **only when requested from
+loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`,
+`/pdf.worker.min.js`, `/autoscroll.js`, `/no_content.svg`,
+`/empty_playlist.html`, `/logo.svg` and `/api/cast/state`.
 Chromium is driven over CDP and cannot present credentials, so without this
 exemption enabling Basic Auth leaves the screen showing 401 errors. Anything
 reaching those paths from another host still has to authenticate.
 
-The cast sender pages (`/`, `/index.html`, `/cast.js`, `/api/cast/ws`,
-`/api/cast/pair`, `/api/cast/info`) are exempt from Basic Auth **from any
-address**, because the sender is a guest's laptop rather than the operator.
+The cast pages are a separate list and are exempt **from any address**, because
+the sender is a guest's laptop rather than the operator: `/`, `/index.html`,
+`/cast.html`, `/cast.js`, `/audio.js`, `/cast_display.html` and
+`/api/cast/{ws,claim,pair,info,qr.svg,audio}`. `/cast_display.html` and
+`/cast.js` are on *this* list and not the loopback one — the display browser
+fetches them too, but so does every guest.
 Control who may cast in the admin UI, or remove the feature entirely with
 `--disable-cast`.
 
@@ -124,6 +127,7 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --cast-cert-san <name,...>   (extra hostnames/IPs for the certificate)
 --cast-auth <none|code|pairing>  (default: none)
 --cast-code <string>         (required when --cast-auth=code)
+--cast-max-edge <px>         (cap the longest frame edge a cast may send)
 --cast-stun-url <url>        (optional, only if LAN ICE fails)
 --no-launch-browser          (connect to an existing browser only)
 --chromium <path>            (autodetected when unset)

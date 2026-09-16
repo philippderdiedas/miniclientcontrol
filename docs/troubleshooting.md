@@ -31,6 +31,26 @@ reconnecting forever. Check that the CDP port is listening, and that the unit ha
 `DISPLAY` in its environment — a controller that starts the browser needs it, one
 that only spoke CDP did not.
 
+**A declared screen sits on the idle page while the other one plays.**
+It has no playlist assigned, which is a state and not a fault: a display with no
+`playlist_id` shows the idle page deliberately. The automatic hand-over of the
+oldest playlist happens **only when exactly one screen is declared** — it exists
+to carry a single-screen device across the upgrade, and handing the foyer a list
+made for the workshop would be wrong content rather than an obvious gap. So a
+device that used to play something and has just been given two `--display` flags
+comes up with both screens idle, by design. Assign them on `/displays.html`, or
+check `GET /api/displays` for a `playlist_id` of `null`. The startup log says so
+too, once a playlist exists: *"N display(s) have no playlist yet"*.
+
+**The controller exits immediately after `--display` was added.**
+That is the intended reaction to a command line it cannot honour, and the message
+names the reason: `--chromium-class`, `--chromium-user-data-dir` and a non-default
+`--cdp-url` are derived from the display's name and position and are refused
+rather than silently ignored, as is a `--class` smuggled through
+`--chromium-arg`, a duplicate name or port, a name outside `[A-Za-z0-9_-]`, and a
+`--cast-display` naming a screen that is not declared. See
+[deployment.md](deployment.md#flags-that-are-refused-rather-than-ignored).
+
 **A playlist URL shows Chromium's privacy warning.**
 It should not: invalid certificates are accepted deliberately. If it happens
 anyway, the connection to CDP is the thing to look at, not the certificate.
@@ -120,9 +140,13 @@ curl -s http://127.0.0.1:9222/json | python3 -c \
   'import json,sys; print([t["url"] for t in json.load(sys.stdin) if t["type"]=="page"])'
 ```
 
-**Where the windows are, with two displays** — `i3-msg -t get_tree` and look for
-`window_properties.class` against the output name, or `i3-msg -t get_workspaces`
-for the workspace-to-output mapping.
+**Where the windows are, with several displays** — each browser carries the class
+`miniclientcontrol-<name>`, which is `WM_CLASS` under X11 and the `app_id` under
+Wayland. Under i3, `i3-msg -t get_tree` and look for `window_properties.class`
+against the output name, or `i3-msg -t get_workspaces` for the
+workspace-to-output mapping. Under sway, `swaymsg -t get_tree` and look for
+`app_id`, or `swaymsg -t get_outputs` for the connector names the `assign` lines
+refer to.
 
 **What the cast is actually doing** — the display page keeps its peer connection in
 a top-level binding, so a CDP `Runtime.evaluate` of `peer.pc.connectionState`,

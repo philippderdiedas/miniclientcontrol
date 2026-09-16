@@ -326,9 +326,12 @@ runtime against the identical payload rather than rebuilding the badge in the
 page — two renderings of the same settings drift, and then somebody hunts a
 display bug that is really a UI bug.
 
-`AppState::overlay_signal` is what makes an edit land on the item *already* on
-screen. `PUT /api/playlist/{id}` pokes it too, because the item being edited may
-be the one showing. **All three places the loop can park must handle it**: the
+`Display::overlay_signal` is what makes an edit land on the item *already* on
+screen — poked for **every** screen through `AppState::notify_overlay_changed`,
+because the global overlay is the building's and an edited item can be on any
+screen showing its playlist. `PUT /api/playlist/{id}` pokes it too, because the
+item being edited may be the one showing. **All three places the loop can park
+must handle it**: the
 per-item `select!` (which recomputes the remaining time rather than restarting it,
 so an overlay edit cannot extend an item), the idle-screen wait, and
 `run_override_loop` — a cast or a pinned page can stand for hours, which is

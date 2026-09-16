@@ -68,9 +68,23 @@ Environment=RUST_LOG=info
 ExecStart=/home/pi/miniclientcontrol/miniclientcontrol \
     --database-path /home/pi/miniclientcontrol/miniclient.db \
     --assets-dir /home/pi/miniclientcontrol/assets \
+    --display foyer --display werkstatt \
     --public-url mdns
 Restart=always
 RestartSec=10
+```
+
+Drop the two `--display` lines for a single-screen device: with no `--display` at
+all the controller drives one implicit screen exactly as it always did (see
+[Declaring the screens](#declaring-the-screens-a-deployment-drives)). Both flags
+can come from the environment instead, which is the form to reach for when the
+unit is generated: `--display` reads **`DISPLAYS`** — note the plural, so the
+X11 `DISPLAY` above is not mistaken for a screen declaration — and takes a
+comma-separated list, and `--cast-display` reads `CAST_DISPLAY`.
+
+```ini
+Environment=DISPLAYS=foyer,werkstatt
+Environment=CAST_DISPLAY=foyer
 ```
 
 Started from the session, typically by the window manager:
@@ -178,7 +192,9 @@ Alongside any `--display`, these are startup errors:
   placement failure a named display exists to avoid. Without any `--display` it is
   still accepted, because there is no second window for it to collide with and
   refusing would break a command line that works today.
-- `--cast-display` naming a screen that is not declared. Checked at startup rather
+- `--cast-display` naming a screen that is not declared — and this one applies
+  **with or without `--display`**, since the implicit screen is called `default`
+  and `--cast-display foyer` names nothing there either. Checked at startup rather
   than at use, because `AppState::cast_display()` falls back to the primary
   display rather than panicking: the mistake would otherwise surface hours later
   as a guest scanning a QR code and the picture appearing on the wrong panel.
