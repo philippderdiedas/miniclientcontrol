@@ -15,7 +15,7 @@ async def main():
 
         # operator overrules the cast mid-session
         http("POST", "/api/override", {"url": "http://example.invalid/operator"})
-        http("DELETE", "/api/cast/session")
+        http("DELETE", "/api/displays/default/cast/session")
         await asyncio.sleep(0.5)
         current = http("GET", "/api/override")[1]
         check("the operator's newer choice wins over the pre-cast one",
@@ -27,7 +27,7 @@ async def main():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
-        http("DELETE", "/api/cast/session")
+        http("DELETE", "/api/displays/default/cast/session")
         await asyncio.sleep(0.4)
         check("override fully cleared", http("GET", "/api/override")[1]["active"] is False)
         sw.close(); dw.close()

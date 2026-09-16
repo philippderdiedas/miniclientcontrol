@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::Message;
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -471,10 +471,18 @@ pub async fn release_session(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Operator override: cut the cast short and put the playlist back.
-pub async fn stop_cast(State(state): State<AppState>) -> impl IntoResponse {
-    end_session(&state, &state.primary(), "operator").await;
-    StatusCode::NO_CONTENT
+/// Operator override: cut this screen's cast short and put its playlist back.
+///
+/// Scoped to the named display -- unlike the settings-level kill switch in
+/// `settings.rs`, which loops every screen, this stops the one the operator is
+/// looking at and leaves the others running.
+pub async fn stop_cast_for(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let display = match crate::display::resolve(&state, Some(&name)) {
+        Ok(display) => display,
+        Err(response) => return response,
+    };
+    end_session(&state, &display, "operator").await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize, Default)]

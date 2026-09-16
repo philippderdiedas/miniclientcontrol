@@ -229,7 +229,7 @@ async def main_flow():
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
         check("override pinned", is_cast_display(http("GET", "/api/override")[1]["url"]))
-        status, _ = http("DELETE", "/api/cast/session")
+        status, _ = http("DELETE", "/api/displays/default/cast/session")
         check("DELETE session returns 204", status == 204, status)
         await asyncio.sleep(0.3)
         check("override cleared immediately", http("GET", "/api/override")[1]["active"] is False)

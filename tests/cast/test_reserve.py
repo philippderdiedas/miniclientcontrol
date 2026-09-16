@@ -44,18 +44,6 @@ async def main():
         check("the same address may re-claim (reload, second click)", status == 200, (status, body))
         ticket = body["ticket"]
 
-        print("\n[18b] a reservation does not make the holder look busy to itself")
-        # Telling a guest "someone else is casting" while they hold the reservation
-        # is a dead end they cannot act on, and the claim endpoint already lets the
-        # same address re-claim -- the two answers have to agree.
-        check("not busy for the address that holds it",
-              http("GET", "/api/cast/info")[1]["screens"][0]["busy"] is False,
-              http("GET", "/api/cast/info")[1])
-        req = urllib.request.Request(f"https://{LAN}:{TLS}/api/cast/info")
-        with urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context()) as res:
-            other = json.load(res)
-        check("but busy for a different address", other["screens"][0]["busy"] is True, other)
-
         print("\n[19] the ticket is what opens the socket")
         sr, sw = await ws("sender", ticket="deadbeef" * 4)
         frame = await wsclient.recv_json(sr)
@@ -86,10 +74,40 @@ async def main():
         check("another address can claim now", claim_from_lan()[0] == 200)
 
         print("\n[21] the operator can clear a bare reservation")
-        http("DELETE", "/api/cast/session")
+        http("DELETE", "/api/displays/default/cast/session")
         check("operator stop clears the reservation too",
               http("GET", "/api/cast/state")[1]["reserved"] is False)
         check("and the slot is free", claim()[0] == 200)
+
+    print("\n[18b] busy is judged per screen, not once for the whole venue")
+    # [18] already proved a holder is not "busy" to itself, but on a single
+    # default display that would pass identically even if `busy` were computed
+    # once for the venue and just repeated into every entry -- the mechanical
+    # patch that followed Task 4 did exactly that, indexing "screens"[0] and
+    # never noticing the array could hold more than one truth. Two declared
+    # screens, only one of them reserved, is what actually tells them apart:
+    # the reserved screen has to flip with the asking address while the
+    # untouched one stays "not busy" for both.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        status, body = claim(display="werkstatt")
+        check("claim on werkstatt succeeds", status == 200 and body.get("ticket"), (status, body))
+
+        def screen(info, name):
+            return next(s for s in info["screens"] if s["name"] == name)
+
+        status, info = http("GET", "/api/cast/info")
+        check("not busy on the screen the holder itself reserved",
+              screen(info, "werkstatt")["busy"] is False, info)
+        check("the untouched screen is not busy either",
+              screen(info, "foyer")["busy"] is False, info)
+
+        req = urllib.request.Request(f"https://{LAN}:{TLS}/api/cast/info")
+        with urllib.request.urlopen(req, timeout=5, context=ssl._create_unverified_context()) as res:
+            other = json.load(res)
+        check("but busy for a different address, on the reserved screen only",
+              screen(other, "werkstatt")["busy"] is True, other)
+        check("the screen nobody claimed stays not-busy for that address too",
+              screen(other, "foyer")["busy"] is False, other)
 
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))

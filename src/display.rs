@@ -422,6 +422,10 @@ pub fn routes() -> Router<AppState> {
                 .post(crate::handlers::set_override_for)
                 .delete(crate::handlers::clear_override_for),
         )
+        .route(
+            "/api/displays/{name}/cast/session",
+            axum::routing::delete(crate::cast::stop_cast_for),
+        )
 }
 
 async fn list(State(state): State<AppState>) -> Response {

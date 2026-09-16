@@ -52,7 +52,9 @@ mod room_audio;
 mod signaling;
 mod url;
 
-pub use api::{cast_info, cast_state, claim_session, release_session, start_pairing, stop_cast};
+pub use api::{
+    cast_info, cast_state, claim_session, release_session, start_pairing, stop_cast_for,
+};
 pub use room_audio::{apply_audio, cast_process_ids, control_audio, read_audio};
 pub use signaling::cast_ws;
 pub use url::{cast_qr, qr_matrix, sender_url};
@@ -302,7 +304,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/cast/ws", get(cast_ws))
         .route("/api/cast/state", get(cast_state))
-        .route("/api/cast/session", axum::routing::delete(stop_cast))
         .route("/api/cast/pair", post(start_pairing))
         .route("/api/cast/info", get(cast_info))
         .route("/api/cast/qr.svg", get(cast_qr))

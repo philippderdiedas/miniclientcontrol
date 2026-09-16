@@ -119,7 +119,7 @@ async def main():
         reader, writer = await open_page_socket()
         await present(writer, MENU)
         until(lambda: override().get("url") == MENU)
-        http("DELETE", "/api/cast/session")
+        http("DELETE", "/api/displays/default/cast/session")
         check("the screen goes back to the playlist",
               until(lambda: override().get("active") is not True), override())
         writer.close()
