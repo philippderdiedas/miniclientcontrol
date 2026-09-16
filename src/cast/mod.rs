@@ -507,6 +507,21 @@ async fn deactivate_display(state: &AppState, display: &Arc<Display>, reason: &'
     session.epoch += 1;
     drop(session);
 
+    // `audio_owner` is a leaf lock: acquired only here (and in `room_audio`),
+    // always released before any other lock is taken, and never held across
+    // one. That keeps it out of the settings -> cast_attempts -> cast ->
+    // override_item order entirely instead of adding an edge to it -- `cast` is
+    // already dropped above, so there is nothing this could invert. Released
+    // only if this display is still the recorded owner: a different screen that
+    // has since claimed the audio must not have its ownership erased by this
+    // one's unrelated teardown.
+    {
+        let mut owner = state.audio_owner.lock().await;
+        if owner.as_deref() == Some(display.name.as_str()) {
+            *owner = None;
+        }
+    }
+
     display.override_signal.notify_one();
     info!("Cast: display released, playlist resumes");
 
@@ -794,6 +809,7 @@ mod tests {
             locks: Default::default(),
             auth_cache: Default::default(),
             audio: Arc::new(crate::audio::Backend::Unavailable),
+            audio_owner: Default::default(),
             cast_attempts: Default::default(),
             webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
         }
@@ -917,6 +933,37 @@ mod tests {
             foyer.override_item.lock().await.is_none(),
             "activating one screen must not pin an override on another"
         );
+    }
+
+    /// The venue has one speaker pair. Whichever screen claims the room audio
+    /// first holds it until its own cast ends -- and ending it must free the
+    /// audio by itself, or the room stays mute until a restart.
+    #[tokio::test]
+    async fn the_second_screen_is_told_who_has_the_audio() {
+        let receiver = receiver().await;
+        let state = state_for_displays(&receiver, &["foyer", "werkstatt"]).await;
+        let foyer = state.display("foyer").unwrap();
+        let werkstatt = state.display("werkstatt").unwrap();
+        activate_display(&state, &foyer, Showing::Cast, Some("10.0.0.5".parse().unwrap())).await;
+        activate_display(&state, &werkstatt, Showing::Cast, Some("10.0.0.6".parse().unwrap())).await;
+
+        *state.audio_owner.lock().await = Some("foyer".to_string());
+        assert_eq!(
+            state.audio_owner.lock().await.as_deref(),
+            Some("foyer"),
+            "the first caster to ask holds it"
+        );
+
+        // The owner's cast ends; the audio must free itself.
+        deactivate_display(&state, &foyer, "test").await;
+        assert_eq!(
+            *state.audio_owner.lock().await,
+            None,
+            "a cast that ends must release the room audio, or the next guest is mute"
+        );
+
+        // ... and the screen that never had it is unaffected either way.
+        assert!(werkstatt.cast.lock().await.is_active());
     }
 
     #[tokio::test]

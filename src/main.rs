@@ -279,6 +279,7 @@ async fn main() -> Result<()> {
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
+        audio_owner: Arc::new(Mutex::new(None)),
         webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 

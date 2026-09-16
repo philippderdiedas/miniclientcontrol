@@ -350,6 +350,28 @@ pub async fn claim_session(
         return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
     }
 
+    // Checked before `display::resolve`, whose unknown-name path answers with
+    // the full list of declared screens (`display::unknown`) -- exactly the
+    // enumeration `/api/cast/info` is careful to avoid by omitting `screens`
+    // entirely while disabled. Resolving first would let a guest try names
+    // until one stops 404ing while the operator switch is off, learning the
+    // venue's screens for a feature they cannot use. Neither switch here names
+    // a screen, so the refusal says nothing about what exists.
+    let enabled = {
+        let settings = state.settings.read().await;
+        match payload.mode {
+            ClaimMode::Cast => settings.cast_enabled,
+            ClaimMode::Page => settings.guest_pages_enabled,
+        }
+    };
+    if !enabled {
+        let message = match payload.mode {
+            ClaimMode::Cast => "Übertragung ist derzeit deaktiviert.",
+            ClaimMode::Page => "Webseiten sind derzeit nicht erlaubt.",
+        };
+        return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
+    }
+
     let addr = peer.ip();
     let display = match crate::display::resolve(&state, payload.display.as_deref()) {
         Ok(display) => display,

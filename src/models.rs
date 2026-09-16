@@ -404,6 +404,15 @@ pub struct AppState {
     pub auth_cache: Arc<Mutex<Option<String>>>,
     /// How the venue's audio is controlled, decided once at startup.
     pub audio: Arc<crate::audio::Backend>,
+    /// Which screen's cast currently owns the room audio, if any.
+    ///
+    /// The venue has one speaker pair, so audio is one resource however many
+    /// screens are casting. Claimed by the first cast to turn sound on and
+    /// released on that cast's teardown. Validated against that display's
+    /// `is_active()` on every read, so a cast that dies without a clean teardown
+    /// frees the audio by itself rather than leaving the room mute until a
+    /// restart.
+    pub audio_owner: Arc<Mutex<Option<String>>>,
     /// Failed pairing-code attempts per source address, controller-wide.
     ///
     /// Deliberately not per display: five tries is five tries for the venue, not

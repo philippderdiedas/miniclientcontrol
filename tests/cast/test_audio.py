@@ -100,6 +100,39 @@ async def main():
         check("access ends with the cast", status == 403, (status, body))
         dw.close()
 
+    print("\n[32] the room has one speaker pair, whichever screen claims it first")
+    with Server(display="foyer:9931,werkstatt:9932"):
+        sr1, sw1 = await ws("sender", display="foyer")
+        await wsclient.recv_json(sr1)
+        await asyncio.sleep(0.4)
+        sr2, sw2 = await ws("sender", display="werkstatt")
+        await wsclient.recv_json(sr2)
+        await asyncio.sleep(0.4)
+
+        status, body = http("POST", "/api/cast/audio?screen=foyer",
+                             {"target": "sink", "action": "mute", "value": False})
+        check("foyer's own caster may turn the room's audio on",
+              status != 409, (status, body))
+
+        status, body = http("POST", "/api/cast/audio?screen=werkstatt",
+                             {"target": "sink", "action": "mute", "value": False})
+        check("a guest may not take audio from another guest's cast",
+              status == 409 and "foyer" in body.get("error", ""), (status, body))
+
+        status, body = http("GET", "/api/cast/audio?screen=werkstatt")
+        check("reading its own panel is unaffected by not owning the room audio",
+              status == 200, (status, body))
+
+        sw1.close()
+        await asyncio.sleep(6.5)  # SENDER_GRACE plus margin
+
+        status, body = http("POST", "/api/cast/audio?screen=werkstatt",
+                             {"target": "sink", "action": "mute", "value": False})
+        check("foyer's cast ending frees the room for the next screen",
+              status != 409, (status, body))
+
+        sw2.close()
+
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
 sys.exit(1 if failures else 0)
