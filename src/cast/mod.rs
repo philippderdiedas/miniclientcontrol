@@ -396,7 +396,7 @@ async fn activate_display(
     }
 
     let (url, scroll) = match &showing {
-        Showing::Cast => (cast_display_url(state.args.port), ScrollMode::None),
+        Showing::Cast => (cast_display_url(state.args.port, &display.name), ScrollMode::None),
         Showing::Page { url, scroll } => (url.to_string(), scroll.clone()),
         Showing::Nothing => return,
     };
@@ -430,7 +430,7 @@ async fn activate_display(
             // the cast instead. `override.set` stays, because pinning the
             // display is exactly what did happen.
             state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
-                url: cast_display_url(state.args.port),
+                url: cast_display_url(state.args.port, &display.name),
                 source: "cast",
             });
             // Only a cast has a display peer to wait for. A page has none, and
@@ -470,7 +470,7 @@ async fn deactivate_display(state: &AppState, display: &Arc<Display>, reason: &'
     }
 
     let ours = match &session.showing {
-        Showing::Cast => Some(cast_display_url(state.args.port)),
+        Showing::Cast => Some(cast_display_url(state.args.port, &display.name)),
         Showing::Page { url, .. } => Some(url.to_string()),
         Showing::Nothing => None,
     };

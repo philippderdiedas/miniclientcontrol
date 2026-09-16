@@ -80,9 +80,20 @@
     // `/api/cast/state` rather than `/api/cast/info`: this page is only ever
     // rendered by the display browser over loopback, and it is the loopback
     // endpoint that also carries the standing code.
+    //
+    // `?screen=` names which display this is -- set by `empty_playlist_url`,
+    // the only place that navigates here, so it is always this screen's own
+    // name. Without it, a deployment with more than one declared display would
+    // have no default to resolve against and every idle screen would get a 409
+    // instead of its own code.
+    const screen = new URLSearchParams(location.search).get('screen');
+    const stateUrl = screen
+      ? `/api/cast/state?screen=${encodeURIComponent(screen)}`
+      : '/api/cast/state';
+
     async function showCast() {
       try {
-        const res = await fetch('/api/cast/state');
+        const res = await fetch(stateUrl);
         if (!res.ok) return;
         const cast = await res.json();
         if (!cast.enabled || cast.hard_disabled) {

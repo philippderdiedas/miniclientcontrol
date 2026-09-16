@@ -299,7 +299,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // This branch re-runs every 5s while the playlist stays empty. Only
                 // navigate if we are not already on the placeholder, otherwise the
                 // idle screen reloads itself every 5 seconds.
-                let empty_url = empty_playlist_url(state.args.port);
+                let empty_url = empty_playlist_url(state.args.port, &display_name);
                 let already_showing = match page.url().await {
                     Ok(Some(current)) => current == empty_url,
                     _ => false,
@@ -883,8 +883,12 @@ fn no_content_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/no_content.svg", port)
 }
 
-fn empty_playlist_url(port: u16) -> String {
-    format!("http://127.0.0.1:{}/empty_playlist.html", port)
+fn empty_playlist_url(port: u16, display: &str) -> String {
+    format!(
+        "http://127.0.0.1:{}/empty_playlist.html?screen={}",
+        port,
+        encode(display)
+    )
 }
 
 /// Whether the item on screen is still one this display should be showing.

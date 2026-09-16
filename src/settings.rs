@@ -772,7 +772,7 @@ pub async fn overlay_payload(
                 // share a screen that refuses every sender is worse than silence.
                 // Same while one is running: the slot is taken, so whoever scans
                 // it would be turned away.
-                "cast" if cast_enabled && !casting => crate::cast::sender_url(state),
+                "cast" if cast_enabled && !casting => crate::cast::sender_url(state, None),
                 "cast" => String::new(),
                 _ => overlay.qr_text.clone(),
             };

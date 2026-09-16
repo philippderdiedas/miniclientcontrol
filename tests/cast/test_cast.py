@@ -13,6 +13,16 @@ def check(name, ok, detail=""):
     if not ok:
         failures.append(name)
 
+def is_cast_display(url):
+    """Whether an override URL is the cast page, for whichever screen.
+
+    `cast_display_url` appends `?screen=<name>` so a receiver knows which
+    display it is; a plain `endswith("cast_display.html")` would stop matching
+    the moment a query string follows it, so every case that asks "is this the
+    cast page" goes through here instead of repeating the split.
+    """
+    return url.split("?", 1)[0].endswith("cast_display.html")
+
 def http(method, path, body=None, port=None):
     url = f"http://127.0.0.1:{port or HTTP}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -133,7 +143,7 @@ async def main_flow():
         await asyncio.sleep(0.4)
         status, ov = http("GET", "/api/override")
         check("cast pinned the override to the cast page",
-              ov["active"] and ov["url"].endswith("/cast_display.html"), ov)
+              ov["active"] and is_cast_display(ov["url"]), ov)
 
         # relay in both directions, payload untouched
         offer = {"sdp": {"type": "offer", "sdp": "v=0 fake"}}
@@ -165,7 +175,7 @@ async def main_flow():
         sw.close()
         await asyncio.sleep(1.0)
         status, ov = http("GET", "/api/override")
-        check("override still held during the grace period", ov["active"] and ov["url"].endswith("cast_display.html"), ov)
+        check("override still held during the grace period", ov["active"] and is_cast_display(ov["url"]), ov)
 
         await asyncio.sleep(5.5)
         status, ov = http("GET", "/api/override")
@@ -205,7 +215,7 @@ async def main_flow():
 
         status, ov = http("GET", "/api/displays/werkstatt/override")
         check("the claimed screen is pinned to the cast page",
-              status == 200 and ov["active"] and ov["url"].endswith("/cast_display.html"), ov)
+              status == 200 and ov["active"] and is_cast_display(ov["url"]), ov)
 
         status, ov = http("GET", "/api/displays/foyer/override")
         check("the other, unclaimed screen is untouched",
@@ -218,7 +228,7 @@ async def main_flow():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
-        check("override pinned", http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
+        check("override pinned", is_cast_display(http("GET", "/api/override")[1]["url"]))
         status, _ = http("DELETE", "/api/cast/session")
         check("DELETE session returns 204", status == 204, status)
         await asyncio.sleep(0.3)

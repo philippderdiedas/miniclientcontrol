@@ -10,7 +10,7 @@ import asyncio, json, os, shutil, socketserver, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cdp
-from test_cast import check, failures, http
+from test_cast import check, failures, http, is_cast_display
 
 SP = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "debug", "miniclientcontrol")
@@ -99,7 +99,7 @@ async def main():
         await sender.eval("document.getElementById('shareCamera').click()")
 
         # the controller should pin the display and the display browser follow
-        pinned = wait_for(lambda: http("GET", "/api/override", port=HTTP)[1]["url"].endswith("cast_display.html"), 20)
+        pinned = wait_for(lambda: is_cast_display(http("GET", "/api/override", port=HTTP)[1]["url"]), 20)
         check("cast pinned the display override", pinned is not None,
               http("GET", "/api/override", port=HTTP)[1])
 

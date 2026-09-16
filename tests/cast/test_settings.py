@@ -2,7 +2,7 @@
 import asyncio, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsclient
-from test_cast import Server, http, ws, claim, check, failures
+from test_cast import Server, http, ws, claim, check, failures, is_cast_display
 
 def settings():
     return http("GET", "/api/settings")[1]
@@ -73,7 +73,7 @@ async def main():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
-        check("cast running", http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
+        check("cast running", is_cast_display(http("GET", "/api/override")[1]["url"]))
 
         status, _ = put({"cast_enabled": False})
         check("settings update accepted", status == 200, status)

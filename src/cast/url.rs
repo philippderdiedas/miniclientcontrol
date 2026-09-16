@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tracing::warn;
 
-use crate::models::AppState;
+use crate::models::{AppState, Display};
 
 /// The address a guest is handed. Deliberately the bare root: short enough to
 /// read off a screen and type by hand. `--public-url` decides whether that is the
@@ -11,13 +11,26 @@ use crate::models::AppState;
 /// The URL a guest is told to open. Resolved every time rather than stored: it
 /// depends on `--public-url`, on the port actually bound, and on the machine's
 /// current address, all of which can change without anybody editing anything.
-pub fn sender_url(state: &AppState) -> String {
-    if state.managed_cert {
-        if let Some(url) = crate::tls::managed_base_url(state.cast_tls_port) {
-            return url;
-        }
+///
+/// `display` names the screen the guest should land on. `None` returns the bare
+/// root -- what a chooser QR encodes, letting the guest pick among several
+/// screens. `Some` appends `?screen=<name>`, so scanning it goes straight to one
+/// screen without a picker. Every call site today passes `None`: which one a
+/// caller should use is an operator setting a later task adds, not a decision
+/// this one makes.
+pub fn sender_url(state: &AppState, display: Option<&Display>) -> String {
+    let base = if state.managed_cert {
+        crate::tls::managed_base_url(state.cast_tls_port)
+    } else {
+        None
+    };
+    let base = base.unwrap_or_else(|| {
+        crate::tls::public_base_url(&state.args.public_url, state.cast_tls_port)
+    });
+    match display {
+        Some(display) => format!("{base}?screen={}", urlencoding::encode(&display.name)),
+        None => base,
     }
-    crate::tls::public_base_url(&state.args.public_url, state.cast_tls_port)
 }
 
 /// QR code for the guest URL, as SVG.
@@ -26,7 +39,7 @@ pub fn sender_url(state: &AppState) -> String {
 /// client-side library would have to be vendored, and an SVG the display can
 /// scale is a few hundred bytes.
 pub async fn cast_qr(State(state): State<AppState>) -> Response {
-    qr_svg(&sender_url(&state))
+    qr_svg(&sender_url(&state, None))
 }
 
 /// The QR code as a module matrix, one string of `0`/`1` per row.
@@ -86,6 +99,10 @@ pub fn qr_svg(text: &str) -> Response {
         .into_response()
 }
 
-pub(super) fn cast_display_url(port: u16) -> String {
-    format!("http://127.0.0.1:{}/cast_display.html", port)
+pub(super) fn cast_display_url(port: u16, display: &str) -> String {
+    format!(
+        "http://127.0.0.1:{}/cast_display.html?screen={}",
+        port,
+        urlencoding::encode(display)
+    )
 }

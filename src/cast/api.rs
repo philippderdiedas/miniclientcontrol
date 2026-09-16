@@ -197,7 +197,7 @@ pub async fn cast_state(
     State(state): State<AppState>,
     Query(query): Query<ScreenQuery>,
 ) -> Response {
-    let sender_url = sender_url(&state);
+    let sender_url = sender_url(&state, None);
     // Resolved once per handler and passed on, never resolved again further
     // down: one request must not read one session and write another.
     let display = match crate::display::resolve(&state, query.screen.as_deref()) {
@@ -248,7 +248,7 @@ pub async fn cast_info(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    let sender_url = sender_url(&state);
+    let sender_url = sender_url(&state, None);
     let (cast_enabled, page_enabled, auth) = {
         let settings = state.settings.read().await;
         (

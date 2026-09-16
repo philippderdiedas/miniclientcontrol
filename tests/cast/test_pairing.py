@@ -2,7 +2,7 @@
 import asyncio, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsclient
-from test_cast import Server, http, ws, claim, check, failures, HTTP
+from test_cast import Server, http, ws, claim, check, failures, HTTP, is_cast_display
 
 async def main():
     print("\n[7] pairing mode: the code only exists on the display")
@@ -37,7 +37,7 @@ async def main():
 
         await asyncio.sleep(0.4)
         check("pairing pins the display so the code is visible",
-              http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
+              is_cast_display(http("GET", "/api/override")[1]["url"]))
 
         status, body = claim("ZZZZ")
         check("wrong pairing code refused", status == 403, (status, body))
