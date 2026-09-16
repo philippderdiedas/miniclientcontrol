@@ -98,11 +98,11 @@ pub enum Role {
     Display,
 }
 
-pub(super) struct Peer {
+struct Peer {
     tx: mpsc::UnboundedSender<Message>,
 }
 
-pub(super) struct Pairing {
+struct Pairing {
     code: String,
     expires_at: Instant,
 }
@@ -113,7 +113,7 @@ pub(super) struct Pairing {
 /// opens its screen picker. Without it a guest picks a window and only then
 /// learns the code was wrong, and two guests can be in the picker at once with
 /// one of them guaranteed to lose.
-pub(super) struct Reservation {
+struct Reservation {
     ticket: String,
     addr: IpAddr,
     expires_at: Instant,
@@ -184,24 +184,28 @@ impl DisplayLimits {
     }
 }
 
-/// Every field is `pub(super)` rather than private: the module is a directory,
-/// so the compiler's "nobody outside this file can corrupt the session"
-/// guarantee now covers `src/cast/` rather than one file. That is what the split
-/// cost. Nothing outside this directory may touch a field -- `is_active` and
-/// `showing_json` are the whole outside surface.
+/// Every field is private, not `pub(super)`: a `pub(super)` item defined
+/// *directly in this file* is scoped to this module's parent, which is the
+/// crate root, and `pub(super)` extends to every descendant of that -- the
+/// whole binary, not just `src/cast/`. Plain privacy is what actually stays
+/// confined here, because a private item defined in `cast`'s own file is
+/// visible to `cast` and to its descendant submodules (`api`, `signaling`,
+/// `room_audio`, `url`) alike -- the same reach the struct had as a single
+/// file, before the split. `is_active` and `showing_json` are the whole
+/// outside surface.
 #[derive(Default)]
 pub struct CastSession {
-    pub(super) sender: Option<Peer>,
-    pub(super) display: Option<Peer>,
-    pub(super) started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub(super) sender_addr: Option<IpAddr>,
+    sender: Option<Peer>,
+    display: Option<Peer>,
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    sender_addr: Option<IpAddr>,
     /// Whatever the override held before the cast took it over.
     previous_override: Option<OverrideItem>,
     /// True while the override on screen is the one we installed.
-    pub(super) holding_override: bool,
+    holding_override: bool,
     /// What we put there, which decides how teardown checks "is it still ours"
     /// and which grace period applies.
-    pub(super) showing: Showing,
+    showing: Showing,
     /// The mode of the reservation the current sender consumed, read by
     /// `register_peer` before the guest has said anything on the socket.
     pending_mode: ClaimMode,
@@ -214,18 +218,18 @@ pub struct CastSession {
     /// bounces and returns inside the grace period registers again, and must not
     /// announce a second cast for one session; and a pairing code that expires
     /// unused must not emit a `cast.ended` for a cast that never started.
-    pub(super) cast_announced: bool,
-    pub(super) pairing: Option<Pairing>,
-    pub(super) reservation: Option<Reservation>,
+    cast_announced: bool,
+    pairing: Option<Pairing>,
+    reservation: Option<Reservation>,
     attempts: HashMap<IpAddr, Attempts>,
     /// Last limit a display announced. Deliberately kept when a session ends: it
     /// is a property of the hardware, not of the cast, and remembering it is what
     /// lets the *next* sender constrain its capture before the first frame
     /// instead of showing a black rectangle until the display checks in.
-    pub(super) display_limits: Option<DisplayLimits>,
+    display_limits: Option<DisplayLimits>,
     /// Bumped on every activate/deactivate so a delayed watchdog task can tell
     /// whether the session it was launched for is still the current one.
-    pub(super) epoch: u64,
+    epoch: u64,
 }
 
 impl CastSession {
@@ -248,7 +252,7 @@ impl CastSession {
     /// Someone is streaming, or has claimed the slot and is still within the
     /// window to start. Expired reservations do not count, so an abandoned tab
     /// cannot block the display forever.
-    pub(super) fn is_taken(&self) -> bool {
+    fn is_taken(&self) -> bool {
         self.sender.is_some() || self.live_reservation().is_some()
     }
 
@@ -259,7 +263,7 @@ impl CastSession {
     /// guest cannot act on -- and it is their own reservation. The claim endpoint
     /// already lets the same address re-claim, so the answer here has to agree
     /// with that.
-    pub(super) fn taken_by_other(&self, addr: IpAddr) -> bool {
+    fn taken_by_other(&self, addr: IpAddr) -> bool {
         let sender_elsewhere = self.sender.is_some() && self.sender_addr != Some(addr);
         let reserved_elsewhere = self
             .live_reservation()
@@ -267,7 +271,7 @@ impl CastSession {
         sender_elsewhere || reserved_elsewhere
     }
 
-    pub(super) fn live_reservation(&self) -> Option<&Reservation> {
+    fn live_reservation(&self) -> Option<&Reservation> {
         self.reservation
             .as_ref()
             .filter(|held| Instant::now() < held.expires_at)
@@ -317,14 +321,14 @@ pub fn is_cast_public_path(path: &str) -> bool {
     )
 }
 
-pub(super) fn generate_code() -> String {
+fn generate_code() -> String {
     let mut rng = rand::rng();
     (0..CODE_LEN)
         .map(|_| CODE_CHARS[rng.random_range(0..CODE_CHARS.len())] as char)
         .collect()
 }
 
-pub(super) fn generate_ticket() -> String {
+fn generate_ticket() -> String {
     let mut rng = rand::rng();
     (0..32)
         .map(|_| char::from_digit(rng.random_range(0..16), 16).unwrap_or('0'))
@@ -333,7 +337,7 @@ pub(super) fn generate_ticket() -> String {
 
 /// Length-independent, branch-free comparison, so a wrong code cannot be found
 /// one character at a time by timing the response.
-pub(super) fn codes_match(expected: &str, provided: &str) -> bool {
+fn codes_match(expected: &str, provided: &str) -> bool {
     let a = expected.as_bytes();
     let b = provided.as_bytes();
     let mut diff = (a.len() ^ b.len()) as u8;
@@ -352,7 +356,7 @@ pub(super) fn codes_match(expected: &str, provided: &str) -> bool {
 /// because a guest replacing their page releases the old one first, and
 /// `deactivate_display` clears that field on its way out -- reading it here
 /// would announce the second and every later page with no address at all.
-pub(super) async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<IpAddr>) {
+async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<IpAddr>) {
     let mut session = state.cast.lock().await;
     if session.holding_override {
         return;
@@ -424,7 +428,7 @@ pub(super) async fn activate_display(state: &AppState, showing: Showing, sender_
 /// `reason` is what a webhook receiver is told about why the session ended, so
 /// it has to come from the caller: this function cannot tell an operator's stop
 /// from a watchdog's timeout from one guest page replacing another.
-pub(super) async fn deactivate_display(state: &AppState, reason: &'static str) {
+async fn deactivate_display(state: &AppState, reason: &'static str) {
     let mut session = state.cast.lock().await;
     if !session.holding_override {
         return;
@@ -586,7 +590,7 @@ fn watch_pairing_expiry(state: AppState, epoch: u64) {
     });
 }
 
-pub(super) fn error_frame(code: &str, message: &str) -> Message {
+fn error_frame(code: &str, message: &str) -> Message {
     Message::Text(json!({"type": "error", "code": code, "message": message}).to_string().into())
 }
 
