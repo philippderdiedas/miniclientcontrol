@@ -48,16 +48,6 @@ pub struct Args {
     #[arg(long = "display", env = "DISPLAYS", value_delimiter = ',')]
     pub display: Vec<String>,
 
-    /// Which declared display a cast pins. Defaults to the first declared.
-    ///
-    /// One session for the whole controller, on one screen: a cast per display
-    /// is its own piece of work, because `cast.rs` carries the session state
-    /// machine and one session is all a venue with a single guest needs. The
-    /// name is checked against the declared displays at startup, so a typo is a
-    /// refusal to boot rather than a cast landing on the wrong panel.
-    #[arg(long, env = "CAST_DISPLAY")]
-    pub cast_display: Option<String>,
-
     /// Basic auth username (set together with basic_auth_password)
     #[arg(long, env)]
     pub basic_auth_user: Option<String>,

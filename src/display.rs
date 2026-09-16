@@ -78,10 +78,6 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
             window_class: crate::chromium::window_class(args, port),
             user_data_dir: crate::chromium::user_data_dir(args, port),
         }];
-        // Checked on this branch too: the implicit display is called `default`,
-        // so `--cast-display foyer` without any `--display` names nothing and
-        // would otherwise fall back to the implicit screen without a word.
-        check_cast_display(args, &out)?;
         return Ok(out);
     }
 
@@ -162,25 +158,7 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
             user_data_dir: PathBuf::from(format!("/tmp/miniclientcontrol-chromium-{name}")),
         });
     }
-    check_cast_display(args, &out)?;
     Ok(out)
-}
-
-/// Refuse a `--cast-display` naming a screen this deployment does not drive.
-///
-/// At startup, because nothing downstream can tell a typo from a name: a cast
-/// resolves a screen without consulting this flag, so the mistake would surface
-/// as a guest scanning a QR code and the cast appearing on the wrong panel,
-/// hours later and with nothing in the log tying the two together.
-fn check_cast_display(args: &Args, out: &[DisplayConfig]) -> Result<(), String> {
-    if let Some(wanted) = &args.cast_display {
-        if !out.iter().any(|d| &d.name == wanted) {
-            return Err(format!(
-                "--cast-display '{wanted}' ist kein deklariertes Display."
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Whether an unscoped legacy path has to refuse.
@@ -677,28 +655,10 @@ mod tests {
 
     #[test]
     fn the_primary_display_is_the_first_declared() {
-        // `--cast-display` and the legacy unscoped API paths both resolve
-        // through this, so which one is primary is not an implementation detail.
+        // The legacy unscoped API paths resolve through this, so which one is
+        // primary is not an implementation detail.
         let configured = configure(&args_with(vec!["foyer".into(), "werkstatt".into()])).unwrap();
         assert_eq!(configured[0].name, "foyer");
-    }
-
-    #[test]
-    fn an_unknown_cast_display_fails_at_startup() {
-        let mut args = args_with(vec!["foyer".into()]);
-        args.cast_display = Some("kueche".into());
-        assert!(configure(&args).is_err());
-        args.cast_display = Some("foyer".into());
-        assert!(configure(&args).is_ok());
-
-        // Without `--display` the one screen is called `default`, and a name
-        // that is not it must be refused here as well -- that branch returns
-        // early, so it is the easy one to leave unchecked.
-        let mut implicit = args_with(vec![]);
-        implicit.cast_display = Some("foyer".into());
-        assert!(configure(&implicit).is_err());
-        implicit.cast_display = Some("default".into());
-        assert!(configure(&implicit).is_ok());
     }
 
     #[test]

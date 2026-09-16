@@ -118,7 +118,6 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --database-path <path>       (default: miniclient.db)
 --cdp-url <url>              (default: http://127.0.0.1:9222)
 --display <name[:port]>      (repeatable; one per screen this deployment drives)
---cast-display <name>        (which declared screen a cast pins; default: the first)
 --basic-auth-user <string>   (optional, must be set with password)
 --basic-auth-password <string> (optional, must be set with user)
 --disable-cast               (default: false)
