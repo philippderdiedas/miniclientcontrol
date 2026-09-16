@@ -8,4 +8,7 @@ tests/cast/*.db
 tests/cast/cert.pem*
 tests/cast/assets/
 tests/cast/*-profile/
+# A controller's log, kept by test_display.py's one case that asserts nothing
+# was logged. Scratch, and a SIGKILLed run does not get to remove it.
+tests/cast/*-stderr.log
 tests/cast/__pycache__/

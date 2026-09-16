@@ -386,10 +386,18 @@ def case_73():
     with Screens():
         first = make_playlist("Erste")
         second = make_playlist("Zweite")
+        # A third list for the workshop, rather than parking it on `second`.
+        # Parking it there is the one arrangement of two playlists in which the
+        # "not moved with it" check below cannot fail: the write under test moves
+        # the foyer *to* `second`, so a `PUT /api/displays/{name}` that wrote
+        # every row -- exactly the bug that check names -- would leave the
+        # workshop reading the same as it did before.
+        third = make_playlist("Dritte")
         first_item = add_item(first)
         second_item = add_item(second)
+        third_item = add_item(third)
         assign("foyer", first)
-        assign("werkstatt", second)
+        assign("werkstatt", third)
         check("the foyer starts on the first playlist",
               until(lambda: item_of("foyer") == first_item), (item_of("foyer"), first_item))
 
@@ -399,12 +407,15 @@ def case_73():
         assign("foyer", second)
         check("it moves to an item from the new playlist",
               until(lambda: item_of("foyer") == second_item), (item_of("foyer"), second_item))
+        # Below the 30s `until` above, or the wait would already have bounded this
+        # and the line would be saying nothing. Measured at well under a second:
+        # the write pokes `playlist_signal` and the per-item `select!` takes it.
         check("without waiting out the item it was showing",
-              time.time() - started < 60, round(time.time() - started, 1))
+              time.time() - started < 15, round(time.time() - started, 1))
         check("and the assignment reads back", playlist_id_of("foyer") == second,
               http("GET", "/api/displays")[1])
         check("the other screen was not moved with it",
-              item_of("werkstatt") == second_item and playlist_id_of("werkstatt") == second,
+              item_of("werkstatt") == third_item and playlist_id_of("werkstatt") == third,
               (item_of("werkstatt"), playlist_id_of("werkstatt")))
 
         # Clearing it is the other half of the same write, and the one an
@@ -412,8 +423,13 @@ def case_73():
         http("PUT", "/api/displays/foyer", {"playlist_id": None})
         check("clearing the assignment empties the screen",
               until(lambda: item_of("foyer") is None), item_of("foyer"))
-        check("and leaves the other one playing", item_of("werkstatt") == second_item,
-              item_of("werkstatt"))
+        # The stored assignment as well as what is on screen: the other loop is
+        # parked on a ten-minute item, so a clearing write that reached its row
+        # too would not show up in `current_item_id` for another nine minutes.
+        # The row is what changed, so the row is what this has to read.
+        check("and leaves the other one playing, still assigned",
+              item_of("werkstatt") == third_item and playlist_id_of("werkstatt") == third,
+              (item_of("werkstatt"), playlist_id_of("werkstatt")))
 
 
 def case_74():
@@ -426,12 +442,20 @@ def case_74():
         # this loop" observable from outside rather than just stored.
         foyer_first = add_item(foyer_list)
         foyer_second = add_item(foyer_list)
-        werkstatt_item = add_item(werkstatt_list)
+        # Two on the workshop for the mirror-image reason. A loop woken by
+        # somebody else's `override_signal` -- the bug this case is about --
+        # finds no override of its own, falls past the `override_active` break
+        # and lands on `index += 1`. With one item that walks off the end,
+        # re-reads the playlist and reports the very same id, so the check below
+        # would survive the leak it is written to catch; with two, the screen
+        # visibly moves on.
+        werkstatt_first = add_item(werkstatt_list)
+        werkstatt_second = add_item(werkstatt_list)
         assign("foyer", foyer_list)
         assign("werkstatt", werkstatt_list)
         check("both screens are playing",
               until(lambda: item_of("foyer") == foyer_first
-                    and item_of("werkstatt") == werkstatt_item),
+                    and item_of("werkstatt") == werkstatt_first),
               (item_of("foyer"), item_of("werkstatt")))
 
         status, _ = http("POST", "/api/displays/foyer/override",
@@ -453,9 +477,9 @@ def case_74():
         check("clearing it resumes the foyer at the next item",
               until(lambda: item_of("foyer") == foyer_second),
               (item_of("foyer"), foyer_second))
-        check("the other screen never left its own item",
-              item_of("werkstatt") == werkstatt_item,
-              (item_of("werkstatt"), werkstatt_item))
+        check("the other screen never left its own first item",
+              item_of("werkstatt") == werkstatt_first,
+              (item_of("werkstatt"), werkstatt_first, werkstatt_second))
         check("and never had an override of its own",
               (http("GET", "/api/displays/werkstatt/override")[1] or {}).get("active")
               is False, http("GET", "/api/displays/werkstatt/override")[1])
