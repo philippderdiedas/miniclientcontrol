@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
@@ -11,14 +12,16 @@ use chromiumoxide::listeners::EventStream;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use crate::models::{AppState, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use urlencoding::encode;
 
-pub async fn browser_loop(state: AppState) {
-    // One loop still, so it drives the primary display. Task 7 turns this into a
-    // parameter and spawns one loop per declared display; until then the only
-    // thing that changes here is where the playback state lives.
-    let display = state.primary();
+/// Drive one screen.
+///
+/// One task per declared display, each owning its own browser and its own
+/// playback state. Nothing is shared between two of them but the database, the
+/// settings and the webhook dispatcher -- which is why the edge-tracking locals
+/// below are locals: a second screen gets its own copy for free.
+pub async fn browser_loop(state: AppState, display: Arc<Display>) {
     // Bound out of the macro's reach: `tracing`'s own `display()` field helper is
     // in scope inside `info!`, so `display.name` there resolves to that function
     // and not to this local.
@@ -192,7 +195,7 @@ pub async fn browser_loop(state: AppState) {
             };
 
             if let Some(override_item) = active_override {
-                if let Err(e) = run_override_loop(&state, &browser, &mut attached_events, &page, override_item).await {
+                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, override_item).await {
                     error!("Override playback failed: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -617,14 +620,15 @@ async fn ensure_single_control_page(browser: &mut Browser) -> Result<Page, chrom
 
 async fn run_override_loop(
     state: &AppState,
+    // The display `browser_loop` is driving, passed in rather than resolved a
+    // second time: resolving here would pin every screen's override loop to the
+    // first display's signals.
+    display: &Display,
     browser: &Browser,
     attached_events: &mut EventStream<EventAttachedToTarget>,
     page: &Page,
     mut override_item: OverrideItem,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // The same display `browser_loop` drives; Task 7 passes it in rather than
-    // resolving it a second time.
-    let display = state.primary();
     loop {
         let target_url = override_target_url(state, &override_item);
         info!("Override active. Navigating to: {}", target_url);

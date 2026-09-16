@@ -301,27 +301,26 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 4. Spawn Browser Controller Task
+    // 4. One control loop per display. Each owns its own screen; nothing is
+    // shared between them but the database, the settings and the webhook
+    // dispatcher.
     //
-    // Still one loop, so only the primary display is actually played. With
-    // browsers launched, every declared display gets one above, which makes
-    // the startup banner's count true of the browsers but not yet of playback
-    // -- said out loud below, because a screen sitting on `about:blank` (or,
-    // under `--no-launch-browser`, on whatever it already had on it) with no
-    // explanation is exactly the silent-black-panel failure
-    // `display::configure` refuses to allow. Worded to hold under
-    // `--no-launch-browser` too, where the other displays get no browser from
-    // us at all.
+    // Until a display can be pointed at a playlist of its own, every loop reads
+    // the same items, so two screens mirror each other rather than playing
+    // independently -- said out loud, because two panels showing the same thing
+    // look like a configuration mistake and this one is ours.
     if state.displays.len() > 1 {
         tracing::warn!(
-            "Only display '{}' is played for now; the playlist does not reach the others yet.",
-            state.primary().name
+            "Every display plays the same playlist for now; per-display assignment is not wired up yet."
         );
     }
-    let browser_state = state.clone();
-    tokio::spawn(async move {
-        browser_loop(browser_state).await;
-    });
+    for display in state.displays.iter() {
+        let loop_state = state.clone();
+        let loop_display = display.clone();
+        tokio::spawn(async move {
+            browser_loop(loop_state, loop_display).await;
+        });
+    }
 
     // 5. Start Web Server
     let uploaded_assets_dir = args.assets_dir.clone();
