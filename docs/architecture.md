@@ -163,10 +163,9 @@ taken and logged, and `AppState::cast_tls_port` is the port actually bound.
 ## A cast is an override
 
 Starting a cast pins the cast display's override to the cast page; ending one puts
-back whatever was there before. Which display that is comes from `--cast-display`,
-defaulting to the first declared — casting is one session for the controller, not
-one per screen. `browser.rs` needed no changes for this, because two
-things there already do the right thing:
+back whatever was there before. The cast display is the first one declared —
+casting is one session for the controller, not one per screen. `browser.rs`
+needed no changes for this, because two things there already do the right thing:
 
 - the per-item `select!` watches the override signal, so a cast interrupts the
   current item instead of waiting out its duration;

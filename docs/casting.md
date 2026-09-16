@@ -69,10 +69,7 @@ resumes where it left off.
 A controller can drive several screens (see
 [deployment.md](deployment.md#declaring-the-screens-a-deployment-drives)), but
 casting is **one session for the whole controller, on one screen** — not one
-session per screen. `--cast-display <name>` says which declared display a cast
-pins; with no flag it is the first one declared. A name that is not declared is
-refused at startup, rather than surfacing hours later as a guest scanning a QR
-code and the picture appearing on the wrong panel.
+session per screen. A cast pins to the first one declared.
 
 Everything a cast touches follows that one display: the override that pins
 `cast_display.html`, the restore on teardown, and the `override.set` webhook,

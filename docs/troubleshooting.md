@@ -47,9 +47,8 @@ That is the intended reaction to a command line it cannot honour, and the messag
 names the reason: `--chromium-class`, `--chromium-user-data-dir` and a non-default
 `--cdp-url` are derived from the display's name and position and are refused
 rather than silently ignored, as is a `--class` smuggled through
-`--chromium-arg`, a duplicate name or port, a name outside `[A-Za-z0-9_-]`, a
-non-numeric port after the colon, and a `--cast-display` naming a screen that is
-not declared. See
+`--chromium-arg`, a duplicate name or port, a name outside `[A-Za-z0-9_-]`, and a
+non-numeric port after the colon. See
 [deployment.md](deployment.md#flags-that-are-refused-rather-than-ignored).
 
 **A playlist URL shows Chromium's privacy warning.**

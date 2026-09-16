@@ -366,10 +366,10 @@ Notes and limitations:
 
 - Only one sender at a time; a second one is told the display is busy.
 - **One cast session for the whole controller, on one screen.** With several
-  displays declared, `--cast-display <name>` picks which one a cast pins; without
-  it, the first declared. Per-display casting is not built yet, so the QR code and
-  the invitation on the idle screen are still global — a second panel standing
-  idle advertises a cast that will appear on the cast display instead. See
+  displays declared, a cast pins to the first one declared. Per-display casting
+  is not built yet, so the QR code and the invitation on the idle screen are
+  still global — a second panel standing idle advertises a cast that will appear
+  on the cast display instead. See
   [docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
 - Screen sharing needs a desktop browser. Mobile browsers have no
   `getDisplayMedia`, though camera sharing works.

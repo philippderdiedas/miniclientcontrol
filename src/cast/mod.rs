@@ -1067,16 +1067,38 @@ mod tests {
     /// multi-worker runtime: on a single-threaded one every `.await` in
     /// `authorize_sender` is a cooperative yield point at a *fixed* place, and
     /// this interleaving depends on genuinely concurrent lock acquisition.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-    async fn concurrent_wrong_codes_are_bounded_by_the_lockout() {
+    ///
+    /// Parameterised over both modes that can produce "Falscher Code.":
+    /// `Code` is checked against `configured_code` alone and never touches
+    /// `display.cast`, while `Pairing` is the only arm that acquires it on top
+    /// of `cast_attempts` -- the nested acquisition the fix was actually
+    /// about. Covering only `Code` would pass even if that nesting still
+    /// raced.
+    async fn assert_concurrent_wrong_codes_are_bounded(mode: crate::models::CastAuth) {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
-        {
-            let mut settings = state.settings.write().await;
-            settings.cast_auth = crate::models::CastAuth::Code;
-            settings.cast_code = "ABCD".to_string();
-        }
         let display = state.primary();
+
+        match mode {
+            crate::models::CastAuth::Code => {
+                let mut settings = state.settings.write().await;
+                settings.cast_auth = crate::models::CastAuth::Code;
+                settings.cast_code = "ABCD".to_string();
+            }
+            crate::models::CastAuth::Pairing => {
+                {
+                    let mut settings = state.settings.write().await;
+                    settings.cast_auth = crate::models::CastAuth::Pairing;
+                }
+                // Mints a real pairing code and pins the display, exactly as a
+                // pairing request would -- the wrong guesses below must land on
+                // the `Pairing` arm's `display.cast.lock()`, not on a session
+                // with nothing to check against.
+                pin_for_pairing(&state, &display).await;
+            }
+            crate::models::CastAuth::None => unreachable!("not exercised here"),
+        }
+
         let addr: IpAddr = "192.168.1.99".parse().unwrap();
 
         let mut handles = Vec::new();
@@ -1103,5 +1125,15 @@ mod tests {
              MAX_CODE_ATTEMPTS ({MAX_CODE_ATTEMPTS}) -- the lockout no longer bounds a \
              concurrent guesser"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_wrong_codes_are_bounded_by_the_lockout_code() {
+        assert_concurrent_wrong_codes_are_bounded(crate::models::CastAuth::Code).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_wrong_codes_are_bounded_by_the_lockout_pairing() {
+        assert_concurrent_wrong_codes_are_bounded(crate::models::CastAuth::Pairing).await;
     }
 }

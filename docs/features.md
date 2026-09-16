@@ -87,7 +87,7 @@ naming the declared screens once several are — an existing script gets told it
 has become ambiguous rather than having a coin flipped for it.
 
 Casting is the exception that is not per screen yet: one session for the whole
-controller, landing on the display `--cast-display` names. See
+controller, landing on the first declared display. See
 [casting.md](casting.md#which-screen-a-cast-lands-on).
 
 ## Assets
