@@ -192,6 +192,27 @@ async def main_flow():
 
         sw.close()
 
+    print("\n[1c] a ticket for a non-primary screen pins that screen, not the primary one")
+    # [1b] only reads claim's HTTP responses, so it would pass identically if
+    # `display_for_ticket` were deleted and every sender socket fell straight to
+    # `state.primary()`. Claiming and connecting on `werkstatt` -- the *second*
+    # declared screen, never the primary -- and then reading back which screen
+    # actually got pinned is what pins the helper itself down.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        sr, sw = await ws("sender", display="werkstatt")
+        await wsclient.recv_json(sr)
+        await asyncio.sleep(0.4)
+
+        status, ov = http("GET", "/api/displays/werkstatt/override")
+        check("the claimed screen is pinned to the cast page",
+              status == 200 and ov["active"] and ov["url"].endswith("/cast_display.html"), ov)
+
+        status, ov = http("GET", "/api/displays/foyer/override")
+        check("the other, unclaimed screen is untouched",
+              status == 200 and not ov["active"], ov)
+
+        sw.close()
+
     print("\n[3] operator can cut a cast short")
     with Server():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
