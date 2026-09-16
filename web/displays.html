@@ -94,8 +94,14 @@
     // Cards the operator has touched since their last save. Skipped by the poll,
     // because a card holds the label input and the playlist dropdown.
     const dirty = new Set();
-    // name -> the card's DOM node, so the poll can update one line inside it.
+    // name -> the card's DOM node, so a reload can carry an edited card across
+    // instead of rebuilding it and eating what is being typed.
     const cards = new Map();
+    // A save in flight whose card is not dirty -- clicking Speichern without
+    // having touched a field. Without this a poll landing mid-request would
+    // detach the card and its feedback span, and the operator would see no
+    // confirmation for a save that did happen.
+    const saving = new Set();
 
     function buildCard(display) {
       const card = el('div', { class: display.declared ? 'card' : 'card gone' });
@@ -122,6 +128,11 @@
 
       const save = async () => {
         flash(feedback, 'Speichern…', false);
+        // Held across the request so a poll landing mid-flight keeps this card
+        // rather than replacing it -- otherwise the confirmation below would be
+        // written into a node that is no longer on screen, for a save that
+        // succeeded.
+        saving.add(display.name);
         let response;
         try {
           response = await fetch(`/api/displays/${encodeURIComponent(display.name)}`, {
@@ -135,9 +146,11 @@
             }),
           });
         } catch (_) {
+          saving.delete(display.name);
           flash(feedback, 'Server nicht erreichbar.', true);
           return;
         }
+        saving.delete(display.name);
         if (!response.ok) {
           flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
           return;
@@ -186,17 +199,29 @@
         return;
       }
       document.getElementById('loadError').hidden = true;
+
+      // Per card, not per page: a card being edited keeps its own DOM node, and
+      // every other card is rebuilt from what the server just said. Skipping the
+      // whole reload while any one card is dirty would hide a display losing its
+      // `declared` status -- which is precisely the screen-was-removed case this
+      // page exists to carry out -- for as long as an edit sits open elsewhere.
+      const kept = new Map();
+      for (const [name, node] of cards) {
+        if (dirty.has(name) || saving.has(name)) kept.set(name, node);
+      }
+      const rebuilt = new Map();
       list.replaceChildren();
+      for (const display of displays) {
+        const node = kept.get(display.name) || buildCard(display);
+        rebuilt.set(display.name, node);
+        list.append(node);
+      }
       cards.clear();
-      for (const display of displays) list.append(buildCard(display));
+      for (const [name, node] of rebuilt) cards.set(name, node);
       document.getElementById('emptyHint').hidden = displays.length > 0;
     }
 
-    // Nothing on this page changes on its own except whether a display is still
-    // declared, so the poll reloads only while no card is being edited. A card
-    // is the edit form; re-rendering one eats what is being typed.
     async function poll() {
-      if (dirty.size > 0) return;
       await loadAll();
     }
 
