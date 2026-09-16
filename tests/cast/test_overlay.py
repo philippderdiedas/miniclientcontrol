@@ -307,6 +307,39 @@ async def settings_flow():
         print(f"        guest address the display would show: {sender_url}")
         put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
 
+        print("\n[41e] cast_qr_target: chooser -- the overlay QR must follow, "
+              "same as /api/cast/state already does")
+        # /api/cast/info's sender_url is unaffected by cast_qr_target -- it is
+        # always the bare chooser address (see the comment at [41c]) -- so it
+        # is the reference for what "chooser" ought to produce here too.
+        status, _ = http("PUT", "/api/settings", {"cast_qr_target": "chooser"})
+        check("chooser is accepted", status == 200, status)
+
+        chooser_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        check("the bare chooser address carries no ?screen= scoping",
+              "screen=" not in chooser_url, chooser_url)
+        check("and it differs from the screen-scoped address used above",
+              chooser_url != sender_url, (chooser_url, sender_url))
+
+        chooser_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("the overlay QR still renders a code under 'chooser'",
+              len(chooser_rows) >= 21, len(chooser_rows))
+
+        # Same proof as [41c]: typing the address by hand must reproduce the
+        # identical matrix, module for module -- and it must be the *bare*
+        # address's matrix, not the screen-scoped one from above.
+        put({"enabled": True, "qr_source": "text", "qr_text": chooser_url, "text": ""})
+        chooser_typed_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("and under 'chooser' it is the bare guest address, module for module",
+              chooser_rows == chooser_typed_rows,
+              (chooser_url, len(chooser_rows), len(chooser_typed_rows)))
+        check("which is a different code than the screen-scoped address typed in [41c]",
+              chooser_rows != typed_rows, (len(chooser_rows), len(typed_rows)))
+        print(f"        bare chooser address the display would show: {chooser_url}")
+
+        put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
+        http("PUT", "/api/settings", {"cast_qr_target": "screen"})
+
         status, _ = http("PUT", "/api/settings", {"cast_enabled": False})
         no_qr = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules")
         check("with casting switched off no code is drawn at all", no_qr is None, no_qr)
