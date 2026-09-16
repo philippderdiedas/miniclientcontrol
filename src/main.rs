@@ -308,19 +308,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 4. One control loop per display. Each owns its own screen; nothing is
-    // shared between them but the database, the settings and the webhook
-    // dispatcher.
-    //
-    // Until a display can be pointed at a playlist of its own, every loop reads
-    // the same items, so two screens mirror each other rather than playing
-    // independently -- said out loud, because two panels showing the same thing
-    // look like a configuration mistake and this one is ours.
-    if state.displays.len() > 1 {
-        tracing::warn!(
-            "Every display plays the same playlist for now; per-display assignment is not wired up yet."
-        );
-    }
+    // 4. One control loop per display. Each owns its own screen and reads the
+    // playlist that screen is assigned; nothing is shared between them but the
+    // database, the settings and the webhook dispatcher.
     for display in state.displays.iter() {
         let loop_state = state.clone();
         let loop_display = display.clone();
