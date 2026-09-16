@@ -150,17 +150,44 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // would not. ON DELETE SET NULL is what keeps a playlist alive when the
     // screen it was assigned to is taken away -- that is the whole point of
     // playlists being objects.
+    // `assignment_decided` separates "nobody has ever chosen a playlist for this
+    // screen" from "somebody chose none". Both are `playlist_id IS NULL`, and
+    // telling them apart is what lets startup carry a single-screen deployment's
+    // playlist across the upgrade without ever undoing an operator's "(keine)".
+    // It has to be stored rather than derived, because the only other witness --
+    // "this process just inserted the row" -- dies with the process, and a power
+    // loss between the insert and the assignment would strand the screen with no
+    // playlist and no second chance.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS displays (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL UNIQUE,
-            label       TEXT,
-            playlist_id INTEGER,
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            name               TEXT NOT NULL UNIQUE,
+            label              TEXT,
+            playlist_id        INTEGER,
+            assignment_decided BOOLEAN DEFAULT 0,
             FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
         );"
     )
     .execute(pool)
     .await?;
+
+    let has_assignment_decided: bool = sqlx::query(
+        "SELECT count(*) FROM pragma_table_info('displays') WHERE name='assignment_decided'",
+    )
+    .fetch_one(pool)
+    .await
+    .map(|row| row.get::<i32, _>(0) > 0)
+    .unwrap_or(false);
+
+    if !has_assignment_decided {
+        // A row written before this column existed can only have come from the
+        // registration that ran in the same startup, so defaulting it to 0 is
+        // right: an assignment it already carries is recorded as decided by the
+        // first `register` that sees it.
+        let _ = sqlx::query("ALTER TABLE displays ADD COLUMN assignment_decided BOOLEAN DEFAULT 0")
+            .execute(pool)
+            .await;
+    }
 
     let has_playlist_id: bool = sqlx::query(
         "SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='playlist_id'",

@@ -198,11 +198,35 @@ fn declared_names(state: &AppState) -> Vec<String> {
 }
 
 fn unknown(state: &AppState, name: &str) -> Response {
+    refusal(name, declared_names(state))
+}
+
+/// The same `404`, for `PUT /api/displays/{name}`, which accepts more names than
+/// the scoped playback routes do: a stored row this deployment no longer
+/// declares is still writable, because that is the screen taken away whose
+/// playlist is being reassigned. Listing only the declared names there would
+/// hand an operator who mistyped such a name a list excluding every name that
+/// would have worked.
+async fn unknown_here(state: &AppState, name: &str) -> Response {
+    let mut names = declared_names(state);
+    match sqlx::query_scalar::<_, String>("SELECT name FROM displays ORDER BY name ASC")
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(stored) => names.extend(stored.into_iter().filter(|n| state.display(n).is_none())),
+        // The declared names alone are still a useful answer, and a refusal is
+        // no place to turn one failed read into a second error.
+        Err(e) => tracing::error!("Failed to list stored displays for a refusal: {}", e),
+    }
+    refusal(name, names)
+}
+
+fn refusal(name: &str, names: Vec<String>) -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({
             "error": format!("Unbekanntes Display '{name}'."),
-            "displays": declared_names(state),
+            "displays": names,
         })),
     )
         .into_response()
@@ -216,59 +240,105 @@ fn unknown(state: &AppState, name: &str) -> Response {
 /// means the idle screen" would blank every venue that upgrades, single-screen
 /// ones included, with no way to repair it from the outside.
 ///
-/// The assignment half only fires for a row this call has just created. The
-/// migration moved every pre-existing item into a playlist named `Standard`,
-/// which is the lowest id on any upgraded database, so the first declared
-/// display picking it up is the screen carrying on with exactly what it was
-/// playing before. A row that already existed is left alone whatever it holds:
-/// `NULL` there is an operator who chose "(keine)", and re-assigning it on the
-/// next restart would silently undo that decision. A fresh database has no
-/// playlists at all, so nothing is assigned and the operator picks one.
+/// The assignment half fires while nobody has yet decided the first declared
+/// display's playlist -- which is `displays.assignment_decided`, not "this call
+/// inserted the row". The migration moved every pre-existing item into a
+/// playlist named `Standard`, the lowest id on any upgraded database, so the
+/// first declared display picking it up is the screen carrying on with exactly
+/// what it was playing before.
+///
+/// The flag is stored rather than inferred from the insert because the question
+/// it answers outlives the process. A fresh install starts with no playlists at
+/// all, so there is nothing to inherit on the first run and the decision is
+/// still open when the operator creates one -- with a per-call gate that screen
+/// would never play anything and no restart would repair it. The same applies to
+/// a power loss between the insert and the assignment, which on a signage Pi is
+/// an ordinary way to stop. What the flag does *not* do is undo a decision:
+/// every path that writes `playlist_id`, here and in `update`, sets it in the
+/// same statement, so an operator's "(keine)" is a decided `NULL` and is left
+/// alone for good.
 pub async fn register(
     pool: &sqlx::SqlitePool,
     configured: &[DisplayConfig],
 ) -> anyhow::Result<()> {
-    let mut first_is_new = false;
+    // One transaction around both halves. They are two statements describing one
+    // decision, and a machine that loses power between them must come back to
+    // either both or neither rather than to a registered screen that will never
+    // be offered a playlist.
+    let mut tx = pool.begin().await?;
     for (index, config) in configured.iter().enumerate() {
-        let inserted = sqlx::query(
-            "INSERT INTO displays (name) VALUES (?) ON CONFLICT(name) DO NOTHING",
-        )
+        sqlx::query("INSERT INTO displays (name) VALUES (?) ON CONFLICT(name) DO NOTHING")
             .bind(&config.name)
-            .execute(pool)
-            .await?
-            .rows_affected()
-            > 0;
+            .execute(&mut *tx)
+            .await?;
+        // Inside the loop, indexed, rather than over `configured.first()` after
+        // it: `configure` never yields an empty slice, so the early return that
+        // used to guard the first element could not fire and only looked like a
+        // case somebody had thought about.
         if index == 0 {
-            first_is_new = inserted;
+            inherit_oldest_playlist(&mut tx, &config.name).await?;
         }
     }
+    tx.commit().await?;
+    Ok(())
+}
 
-    if !first_is_new {
+/// Give a display the oldest playlist, once, while its assignment is still
+/// nobody's decision.
+async fn inherit_oldest_playlist(
+    tx: &mut sqlx::SqliteConnection,
+    name: &str,
+) -> anyhow::Result<()> {
+    let row: Option<(Option<i64>, i64)> = sqlx::query_as(
+        "SELECT playlist_id, COALESCE(assignment_decided, 0) FROM displays WHERE name = ?",
+    )
+    .bind(name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((assigned, decided)) = row else {
+        return Ok(());
+    };
+    if decided != 0 {
         return Ok(());
     }
-    let Some(first) = configured.first() else {
+
+    // An assignment that is already there without the flag came from a database
+    // written before this column existed, or from somebody editing the file.
+    // Either way it is a decision, and recording it stops the next start from
+    // reading the screen as undecided forever.
+    if assigned.is_some() {
+        sqlx::query("UPDATE displays SET assignment_decided = 1 WHERE name = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
         return Ok(());
-    };
+    }
 
     let oldest: Option<i64> = sqlx::query_scalar("SELECT id FROM playlists ORDER BY id ASC LIMIT 1")
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
     let Some(playlist_id) = oldest else {
+        // Deliberately leaves the display undecided. A fresh install has no
+        // playlist to inherit on its first start, and the operator creating one
+        // afterwards is exactly the case that has to still be picked up -- the
+        // alternative is a screen that stays black with nothing to change.
         return Ok(());
     };
 
-    // `playlist_id IS NULL` is redundant against a row this call just inserted
-    // and is spelled out anyway: it is the condition the rule is actually about,
-    // and a later edit that loosens `first_is_new` must not turn this into an
-    // overwrite of somebody's assignment.
-    sqlx::query("UPDATE displays SET playlist_id = ? WHERE name = ? AND playlist_id IS NULL")
-        .bind(playlist_id)
-        .bind(&first.name)
-        .execute(pool)
-        .await?;
+    // `playlist_id IS NULL` is already true here and is spelled out anyway: it is
+    // the condition the rule is really about, and a later edit that loosens the
+    // gate above must not turn this into an overwrite of somebody's assignment.
+    sqlx::query(
+        "UPDATE displays SET playlist_id = ?, assignment_decided = 1
+         WHERE name = ? AND playlist_id IS NULL",
+    )
+    .bind(playlist_id)
+    .bind(name)
+    .execute(&mut *tx)
+    .await?;
     tracing::info!(
-        "Display '{}' was registered and assigned playlist {}, the oldest one",
-        first.name,
+        "Display '{}' had no playlist yet and was assigned playlist {}, the oldest one",
+        name,
         playlist_id
     );
     Ok(())
@@ -291,15 +361,27 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    let rows = sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+    let rows = match sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
         "SELECT name, label, playlist_id FROM displays ORDER BY name ASC",
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_else(|e| {
-        tracing::error!("Failed to list displays: {}", e);
-        Vec::new()
-    });
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Failed to list displays: {}", e);
+            // Swallowing this one would render every declared screen as
+            // unassigned, which is a real state an operator acts on -- they
+            // would go and assign a playlist that is already assigned, or read
+            // a blank screen's cause off a list that invented it. Saying
+            // nothing could be read is the only honest answer here.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Displays konnten nicht gelesen werden." })),
+            )
+                .into_response();
+        }
+    };
 
     // Driven off the declared displays, not off the table: a row for a screen
     // this deployment no longer declares must still be visible (so its playlist
@@ -334,7 +416,12 @@ async fn list(State(state): State<AppState>) -> Response {
 
 #[derive(serde::Deserialize)]
 struct UpdateDisplay {
-    label: Option<String>,
+    /// `double_option` for the same reason `playlist_id` has it: without it a
+    /// JSON `null` collapses into the outer `None` and reads as "field absent",
+    /// so a label could only ever be cleared by sending `""` -- a rule nothing
+    /// states and the next client would not guess.
+    #[serde(default, deserialize_with = "crate::handlers::double_option")]
+    label: Option<Option<String>>,
     #[serde(default, deserialize_with = "crate::handlers::double_option")]
     playlist_id: Option<Option<i64>>,
 }
@@ -371,16 +458,41 @@ async fn update(
                 0
             });
         if known == 0 {
-            return unknown(&state, &name);
+            return unknown_here(&state, &name).await;
+        }
+    }
+
+    // Checked before anything is written, and checked at all because the foreign
+    // key would otherwise refuse the write, the error would be logged and
+    // swallowed, and the operator would be told `200` for an assignment that
+    // never happened -- ending in the blank screen `PUT /api/playlist/{id}`
+    // checks `asset_id` against `assets` to avoid.
+    if let Some(Some(playlist_id)) = payload.playlist_id {
+        match sqlx::query_scalar::<_, i64>("SELECT id FROM playlists WHERE id = ?")
+            .bind(playlist_id)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Unbekannte Playlist." })),
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                tracing::error!("Failed to check playlist {}: {}", playlist_id, e);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
         }
     }
 
     if let Some(label) = &payload.label {
-        // An empty label is stored as SQL `NULL` rather than "": the read path
-        // falls back to the name only on `NULL`, so an operator clearing the
-        // field would otherwise get a nameless row in the list.
-        let trimmed = label.trim();
-        let stored = if trimmed.is_empty() { None } else { Some(trimmed) };
+        // An empty or absent label is stored as SQL `NULL` rather than "": the
+        // read path falls back to the name only on `NULL`, so an operator
+        // clearing the field would otherwise get a nameless row in the list.
+        let stored = label.as_deref().map(str::trim).filter(|l| !l.is_empty());
         if let Err(e) = sqlx::query("UPDATE displays SET label = ? WHERE name = ?")
             .bind(stored)
             .bind(&name)
@@ -391,11 +503,17 @@ async fn update(
         }
     }
     if let Some(playlist_id) = payload.playlist_id {
-        if let Err(e) = sqlx::query("UPDATE displays SET playlist_id = ? WHERE name = ?")
-            .bind(playlist_id)
-            .bind(&name)
-            .execute(&state.pool)
-            .await
+        // `assignment_decided` is set in the same statement as the assignment,
+        // not beside it: the record that somebody chose and what they chose can
+        // then not be torn apart by a power loss, which is the only way the next
+        // start could inherit a playlist over a deliberate "(keine)".
+        if let Err(e) = sqlx::query(
+            "UPDATE displays SET playlist_id = ?, assignment_decided = 1 WHERE name = ?",
+        )
+        .bind(playlist_id)
+        .bind(&name)
+        .execute(&state.pool)
+        .await
         {
             tracing::error!("Failed to assign playlist to display {}: {}", name, e);
         }
@@ -629,6 +747,96 @@ mod tests {
         assert_eq!(assignment(&pool, "werkstatt").await, Some(None));
         // ...and nothing assigned, because there is no playlist to guess at.
         // That is the operator's first decision, not ours.
+    }
+
+    #[tokio::test]
+    async fn a_fresh_install_inherits_the_playlist_the_operator_creates_later() {
+        let pool = pool("display_register_fresh_then_playlist").await;
+        let configured = configure(&args_with(vec![])).unwrap();
+
+        // First start of a brand new device: a row, no playlist to inherit, and
+        // therefore nothing decided yet.
+        register(&pool, &configured).await.unwrap();
+        assert_eq!(assignment(&pool, "default").await, Some(None));
+
+        // The operator does the first thing anybody does with a new device.
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Eingang')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let eingang: i64 = sqlx::query_scalar("SELECT id FROM playlists WHERE name = 'Eingang'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // The next start picks it up. A gate that only fired for a row inserted
+        // by this very call would leave the screen black here, with no restart
+        // and no API call that repairs it.
+        register(&pool, &configured).await.unwrap();
+        assert_eq!(assignment(&pool, "default").await, Some(Some(eingang)));
+    }
+
+    #[tokio::test]
+    async fn a_torn_write_between_the_insert_and_the_assignment_recovers() {
+        let pool = pool("display_register_torn_write").await;
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Standard')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let standard: i64 = sqlx::query_scalar("SELECT id FROM playlists WHERE name = 'Standard'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        // What a power loss between the two statements used to leave behind: the
+        // row exists, nothing is assigned, and nothing records that the question
+        // was ever asked. On an upgrading single-screen venue this is precisely
+        // the "cannot play any more" failure registration exists to prevent.
+        sqlx::query("INSERT INTO displays (name, assignment_decided) VALUES ('default', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let configured = configure(&args_with(vec![])).unwrap();
+        register(&pool, &configured).await.unwrap();
+        assert_eq!(assignment(&pool, "default").await, Some(Some(standard)));
+
+        // And the repair is itself a decision, so clearing it afterwards sticks.
+        sqlx::query("UPDATE displays SET playlist_id = NULL WHERE name = 'default'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        register(&pool, &configured).await.unwrap();
+        assert_eq!(assignment(&pool, "default").await, Some(None));
+    }
+
+    #[tokio::test]
+    async fn a_cleared_assignment_survives_a_restart_that_finds_a_playlist() {
+        let pool = pool("display_register_keine_survives").await;
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Standard')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let configured = configure(&args_with(vec![])).unwrap();
+        register(&pool, &configured).await.unwrap();
+
+        // What `PUT /api/displays/{name}` writes for "(keine)": the assignment
+        // and the record that somebody chose it, in one statement.
+        sqlx::query(
+            "UPDATE displays SET playlist_id = NULL, assignment_decided = 1 WHERE name = 'default'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Playlists keep arriving; none of them is an invitation to overrule the
+        // operator at the next restart.
+        sqlx::query("INSERT INTO playlists (name) VALUES ('Neu')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        register(&pool, &configured).await.unwrap();
+        assert_eq!(assignment(&pool, "default").await, Some(None));
     }
 
     #[tokio::test]

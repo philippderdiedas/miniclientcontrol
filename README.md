@@ -187,8 +187,9 @@ These options also support environment variables through `clap` `env` support.
 - `GET /api/displays` — the declared screens, plus any row for a screen this
   deployment no longer declares (`declared: false`), so its playlist can still be
   reassigned
-- `PUT /api/displays/{name}` — set `label` and/or `playlist_id`; a `playlist_id`
-  of `null` clears the assignment
+- `PUT /api/displays/{name}` — set `label` and/or `playlist_id`; `null` clears
+  either one, and a `playlist_id` naming a playlist that does not exist is
+  refused with `400` rather than reported as saved
 
 ### Playback Control
 
