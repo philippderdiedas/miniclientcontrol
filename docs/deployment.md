@@ -74,7 +74,7 @@ Restart=always
 RestartSec=10
 ```
 
-Drop the two `--display` lines for a single-screen device: with no `--display` at
+Drop the two `--display` flags for a single-screen device: with no `--display` at
 all the controller drives one implicit screen exactly as it always did (see
 [Declaring the screens](#declaring-the-screens-a-deployment-drives)). Both flags
 can come from the environment instead, which is the form to reach for when the
