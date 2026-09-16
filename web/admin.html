@@ -351,12 +351,23 @@
     // right now, so the landing page answers the first question an operator has.
     async function refresh() {
       const host = document.getElementById('status');
+      const problem = (text) =>
+        host.replaceChildren(el('p', { class: 'status', text }));
       try {
         const [dpRes, plRes] = await Promise.all([
           fetch('/api/displays'),
           fetch('/api/playlists'),
         ]);
-        if (!dpRes.ok || !plRes.ok) throw new Error('nicht erreichbar');
+        // An answer that says "I could not read this" is not the same event as
+        // no answer at all, and this is the first line an operator reads.
+        // `display::list` returns `500` on a failed DB read precisely so this
+        // page does not invent a state; folding that into "nicht erreichbar"
+        // would name a cause that is demonstrably false -- the controller is
+        // right there, answering.
+        if (!dpRes.ok || !plRes.ok) {
+          problem('Status konnte nicht gelesen werden – der Controller meldet einen Fehler.');
+          return;
+        }
         // Declared only: a stored row for a screen this deployment no longer
         // drives keeps its playlist on /displays.html, but it has no playback
         // routes and nothing to report here.
@@ -396,7 +407,9 @@
           host.append(el('p', { class: 'status', text: 'Kein Display deklariert.' }));
         }
       } catch (_) {
-        host.replaceChildren(el('p', { class: 'status', text: 'Controller nicht erreichbar' }));
+        // Nothing answered: the fetch itself was rejected, here or inside
+        // screenLine(), which is the one case this message is true of.
+        problem('Controller nicht erreichbar');
       }
     }
 

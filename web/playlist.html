@@ -209,7 +209,14 @@
     </div>
   </details>
 
+  <p class="err" id="assetLoadError" hidden>
+    Asset-Liste konnte nicht geladen werden – die Auswahl oben kann veraltet sein.
+  </p>
+
   <div id="list"></div>
+  <p class="err" id="itemsLoadError" hidden>
+    Items konnten nicht geladen werden – die Liste kann veraltet sein.
+  </p>
   <p class="muted" id="emptyHint" hidden>Noch keine Items.</p>
   <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
@@ -732,8 +739,22 @@
     });
 
     async function loadAssets() {
-      const res = await fetch('/api/assets');
-      assets = res.ok ? await res.json() : [];
+      const loadError = document.getElementById('assetLoadError');
+      let fetched;
+      try {
+        const res = await fetch('/api/assets');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fetched = await res.json();
+      } catch (_) {
+        // Same rule as loadPlaylists(): a refusal is not an answer. Rebuilding
+        // the pickers from an empty list would drop the asset an operator has
+        // just selected and offer nothing in its place, so the last known list
+        // stays and only the failure is reported.
+        loadError.hidden = false;
+        return;
+      }
+      loadError.hidden = true;
+      assets = fetched;
       for (const sel of [document.getElementById('addAsset'), document.getElementById('ovAsset')]) {
         const keep = sel.value;
         sel.textContent = '';
@@ -916,30 +937,39 @@
           return;
         }
         moveBtn.disabled = true;
-        let res;
+        // The guard has to outlast the reloads, not just the request: a
+        // `finally` around the fetch alone re-enables the button while
+        // loadPlaylists()/loadPlaylist() are still in flight -- the card is
+        // still on screen and still says "Verschieben" -- and a second click in
+        // that window sends the move a second time. Still a `finally`, so a
+        // network-level rejection or a reload that throws cannot leave the
+        // button dead until the page is reloaded.
         try {
-          res = await fetch(`/api/playlist/${item.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ playlist_id: Number(target) }),
-          });
-        } catch (_) {
-          flash(feedback, 'Server nicht erreichbar', true);
-          return;
+          let res;
+          try {
+            res = await fetch(`/api/playlist/${item.id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ playlist_id: Number(target) }),
+            });
+          } catch (_) {
+            flash(feedback, 'Server nicht erreichbar', true);
+            return;
+          }
+          if (!res.ok) { flash(feedback, await readError(res, 'Verschieben fehlgeschlagen'), true); return; }
+          dirty.delete(item.id);
+          // Reported above the list, not on the card: the card is about to
+          // disappear, and a confirmation that vanishes with it would leave the
+          // operator watching an item go with nothing saying where.
+          flash(document.getElementById('playlistFeedback'),
+            `#${item.id} nach „${name}“ verschoben ✓`);
+          // Both playlists were renumbered and both item counts moved, so the
+          // picker is reloaded as well as the list.
+          await loadPlaylists();
+          await loadPlaylist();
         } finally {
           moveBtn.disabled = false;
         }
-        if (!res.ok) { flash(feedback, await readError(res, 'Verschieben fehlgeschlagen'), true); return; }
-        dirty.delete(item.id);
-        // Reported above the list, not on the card: the card is about to
-        // disappear, and a confirmation that vanishes with it would leave the
-        // operator watching an item go with nothing saying where.
-        flash(document.getElementById('playlistFeedback'),
-          `#${item.id} nach „${name}“ verschoben ✓`);
-        // Both playlists were renumbered and both item counts moved, so the
-        // picker is reloaded as well as the list.
-        await loadPlaylists();
-        await loadPlaylist();
       });
 
       const move = async (direction) => {
@@ -984,15 +1014,31 @@
       // No playlist selected (none exist, or none picked yet): omitting
       // `playlist_id` would fetch every item across every playlist, which is
       // the legacy behaviour this page must never rely on.
+      const loadError = document.getElementById('itemsLoadError');
       if (!currentPlaylist) {
         items = [];
         list.textContent = '';
         cardNodes.clear();
         document.getElementById('emptyHint').hidden = true;
+        // Nothing was asked for, so there is no failed answer to report either.
+        loadError.hidden = true;
         return;
       }
-      const res = await fetch('/api/playlist?playlist_id=' + currentPlaylist);
-      items = res.ok ? await res.json() : [];
+      let fetched;
+      try {
+        const res = await fetch('/api/playlist?playlist_id=' + currentPlaylist);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        fetched = await res.json();
+      } catch (_) {
+        // Same rule as loadPlaylists(): a failed fetch says nothing about
+        // whether this playlist has items, so nothing below it may claim the
+        // playlist is empty. The cards stay as they are -- one of them may be
+        // holding an edit in progress -- and only the failure is reported.
+        loadError.hidden = false;
+        return;
+      }
+      loadError.hidden = true;
+      items = fetched;
 
       // Cards with unsaved edits are carried over instead of re-rendered, so a save or
       // reorder elsewhere on the page does not silently throw away typed-in values.
