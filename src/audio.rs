@@ -366,7 +366,9 @@ pub fn routes() -> Router<AppState> {
 }
 
 pub async fn read(State(state): State<AppState>) -> Response {
-    let pids = crate::cast::cast_process_ids(&state).await;
+    // Unscoped, like the route: the first declared screen's browser is the
+    // subtree singled out, which is also the one the cast routes act on.
+    let pids = crate::cast::cast_process_ids(&state.primary()).await;
     Json(state.audio.state(&pids).await).into_response()
 }
 
@@ -374,5 +376,5 @@ pub async fn control(
     State(state): State<AppState>,
     Json(command): Json<AudioCommand>,
 ) -> Response {
-    crate::cast::apply_audio(&state, command).await
+    crate::cast::apply_audio(&state, &state.primary(), command).await
 }

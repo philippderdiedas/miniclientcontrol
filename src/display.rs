@@ -168,10 +168,10 @@ pub fn configure(args: &Args) -> Result<Vec<DisplayConfig>, String> {
 
 /// Refuse a `--cast-display` naming a screen this deployment does not drive.
 ///
-/// At startup, because `AppState::cast_display` falls back to the primary
-/// display rather than panicking: without this the mistake would surface as a
-/// guest scanning a QR code and the cast appearing on the wrong panel, hours
-/// later and with nothing in the log tying the two together.
+/// At startup, because nothing downstream can tell a typo from a name: a cast
+/// resolves a screen without consulting this flag, so the mistake would surface
+/// as a guest scanning a QR code and the cast appearing on the wrong panel,
+/// hours later and with nothing in the log tying the two together.
 fn check_cast_display(args: &Args, out: &[DisplayConfig]) -> Result<(), String> {
     if let Some(wanted) = &args.cast_display {
         if !out.iter().any(|d| &d.name == wanted) {

@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
         pool: pool.clone(),
         args: Arc::new(args.clone()),
         displays: Arc::new(displays),
-        cast: Arc::new(Mutex::new(Default::default())),
+        cast_attempts: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
         managed_cert: managed_cert_active,
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),

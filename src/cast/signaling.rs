@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -12,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::guest_page::redact;
-use crate::models::{AppState, ScrollMode, ScrollOptions};
+use crate::models::{AppState, Display, ScrollMode, ScrollOptions};
 
 use super::{
     activate_display, codes_match, deactivate_display, end_session, error_frame,
@@ -68,11 +69,16 @@ pub async fn cast_ws(
     // open socket lets the sender show what actually went wrong.
     let role = query.role;
     let ticket = query.ticket.clone();
-    ws.on_upgrade(move |socket| handle_socket(state, role, addr, ticket, socket))
+    // Resolved once, here, and carried for the life of the socket: a socket may
+    // only ever act on the session it was admitted to, so nothing below this
+    // line resolves a screen a second time.
+    let display = state.primary();
+    ws.on_upgrade(move |socket| handle_socket(state, display, role, addr, ticket, socket))
 }
 
 async fn handle_socket(
     state: AppState,
+    display: Arc<Display>,
     role: Role,
     addr: IpAddr,
     ticket: Option<String>,
@@ -96,11 +102,11 @@ async fn handle_socket(
 
     let admission: Result<(), Message> = async {
         if role == Role::Sender {
-            if let Err(message) = consume_reservation(&state, addr, ticket.as_deref()).await {
+            if let Err(message) = consume_reservation(&display, addr, ticket.as_deref()).await {
                 return Err(error_frame("claim", &message));
             }
         }
-        if !register_peer(&state, role, addr, tx.clone()).await {
+        if !register_peer(&state, &display, role, addr, tx.clone()).await {
             return Err(error_frame("busy", "Es überträgt bereits jemand."));
         }
         Ok(())
@@ -142,7 +148,7 @@ async fn handle_socket(
                 break;
             }
             Ok(Some(Ok(Message::Text(text)))) => {
-                if !handle_frame(&state, role, text.as_str()).await {
+                if !handle_frame(&state, &display, role, text.as_str()).await {
                     break;
                 }
             }
@@ -155,11 +161,11 @@ async fn handle_socket(
     let _ = tx.send(Message::Close(None));
     drop(tx);
     let _ = writer.await;
-    unregister_peer(&state, role, addr).await;
+    unregister_peer(&state, &display, role, addr).await;
 }
 
 /// Returns false when the socket should be closed.
-async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
+async fn handle_frame(state: &AppState, display: &Arc<Display>, role: Role, text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         debug!("Cast: ignoring non-JSON frame from {:?}", role);
         return true;
@@ -169,7 +175,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
         // SDP and ICE are relayed verbatim. The server has no reason to parse
         // WebRTC payloads, and not parsing them means it cannot break them.
         Some("signal") => {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             let target = match role {
                 Role::Sender => session.display.as_ref(),
                 Role::Display => session.sender.as_ref(),
@@ -212,7 +218,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             };
 
             let sender = {
-                let mut session = state.cast.lock().await;
+                let mut session = display.cast.lock().await;
                 session.display_limits = Some(limits);
                 session.sender.as_ref().map(|peer| peer.tx.clone())
             };
@@ -230,7 +236,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
         Some("present") if role == Role::Sender => {
             let allowed = state.settings.read().await.guest_pages_enabled;
             let refuse = |reason: &'static str| async move {
-                let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
+                let tx = display.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
                 if let Some(tx) = tx {
                     let _ = tx.send(error_frame("page", reason));
                 }
@@ -269,12 +275,17 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
             // `deactivate_display` clears `sender_addr`, so a `guest_page.shown`
             // built from the field afterwards would announce the guest's second
             // and every later page with no address at all.
-            let sender_ip = state.cast.lock().await.sender_addr;
-            deactivate_display(state, "replaced").await;
-            activate_display(state, Showing::Page { url: parsed.clone(), scroll }, sender_ip)
-                .await;
+            let sender_ip = display.cast.lock().await.sender_addr;
+            deactivate_display(state, display, "replaced").await;
+            activate_display(
+                state,
+                display,
+                Showing::Page { url: parsed.clone(), scroll },
+                sender_ip,
+            )
+            .await;
 
-            let tx = state.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
+            let tx = display.cast.lock().await.sender.as_ref().map(|p| p.tx.clone());
             if let Some(tx) = tx {
                 let _ = tx.send(Message::Text(
                     json!({"type": "presenting", "url": redact(&parsed)})
@@ -287,6 +298,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
         Some("stop") => {
             info!("Cast: {:?} asked to stop", role);
             let state = state.clone();
+            let display = display.clone();
             // The arm is role-agnostic on purpose -- either end may hang up --
             // so the reason has to come from `role`. Hard-coding "sender" put
             // the display's own stop in the log and in `cast.ended` under the
@@ -295,7 +307,7 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
                 Role::Sender => "sender",
                 Role::Display => "display",
             };
-            tokio::spawn(async move { end_session(&state, reason).await });
+            tokio::spawn(async move { end_session(&state, &display, reason).await });
             false
         }
         other => {
@@ -309,11 +321,11 @@ async fn handle_frame(state: &AppState, role: Role, text: &str) -> bool {
 /// the reservation lapsed or belongs to someone else, so the page should send
 /// the guest back to the code step.
 async fn consume_reservation(
-    state: &AppState,
+    display: &Arc<Display>,
     addr: IpAddr,
     ticket: Option<&str>,
 ) -> Result<(), String> {
-    let mut session = state.cast.lock().await;
+    let mut session = display.cast.lock().await;
 
     if session.sender.is_some() {
         return Err("Es überträgt bereits jemand.".to_string());
@@ -342,12 +354,13 @@ async fn consume_reservation(
 
 pub(super) async fn register_peer(
     state: &AppState,
+    display: &Arc<Display>,
     role: Role,
     addr: IpAddr,
     tx: mpsc::UnboundedSender<Message>,
 ) -> bool {
     let (counterpart, welcome) = {
-        let mut session = state.cast.lock().await;
+        let mut session = display.cast.lock().await;
 
         let slot = match role {
             Role::Sender => &mut session.sender,
@@ -421,7 +434,7 @@ pub(super) async fn register_peer(
         // guest took to type it as time spent casting. Only on the announcing
         // pass, so a socket that bounces mid-cast does not restart the clock.
         let (mode, announce) = {
-            let mut session = state.cast.lock().await;
+            let mut session = display.cast.lock().await;
             let mode = session.pending_mode;
             let announce = mode == ClaimMode::Cast && !session.cast_announced;
             if announce {
@@ -436,26 +449,30 @@ pub(super) async fn register_peer(
         // the state the event describes is already settled here: the sender slot
         // is filled and its address recorded.
         if announce {
-            // No `Display` is bound at this point -- `activate_display` runs
-            // below -- so the name is resolved the same way it resolves it, and
-            // the event therefore names the screen this cast is about to land
-            // on.
-            state.webhooks.fire(&state.cast_display().name, crate::webhook::Event::CastStarted {
+            // The screen this sender was admitted to, which is also the one
+            // `activate_display` pins below -- they are the same `Display`, so a
+            // receiver cannot be told about a screen the cast is not on.
+            state.webhooks.fire(&display.name, crate::webhook::Event::CastStarted {
                 sender_ip: addr.to_string(),
                 mode: "cast".to_string(),
             });
         }
         if mode == ClaimMode::Cast {
-            activate_display(state, Showing::Cast, Some(addr)).await;
+            activate_display(state, display, Showing::Cast, Some(addr)).await;
         }
     }
 
     true
 }
 
-pub(super) async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) {
+pub(super) async fn unregister_peer(
+    state: &AppState,
+    display: &Arc<Display>,
+    role: Role,
+    addr: IpAddr,
+) {
     let (counterpart, epoch, holding, grace) = {
-        let mut session = state.cast.lock().await;
+        let mut session = display.cast.lock().await;
         match role {
             Role::Sender => session.sender = None,
             Role::Display => session.display = None,
@@ -482,6 +499,6 @@ pub(super) async fn unregister_peer(state: &AppState, role: Role, addr: IpAddr) 
     info!("Cast: {:?} at {} disconnected", role, addr);
 
     if role == Role::Sender && holding {
-        watch_sender_grace(state.clone(), epoch, grace);
+        watch_sender_grace(state.clone(), display.clone(), epoch, grace);
     }
 }

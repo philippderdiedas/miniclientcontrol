@@ -690,17 +690,18 @@ pub fn routes() -> Router<AppState> {
 /// shows what is really out there rather than the global half of it.
 pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
     // The primary display's item, permanently: the overlay configuration is
-    // global, so the only per-display thing in this payload is which item the
-    // layer belongs to. Answering for the first screen is the compromise --
-    // refusing an unscoped request the way the display-owned paths do would take
-    // the preview away from every multi-screen deployment to tell it something
-    // that is the same on all of them.
-    let current = *state.primary().current_item_id.lock().await;
+    // global, so the only per-display things in this payload are which item the
+    // layer belongs to and whether that screen is casting. Answering for the
+    // first screen is the compromise -- refusing an unscoped request the way the
+    // display-owned paths do would take the preview away from every multi-screen
+    // deployment to tell it something that is nearly the same on all of them.
+    let display = state.primary();
+    let current = *display.current_item_id.lock().await;
     let item = match current {
         Some(id) => crate::db::load_item_overlay(&state.pool, id).await,
         None => None,
     };
-    Json(overlay_payload(&state, item.as_ref()).await)
+    Json(overlay_payload(&state, &display, item.as_ref()).await)
 }
 
 /// The layers handed to `__ov.apply()`, on the display and in the preview.
@@ -712,7 +713,11 @@ pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
 /// The global overlay comes first and the item's second, which is also the order
 /// they stack in when both want the same corner -- and the reason the global one
 /// decides that box's style.
-pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> serde_json::Value {
+pub async fn overlay_payload(
+    state: &AppState,
+    display: &crate::models::Display,
+    item: Option<&ItemOverlay>,
+) -> serde_json::Value {
     // One acquisition for all three: the cast switch decides whether a cast QR is
     // drawn at all, and taking the lock more than once in a single build invites a
     // reader to wonder whether the parts can disagree.
@@ -727,7 +732,11 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
     // `is_active` rather than "a sender is connected": during the grace period
     // after a sender's socket drops the cast page is still on screen, and an
     // overlay blinking back for those five seconds would look like a fault.
-    let casting = state.cast.lock().await.is_active();
+    // This screen's session, not the controller's: `hide_during_cast` and the
+    // cast QR are about what is on *this* panel, so a cast on the screen next
+    // door must not blank the notice here or drop the code that would let
+    // somebody cast to this one.
+    let casting = display.cast.lock().await.is_active();
     let mut layers: Vec<serde_json::Value> = Vec::new();
 
     if casting && overlay.hide_during_cast {
@@ -1142,7 +1151,11 @@ pub async fn update_settings(
     // would only apply to the next person.
     if cast_turned_off {
         tracing::info!("Cast: disabled by the operator, ending any running session");
-        crate::cast::end_session(&state, "disabled").await;
+        // Every screen: the switch is the venue's, so a session on any panel
+        // has to stop. With one display this is exactly what it was.
+        for display in state.displays.iter() {
+            crate::cast::end_session(&state, display, "disabled").await;
+        }
     }
 
     read_settings(State(state)).await.into_response()

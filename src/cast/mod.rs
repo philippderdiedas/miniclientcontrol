@@ -27,7 +27,6 @@
 //! id, and the relay forwards SDP and ICE without interpreting them. Not parsing
 //! them is also what keeps the server from being able to break them.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,7 +45,7 @@ use tracing::{debug, info, warn};
 use ::url::Url;
 
 use crate::guest_page::redact;
-use crate::models::{AppState, OverrideItem, ScrollMode};
+use crate::models::{AppState, Display, OverrideItem, ScrollMode};
 
 mod api;
 mod room_audio;
@@ -149,7 +148,15 @@ pub enum Showing {
     },
 }
 
-struct Attempts {
+/// Wrong pairing codes seen from one address, and the lockout they earned.
+///
+/// The one `pub` item in this file that is not part of the session's own
+/// surface, and only because `AppState::cast_attempts` names it: a public field
+/// cannot have a private type. The lockout counter is controller-wide, not per
+/// screen -- per screen it would multiply by the number of displays and hand an
+/// attacker N tries at a four-character code instead of one. The fields stay
+/// private, which still reaches every submodule of `cast` and nothing else.
+pub struct Attempts {
     failures: u32,
     locked_until: Option<Instant>,
     last_seen: Instant,
@@ -184,6 +191,12 @@ impl DisplayLimits {
     }
 }
 
+/// One screen's cast session. It lives on the `Display` it belongs to, so two
+/// guests casting to two screens share no peers, no reservation and no timers.
+///
+/// `Attempts` is the deliberate exception and sits on `AppState` instead: a
+/// per-screen lockout counter would give a guesser one budget per display.
+///
 /// Every field is private, not `pub(super)`: a `pub(super)` item defined
 /// *directly in this file* is scoped to this module's parent, which is the
 /// crate root, and `pub(super)` extends to every descendant of that -- the
@@ -221,11 +234,13 @@ pub struct CastSession {
     cast_announced: bool,
     pairing: Option<Pairing>,
     reservation: Option<Reservation>,
-    attempts: HashMap<IpAddr, Attempts>,
     /// Last limit a display announced. Deliberately kept when a session ends: it
     /// is a property of the hardware, not of the cast, and remembering it is what
     /// lets the *next* sender constrain its capture before the first frame
-    /// instead of showing a black rectangle until the display checks in.
+    /// instead of showing a black rectangle until the display checks in. Now
+    /// that the session hangs off the `Display`, it also cannot be read for the
+    /// wrong screen: each panel's GPU limit is stored beside that panel, and the
+    /// session outliving it is the `Display` itself.
     display_limits: Option<DisplayLimits>,
     /// Bumped on every activate/deactivate so a delayed watchdog task can tell
     /// whether the session it was launched for is still the current one.
@@ -356,8 +371,21 @@ fn codes_match(expected: &str, provided: &str) -> bool {
 /// because a guest replacing their page releases the old one first, and
 /// `deactivate_display` clears that field on its way out -- reading it here
 /// would announce the second and every later page with no address at all.
-async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<IpAddr>) {
-    let mut session = state.cast.lock().await;
+///
+/// `display` is the screen this session belongs to, passed in rather than
+/// resolved: the session *is* one of its fields, so resolving a second time here
+/// is the one way the pinned override could end up on a different screen than the
+/// session that thinks it holds it.
+async fn activate_display(
+    state: &AppState,
+    display: &Arc<Display>,
+    showing: Showing,
+    sender_ip: Option<IpAddr>,
+) {
+    // Lock order is settings -> cast -> `Display::override_item`, and the guard
+    // below is held across the `override_item` await. Nothing in the tree takes
+    // these the other way round.
+    let mut session = display.cast.lock().await;
     if session.holding_override {
         return;
     }
@@ -367,9 +395,6 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
         Showing::Page { url, scroll } => (url.to_string(), scroll.clone()),
         Showing::Nothing => return,
     };
-    // The one screen a cast pins, which `--cast-display` chooses and every other
-    // cast site resolves the same way.
-    let display = state.cast_display();
     {
         let mut current = display.override_item.lock().await;
         session.previous_override = current.clone();
@@ -406,7 +431,7 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
             // Only a cast has a display peer to wait for. A page has none, and
             // this watchdog would tear it down after its deadline for a peer
             // that was never coming.
-            watch_display_arrival(state.clone(), epoch);
+            watch_display_arrival(state.clone(), display.clone(), epoch);
         }
         Showing::Page { url, .. } => {
             info!("Cast: guest page pinned to {}", redact(url));
@@ -428,8 +453,13 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
 /// `reason` is what a webhook receiver is told about why the session ended, so
 /// it has to come from the caller: this function cannot tell an operator's stop
 /// from a watchdog's timeout from one guest page replacing another.
-async fn deactivate_display(state: &AppState, reason: &'static str) {
-    let mut session = state.cast.lock().await;
+///
+/// `display` is the same screen `activate_display` was given -- it is the one
+/// whose session this is, so the teardown cannot release a different panel than
+/// the one that was pinned.
+async fn deactivate_display(state: &AppState, display: &Arc<Display>, reason: &'static str) {
+    // Same order as `activate_display`: cast, then `override_item`.
+    let mut session = display.cast.lock().await;
     if !session.holding_override {
         return;
     }
@@ -439,8 +469,6 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
         Showing::Page { url, .. } => Some(url.to_string()),
         Showing::Nothing => None,
     };
-    // The same screen `activate_display` pinned.
-    let display = state.cast_display();
     {
         let mut current = display.override_item.lock().await;
         // Only restore if what is on screen is still the override we installed.
@@ -521,71 +549,82 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
 /// The reason is threaded through rather than decided here, because the callers
 /// disagree about it: an operator's stop, a guest's own stop frame, three
 /// watchdogs giving up and the cast switch being turned off all end up here.
-pub async fn end_session(state: &AppState, reason: &'static str) {
-    let (sender, display) = {
-        let mut session = state.cast.lock().await;
+pub async fn end_session(state: &AppState, display: &Arc<Display>, reason: &'static str) {
+    let (sender_peer, display_peer) = {
+        let mut session = display.cast.lock().await;
         // Cleared here rather than only in `deactivate_display`, which returns
         // early when no override is held -- precisely the case where someone has
         // reserved the session but not started streaming.
         session.reservation = None;
         (session.sender.take(), session.display.take())
     };
-    for peer in [sender, display].into_iter().flatten() {
+    for peer in [sender_peer, display_peer].into_iter().flatten() {
         let _ = peer.tx.send(Message::Close(None));
     }
-    deactivate_display(state, reason).await;
+    deactivate_display(state, display, reason).await;
 }
 
 /// The sender's socket went away. Wait out a short grace period before ending the
 /// cast, so a page reload does not bounce the display back to the playlist.
-fn watch_sender_grace(state: AppState, epoch: u64, grace: Duration) {
+fn watch_sender_grace(state: AppState, display: Arc<Display>, epoch: u64, grace: Duration) {
+    // Bound out of the macro's reach: `tracing`'s own `display()` field helper
+    // is in scope inside `info!`, so `display.name` there resolves to that
+    // function rather than to this screen.
+    let name = display.name.clone();
     tokio::spawn(async move {
         tokio::time::sleep(grace).await;
         let stale = {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             session.epoch == epoch && session.sender.is_none() && session.holding_override
         };
         if stale {
-            info!("Cast: sender did not return, ending session");
-            end_session(&state, "grace").await;
+            info!("Cast: sender did not return, ending session on '{}'", name);
+            end_session(&state, &display, "grace").await;
         }
     });
 }
 
 /// The display browser is being navigated to the cast page. If it never connects
 /// back, the sender would sit forever on "waiting for display".
-fn watch_display_arrival(state: AppState, epoch: u64) {
+fn watch_display_arrival(state: AppState, display: Arc<Display>, epoch: u64) {
+    // See `watch_sender_grace`: `display` is shadowed inside the log macros.
+    let name = display.name.clone();
     tokio::spawn(async move {
         tokio::time::sleep(DISPLAY_TIMEOUT).await;
         let missing = {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             session.epoch == epoch && session.display.is_none() && session.holding_override
         };
         if missing {
-            warn!("Cast: display never connected back within {:?}", DISPLAY_TIMEOUT);
+            warn!(
+                "Cast: display '{}' never connected back within {:?}",
+                name, DISPLAY_TIMEOUT
+            );
             let sender_tx = {
-                let session = state.cast.lock().await;
+                let session = display.cast.lock().await;
                 session.sender.as_ref().map(|peer| peer.tx.clone())
             };
             if let Some(tx) = sender_tx {
                 let _ = tx.send(error_frame("display", "Das Display hat sich nicht gemeldet."));
             }
-            end_session(&state, "grace").await;
+            end_session(&state, &display, "grace").await;
         }
     });
 }
 
 /// A pairing code nobody used must not hold the screen hostage.
-fn watch_pairing_expiry(state: AppState, epoch: u64) {
+fn watch_pairing_expiry(state: AppState, display: Arc<Display>, epoch: u64) {
+    // See `watch_sender_grace`: `display` is shadowed inside the log macros.
+    let name = display.name.clone();
     tokio::spawn(async move {
         tokio::time::sleep(PAIRING_TTL).await;
         let unused = {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             session.epoch == epoch && session.sender.is_none() && session.holding_override
         };
         if unused {
-            info!("Cast: pairing code expired unused");
-            end_session(&state, "grace").await;
+            info!("Cast: pairing code on '{}' expired unused", name);
+            end_session(&state, &display, "grace").await;
         }
     });
 }
@@ -697,16 +736,12 @@ mod tests {
     /// A state whose only webhook target is `receiver`, subscribed to every
     /// event this module can emit.
     async fn state_for(receiver: &Receiver) -> AppState {
-        state_for_displays(receiver, &["default"], None).await
+        state_for_displays(receiver, &["default"]).await
     }
 
-    /// The same state, driving the named screens, with `--cast-display` set to
-    /// `cast_display` when given.
-    async fn state_for_displays(
-        receiver: &Receiver,
-        names: &[&str],
-        cast_display: Option<&str>,
-    ) -> AppState {
+    /// The same state, driving the named screens. Each gets its own session,
+    /// because the session is a field of the `Display`.
+    async fn state_for_displays(receiver: &Receiver, names: &[&str]) -> AppState {
         // `max_connections(1)` rather than a bare `sqlite::memory:`: every test
         // in this module fires webhooks, which deliver from a spawned task
         // holding a second pool connection, and a second connection to a fresh
@@ -732,7 +767,6 @@ mod tests {
 
         let mut args = crate::models::Args::parse_from(["miniclientcontrol"]);
         args.display = names.iter().map(|n| n.to_string()).collect();
-        args.cast_display = cast_display.map(|n| n.to_string());
         let settings = crate::settings::load(&pool, &args).await;
         let displays = names
             .iter()
@@ -754,7 +788,7 @@ mod tests {
             locks: Default::default(),
             auth_cache: Default::default(),
             audio: Arc::new(crate::audio::Backend::Unavailable),
-            cast: Default::default(),
+            cast_attempts: Default::default(),
             webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
         }
     }
@@ -762,12 +796,12 @@ mod tests {
     /// Stands in for the pairing request: `start_pairing` mints a code and pins
     /// the display so the cast page can draw it. Everything else it does needs
     /// an HTTP extractor and none of it touches what is under test here.
-    async fn pin_for_pairing(state: &AppState) {
-        state.cast.lock().await.pairing = Some(Pairing {
+    async fn pin_for_pairing(state: &AppState, display: &Arc<Display>) {
+        display.cast.lock().await.pairing = Some(Pairing {
             code: "ABCD".to_string(),
             expires_at: Instant::now() + PAIRING_TTL,
         });
-        activate_display(state, Showing::Cast, None).await;
+        activate_display(state, display, Showing::Cast, None).await;
     }
 
     fn sender_socket() -> mpsc::UnboundedSender<Message> {
@@ -781,11 +815,12 @@ mod tests {
     async fn pairing_pins_the_display_without_announcing_a_cast() {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
+        let display = state.primary();
 
-        pin_for_pairing(&state).await;
+        pin_for_pairing(&state, &display).await;
 
         {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             assert!(session.holding_override, "the display was not pinned");
             assert!(
                 !session.cast_announced,
@@ -807,14 +842,15 @@ mod tests {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
 
-        pin_for_pairing(&state).await;
-        let pinned_at = state.cast.lock().await.started_at.expect("no start time");
+        let display = state.primary();
+        pin_for_pairing(&state, &display).await;
+        let pinned_at = display.cast.lock().await.started_at.expect("no start time");
 
         let addr: IpAddr = "192.168.1.44".parse().unwrap();
-        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert!(register_peer(&state, &display, Role::Sender, addr, sender_socket()).await);
 
         {
-            let session = state.cast.lock().await;
+            let session = display.cast.lock().await;
             assert!(session.cast_announced, "the sender's arrival was not announced");
             let started_at = session.started_at.expect("no start time");
             // Without the re-stamp this would still be the pairing moment, and
@@ -840,50 +876,40 @@ mod tests {
         assert!(body.contains("192.168.1.44"), "the sender's address is missing: {body}");
     }
 
+    /// Two declared screens, one activated. The other must be untouched -- the
+    /// session is a field of the `Display`, so there is nothing for the two to
+    /// share and nothing for one to clobber in the other.
     #[tokio::test]
-    async fn a_cast_pins_the_display_the_deployment_chose() {
+    async fn two_screens_hold_independent_sessions() {
         let receiver = receiver().await;
-        let state =
-            state_for_displays(&receiver, &["foyer", "werkstatt"], Some("werkstatt")).await;
+        let state = state_for_displays(&receiver, &["foyer", "werkstatt"]).await;
+        let foyer = state.display("foyer").unwrap();
+        let werkstatt = state.display("werkstatt").unwrap();
 
-        pin_for_pairing(&state).await;
+        // The *second* declared screen on purpose. Activating the first would
+        // pass just as well against an `activate_display` that ignored its
+        // argument and resolved `displays[0]` itself, which is exactly the
+        // regression this test is here to catch.
+        activate_display(
+            &state,
+            &werkstatt,
+            Showing::Cast,
+            Some("10.0.0.5".parse().unwrap()),
+        )
+        .await;
 
-        let chosen = state.display("werkstatt").expect("werkstatt is not declared");
-        let other = state.display("foyer").expect("foyer is not declared");
         assert!(
-            chosen.override_item.lock().await.is_some(),
-            "the cast did not pin --cast-display"
+            werkstatt.cast.lock().await.is_active(),
+            "the screen that was activated"
         );
         assert!(
-            other.override_item.lock().await.is_none(),
-            "the cast pinned a screen it was not sent to"
+            !foyer.cast.lock().await.is_active(),
+            "the other screen must be untouched -- one session per display is the whole feature"
         );
-
-        let addr: IpAddr = "192.168.1.44".parse().unwrap();
-        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
-        assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
-        let body = {
-            let bodies = receiver.bodies.lock().await;
-            bodies
-                .iter()
-                .find(|b| b.contains("\"event\":\"cast.started\""))
-                .cloned()
-                .expect("no cast.started body")
-        };
-        // `register_peer` fires this before `activate_display` runs, so it has
-        // no display bound and resolves the name itself. If the two ever resolve
-        // differently, a receiver is told about a screen the cast is not on.
+        assert!(werkstatt.override_item.lock().await.is_some());
         assert!(
-            body.contains("\"display\":\"werkstatt\""),
-            "cast.started named the wrong screen: {body}"
-        );
-
-        // The teardown has to find the same screen, or the cast page stays up
-        // for good and the playlist never comes back.
-        deactivate_display(&state, "test").await;
-        assert!(
-            chosen.override_item.lock().await.is_none(),
-            "the teardown released a different screen than the one it pinned"
+            foyer.override_item.lock().await.is_none(),
+            "activating one screen must not pin an override on another"
         );
     }
 
@@ -892,11 +918,12 @@ mod tests {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
 
-        pin_for_pairing(&state).await;
+        let display = state.primary();
+        pin_for_pairing(&state, &display).await;
         let addr: IpAddr = "192.168.1.44".parse().unwrap();
-        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert!(register_peer(&state, &display, Role::Sender, addr, sender_socket()).await);
         assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
-        let started_at = state.cast.lock().await.started_at.expect("no start time");
+        let started_at = display.cast.lock().await.started_at.expect("no start time");
         // `activate_display` early-returns once the display is already pinned,
         // so this session's only `override.set` came from `pin_for_pairing`;
         // nothing between here and the bounce below fires another one.
@@ -904,12 +931,12 @@ mod tests {
 
         // The socket bounces. The session survives, because `unregister_peer`
         // hands it to the grace watchdog rather than ending it.
-        unregister_peer(&state, Role::Sender, addr).await;
+        unregister_peer(&state, &display, Role::Sender, addr).await;
         assert!(
-            state.cast.lock().await.holding_override,
+            display.cast.lock().await.holding_override,
             "the grace period should still be holding the display"
         );
-        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert!(register_peer(&state, &display, Role::Sender, addr, sender_socket()).await);
 
         receiver.settle().await;
         assert_eq!(
@@ -921,7 +948,7 @@ mod tests {
         // here is exactly the "a sender reconnect resets the cast clock"
         // regression the `if announce` guard exists to prevent.
         assert_eq!(
-            state.cast.lock().await.started_at,
+            display.cast.lock().await.started_at,
             Some(started_at),
             "the reconnect re-stamped the cast's start time"
         );
@@ -941,11 +968,12 @@ mod tests {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
 
-        pin_for_pairing(&state).await;
+        let display = state.primary();
+        pin_for_pairing(&state, &display).await;
         assert_eq!(receiver.wait_for("override.set", 1).await, 1);
 
         // What `watch_pairing_expiry` does when nobody types the code.
-        end_session(&state, "grace").await;
+        end_session(&state, &display, "grace").await;
 
         // The display was pinned and is released, so this one is owed.
         assert_eq!(receiver.wait_for("override.cleared", 1).await, 1);
@@ -966,30 +994,33 @@ mod tests {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
 
-        pin_for_pairing(&state).await;
+        let display = state.primary();
+        pin_for_pairing(&state, &display).await;
         let addr: IpAddr = "192.168.1.44".parse().unwrap();
-        assert!(register_peer(&state, Role::Sender, addr, sender_socket()).await);
+        assert!(register_peer(&state, &display, Role::Sender, addr, sender_socket()).await);
         assert_eq!(receiver.wait_for("cast.started", 1).await, 1);
 
-        end_session(&state, "operator").await;
+        end_session(&state, &display, "operator").await;
 
         assert_eq!(receiver.wait_for("cast.ended", 1).await, 1);
         assert_eq!(receiver.wait_for("override.cleared", 1).await, 1);
         // Cleared on teardown, or the next session on this process would think it
         // had already announced itself and stay silent.
-        assert!(!state.cast.lock().await.cast_announced);
+        assert!(!display.cast.lock().await.cast_announced);
     }
 
     #[tokio::test]
     async fn a_replacing_page_still_carries_the_guests_address() {
         let receiver = receiver().await;
         let state = state_for(&receiver).await;
+        let display = state.primary();
         let addr: IpAddr = "192.168.1.44".parse().unwrap();
         let first: Url = "https://dash.example.test/a".parse().unwrap();
         let second: Url = "https://dash.example.test/b".parse().unwrap();
 
         activate_display(
             &state,
+            &display,
             Showing::Page { url: first, scroll: ScrollMode::None },
             Some(addr),
         )
@@ -1003,9 +1034,10 @@ mod tests {
         // under test -- before it, `activate_display` re-read the now-cleared
         // field itself and every replacement page announced no address at all.
         let sender_ip = Some(addr);
-        deactivate_display(&state, "replaced").await;
+        deactivate_display(&state, &display, "replaced").await;
         activate_display(
             &state,
+            &display,
             Showing::Page { url: second, scroll: ScrollMode::None },
             sender_ip,
         )

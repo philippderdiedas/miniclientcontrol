@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::ws::Message;
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::models::{AppState, CastAuth};
+use crate::models::{AppState, CastAuth, Display};
 
 use super::{
     activate_display, codes_match, end_session, generate_code, generate_ticket,
@@ -23,6 +24,7 @@ use super::url::sender_url;
 /// lockout so a four-character code cannot simply be enumerated.
 pub(super) async fn authorize_sender(
     state: &AppState,
+    display: &Arc<Display>,
     addr: IpAddr,
     provided: Option<&str>,
     mode: ClaimMode,
@@ -44,9 +46,10 @@ pub(super) async fn authorize_sender(
         ClaimMode::Page => pages_enabled,
     };
 
-    let mut session = state.cast.lock().await;
-
-    if let Some(entry) = session.attempts.get(&addr) {
+    // The lockout is controller-wide and the pairing code is one screen's, so
+    // the two live in different places and are deliberately never held at once:
+    // keeping them disjoint means this function adds no edge to the lock order.
+    if let Some(entry) = state.cast_attempts.lock().await.get(&addr) {
         if let Some(until) = entry.locked_until {
             if Instant::now() < until {
                 return Err("Zu viele Fehlversuche. Bitte kurz warten.".to_string());
@@ -61,6 +64,7 @@ pub(super) async fn authorize_sender(
         });
     }
 
+    let mut session = display.cast.lock().await;
     let outcome = match auth_mode {
         CastAuth::None => Ok(()),
         CastAuth::Code => {
@@ -91,24 +95,27 @@ pub(super) async fn authorize_sender(
 
     match outcome {
         Ok(()) => {
-            session.attempts.remove(&addr);
             // A pairing code is single-use; leaving it valid would let a second
             // guest reuse a code they saw on screen minutes ago.
             session.pairing = None;
+            drop(session);
+            state.cast_attempts.lock().await.remove(&addr);
             Ok(())
         }
         Err(message) => {
+            drop(session);
+            let mut attempts = state.cast_attempts.lock().await;
             let now = Instant::now();
             // Forget addresses that are neither locked out nor still actively
             // guessing, so the table does not grow for the lifetime of a device
             // that runs for months. The window must outlast a burst of wrong
             // codes, or a slow attacker's counter would reset before it trips.
-            session.attempts.retain(|_, entry| {
+            attempts.retain(|_, entry| {
                 entry.locked_until.is_some_and(|until| until > now)
                     || now.duration_since(entry.last_seen) < LOCKOUT
             });
 
-            let entry = session.attempts.entry(addr).or_insert(Attempts {
+            let entry = attempts.entry(addr).or_insert(Attempts {
                 failures: 0,
                 locked_until: None,
                 last_seen: now,
@@ -165,8 +172,13 @@ pub struct CastStateResponse {
 
 pub async fn cast_state(State(state): State<AppState>) -> impl IntoResponse {
     let sender_url = sender_url(&state);
+    // The cast routes are not display-scoped yet, so they answer for the first
+    // declared screen. Resolved once per handler and passed on, never resolved
+    // again further down: one request must not read one session and write
+    // another.
+    let display = state.primary();
     let settings = state.settings.read().await;
-    let session = state.cast.lock().await;
+    let session = display.cast.lock().await;
     Json(CastStateResponse {
         enabled: settings.cast_enabled,
         hard_disabled: state.args.disable_cast,
@@ -202,8 +214,9 @@ pub async fn cast_info(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let sender_url = sender_url(&state);
+    let display = state.primary();
     let settings = state.settings.read().await;
-    let session = state.cast.lock().await;
+    let session = display.cast.lock().await;
     // Never the code itself: this endpoint is reachable without credentials.
     Json(json!({
         "enabled": settings.cast_enabled,
@@ -247,9 +260,10 @@ pub async fn claim_session(
     }
 
     let addr = peer.ip();
+    let display = state.primary();
 
     {
-        let session = state.cast.lock().await;
+        let session = display.cast.lock().await;
         if session.sender.is_some() {
             return (
                 StatusCode::CONFLICT,
@@ -271,13 +285,15 @@ pub async fn claim_session(
         }
     }
 
-    if let Err(message) = authorize_sender(&state, addr, payload.code.as_deref(), payload.mode).await {
+    if let Err(message) =
+        authorize_sender(&state, &display, addr, payload.code.as_deref(), payload.mode).await
+    {
         return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
     }
 
     let ticket = generate_ticket();
     {
-        let mut session = state.cast.lock().await;
+        let mut session = display.cast.lock().await;
         session.reservation = Some(Reservation {
             ticket: ticket.clone(),
             addr,
@@ -300,7 +316,8 @@ pub async fn release_session(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    let mut session = state.cast.lock().await;
+    let display = state.primary();
+    let mut session = display.cast.lock().await;
     let mine = session
         .reservation
         .as_ref()
@@ -314,7 +331,7 @@ pub async fn release_session(
 
 /// Operator override: cut the cast short and put the playlist back.
 pub async fn stop_cast(State(state): State<AppState>) -> impl IntoResponse {
-    end_session(&state, "operator").await;
+    end_session(&state, &state.primary(), "operator").await;
     StatusCode::NO_CONTENT
 }
 
@@ -333,7 +350,8 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
         )
             .into_response();
     }
-    if state.cast.lock().await.is_taken() {
+    let display = state.primary();
+    if display.cast.lock().await.is_taken() {
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": "Es überträgt bereits jemand."})),
@@ -343,7 +361,7 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
 
     let code = generate_code();
     let display_tx = {
-        let mut session = state.cast.lock().await;
+        let mut session = display.cast.lock().await;
         session.pairing = Some(Pairing {
             code: code.clone(),
             expires_at: Instant::now() + PAIRING_TTL,
@@ -354,7 +372,7 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
     // The pairing code is drawn by the cast page, so the display has to be
     // pinned to it before anybody is streaming. No sender exists yet, which is
     // also why no `cast.started` comes out of this -- see `register_peer`.
-    activate_display(&state, Showing::Cast, None).await;
+    activate_display(&state, &display, Showing::Cast, None).await;
 
     if let Some(tx) = display_tx {
         let _ = tx.send(Message::Text(
@@ -368,8 +386,8 @@ pub async fn start_pairing(State(state): State<AppState>) -> Response {
         ));
     }
 
-    let epoch = state.cast.lock().await.epoch;
-    watch_pairing_expiry(state.clone(), epoch);
+    let epoch = display.cast.lock().await.epoch;
+    watch_pairing_expiry(state.clone(), display.clone(), epoch);
 
     Json(json!({"expires_in": PAIRING_TTL.as_secs()})).into_response()
 }
