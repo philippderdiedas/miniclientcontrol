@@ -100,14 +100,17 @@ Expected: `Finished`, **no warnings**. An unused-import warning means a `use` di
 Run: `cargo test 2>&1 | tail -5`
 Expected: `104 passed; 0 failed`.
 
-- [ ] **Step 4: Prove the move changed nothing**
+- [ ] **Step 4: Prove the move changed nothing, by diffing the code itself**
+
+A binary comparison is not available here — paths and line numbers are baked into panic messages, so the two builds differ for reasons that say nothing about the move. Compare the source instead:
 
 ```bash
-git stash && cargo build --release 2>/dev/null; sha256sum target/release/miniclientcontrol > /tmp/before.sha
-git stash pop && cargo build --release 2>/dev/null; sha256sum target/release/miniclientcontrol | sed 's#target.*##' > /tmp/after.sha
+git show HEAD:src/cast.rs | grep -v '^\s*$' | sed 's/^\s*//' | sort > /tmp/cast-before.txt
+cat src/cast/*.rs | grep -v '^\s*$' | sed 's/^\s*//' | sort > /tmp/cast-after.txt
+diff /tmp/cast-before.txt /tmp/cast-after.txt
 ```
 
-Binaries will **not** match byte for byte (paths and line numbers are baked into panic messages), so do not assert that. Instead verify by reading: `git diff --stat` must show only deletions from `cast.rs` and additions in `cast/`, and `git show --stat` after committing must show `src/cast.rs` deleted with a line count equal to the sum of the new files minus the `mod`/`use` lines you added. State that arithmetic in the task report.
+Expected: every line in the diff is one you deliberately added — `mod`/`use`/`pub use` lines, the `pub(super)` visibility changes from Step 2, and the new struct comment. **Nothing else may appear**, in either direction. Paste that diff into the task report; it is the evidence the move was pure, and a line you cannot explain is a line you changed by accident.
 
 - [ ] **Step 5: Run the cast suites unchanged**
 
