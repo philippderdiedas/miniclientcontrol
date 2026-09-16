@@ -638,6 +638,7 @@ pub type SharedCastSession = Arc<tokio::sync::Mutex<CastSession>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::api::authorize_sender;
     use super::signaling::{register_peer, unregister_peer};
     use clap::Parser;
 
@@ -1053,6 +1054,54 @@ mod tests {
         assert!(
             shown.iter().all(|b| b.contains("192.168.1.44")),
             "a present announced the guest with no address: {shown:?}"
+        );
+    }
+
+    /// A concurrent burst of wrong codes from one address must not evaluate
+    /// more of them than the lockout is supposed to tolerate.
+    ///
+    /// `authorize_sender` used to read `cast_attempts`, drop that guard, and
+    /// only then acquire `display.cast` -- so a task that read a clean counter
+    /// could be queued behind another that had done the same, and both would go
+    /// on to be evaluated before either recorded a failure. This needs a real
+    /// multi-worker runtime: on a single-threaded one every `.await` in
+    /// `authorize_sender` is a cooperative yield point at a *fixed* place, and
+    /// this interleaving depends on genuinely concurrent lock acquisition.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_wrong_codes_are_bounded_by_the_lockout() {
+        let receiver = receiver().await;
+        let state = state_for(&receiver).await;
+        {
+            let mut settings = state.settings.write().await;
+            settings.cast_auth = crate::models::CastAuth::Code;
+            settings.cast_code = "ABCD".to_string();
+        }
+        let display = state.primary();
+        let addr: IpAddr = "192.168.1.99".parse().unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..200 {
+            let state = state.clone();
+            let display = display.clone();
+            handles.push(tokio::spawn(async move {
+                authorize_sender(&state, &display, addr, Some("ZZZZ"), ClaimMode::Cast).await
+            }));
+        }
+
+        let mut evaluated = 0;
+        for handle in handles {
+            if let Err(message) = handle.await.unwrap() {
+                if message == "Falscher Code." {
+                    evaluated += 1;
+                }
+            }
+        }
+
+        assert!(
+            evaluated <= MAX_CODE_ATTEMPTS as usize,
+            "a concurrent burst of 200 wrong codes evaluated {evaluated}, more than \
+             MAX_CODE_ATTEMPTS ({MAX_CODE_ATTEMPTS}) -- the lockout no longer bounds a \
+             concurrent guesser"
         );
     }
 }

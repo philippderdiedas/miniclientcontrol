@@ -46,10 +46,18 @@ pub(super) async fn authorize_sender(
         ClaimMode::Page => pages_enabled,
     };
 
-    // The lockout is controller-wide and the pairing code is one screen's, so
-    // the two live in different places and are deliberately never held at once:
-    // keeping them disjoint means this function adds no edge to the lock order.
-    if let Some(entry) = state.cast_attempts.lock().await.get(&addr) {
+    // Held across the whole check -- the lockout read, the code comparison and
+    // the bookkeeping -- not just the read. Splitting those into separate
+    // acquisitions (as this used to) lets two concurrent guessers each read a
+    // clean counter before either has recorded a failure, so a burst of size N
+    // gets every one of its N wrong codes evaluated instead of being bounded by
+    // `MAX_CODE_ATTEMPTS`. Lock order: settings -> cast_attempts -> cast ->
+    // override_item. `cast_attempts` is a leaf everywhere else in the tree (only
+    // `authorize_sender` touches it), so taking `cast` while holding it here
+    // adds one edge and closes no cycle.
+    let mut attempts = state.cast_attempts.lock().await;
+
+    if let Some(entry) = attempts.get(&addr) {
         if let Some(until) = entry.locked_until {
             if Instant::now() < until {
                 return Err("Zu viele Fehlversuche. Bitte kurz warten.".to_string());
@@ -64,7 +72,12 @@ pub(super) async fn authorize_sender(
         });
     }
 
-    let mut session = display.cast.lock().await;
+    // Only `CastAuth::Pairing` reads the session (the code lives on the
+    // display, not the lockout table), so it is the only arm that takes
+    // `display.cast` -- the busiest mutex in the subsystem, and the one
+    // `activate_display`/`deactivate_display` hold across an `override_item`
+    // await and `cast_state` takes on every 2-second admin poll. `None` and
+    // `Code` are checked against `configured_code` alone and need no session.
     let outcome = match auth_mode {
         CastAuth::None => Ok(()),
         CastAuth::Code => {
@@ -78,33 +91,34 @@ pub(super) async fn authorize_sender(
                 Err("Falscher Code.".to_string())
             }
         }
-        CastAuth::Pairing => match session.pairing.as_ref() {
-            None => Err("Kein Pairing angefordert.".to_string()),
-            Some(pairing) if Instant::now() >= pairing.expires_at => {
-                Err("Der Code ist abgelaufen.".to_string())
-            }
-            Some(pairing) => {
-                if codes_match(&pairing.code, provided.unwrap_or("")) {
-                    Ok(())
-                } else {
-                    Err("Falscher Code.".to_string())
+        CastAuth::Pairing => {
+            let mut session = display.cast.lock().await;
+            match session.pairing.as_ref() {
+                None => Err("Kein Pairing angefordert.".to_string()),
+                Some(pairing) if Instant::now() >= pairing.expires_at => {
+                    Err("Der Code ist abgelaufen.".to_string())
+                }
+                Some(pairing) => {
+                    if codes_match(&pairing.code, provided.unwrap_or("")) {
+                        // A pairing code is single-use; leaving it valid would
+                        // let a second guest reuse a code they saw on screen
+                        // minutes ago.
+                        session.pairing = None;
+                        Ok(())
+                    } else {
+                        Err("Falscher Code.".to_string())
+                    }
                 }
             }
-        },
+        }
     };
 
     match outcome {
         Ok(()) => {
-            // A pairing code is single-use; leaving it valid would let a second
-            // guest reuse a code they saw on screen minutes ago.
-            session.pairing = None;
-            drop(session);
-            state.cast_attempts.lock().await.remove(&addr);
+            attempts.remove(&addr);
             Ok(())
         }
         Err(message) => {
-            drop(session);
-            let mut attempts = state.cast_attempts.lock().await;
             let now = Instant::now();
             // Forget addresses that are neither locked out nor still actively
             // guessing, so the table does not grow for the lifetime of a device
