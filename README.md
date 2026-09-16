@@ -90,8 +90,9 @@ cargo run --release
 
 If credentials are enabled, the control UI and the API require authentication.
 
-The operator UI (`/admin.html`, `/playlist.html`, `/assets.html`, `/api/*`)
-requires the credentials. The pages the *display* browser renders are exempt, but
+The operator UI (`/admin.html`, `/playlist.html`, `/assets.html`,
+`/displays.html`, `/webhooks.html`, `/api/*`) requires the credentials. The pages
+the *display* browser renders are exempt, but
 **only when requested from loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`, `/pdf.worker.min.js`,
 `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`,
 `/cast_display.html`, `/cast.js` and `/api/cast/state`.
@@ -113,6 +114,8 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --assets-dir <path>          (default: ./assets)
 --database-path <path>       (default: miniclient.db)
 --cdp-url <url>              (default: http://127.0.0.1:9222)
+--display <name[:port]>      (repeatable; one per screen this deployment drives)
+--cast-display <name>        (which declared screen a cast pins; default: the first)
 --basic-auth-user <string>   (optional, must be set with password)
 --basic-auth-password <string> (optional, must be set with user)
 --disable-cast               (default: false)
@@ -124,7 +127,8 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --cast-stun-url <url>        (optional, only if LAN ICE fails)
 --no-launch-browser          (connect to an existing browser only)
 --chromium <path>            (autodetected when unset)
---chromium-user-data-dir <p> (default: /tmp/miniclientcontrol-chromium)
+--chromium-user-data-dir <p> (default: /tmp/miniclientcontrol-chromium-<cdp-port>)
+--chromium-class <name>      (default: miniclientcontrol-<cdp-port>; the WM class/app_id)
 --no-kiosk                   (windowed browser, useful when testing)
 --chromium-arg <flag>        (extra browser flags, repeatable)
 --browser-language <list>    (default: de,de-DE,en-US,en)
@@ -136,19 +140,24 @@ Control who may cast in the admin UI, or remove the feature entirely with
 ```
 
 These options also support environment variables through `clap` `env` support.
+`--display` is the one whose name does not follow: it reads **`DISPLAYS`**, and
+takes a comma-separated list there or in a single flag value. The plural matters —
+the X11 `DISPLAY` every kiosk session exports is not read as a screen
+declaration.
 
 ## Runtime Behavior
 
 - Creates the asset directory if missing.
-- Creates/migrates SQLite tables (`assets`, `playlist_items`, `settings`, `webhooks`).
+- Creates/migrates SQLite tables (`assets`, `playlists`, `playlist_items`,
+  `displays`, `settings`, `webhooks`).
 - Starts an HTTP server on `0.0.0.0:<port>`.
 - Serves uploaded files from `/uploads/...`.
 - Serves embedded UI files with fallback to `index.html`.
-- Runs a background browser loop that:
-  - reads active playlist entries,
+- Runs one background browser loop **per declared display**, each of which:
+  - reads the active entries of the playlist its display is assigned,
   - loads content in controlled browser tabs,
   - applies scroll mode,
-  - reacts to skip/playlist/override signals.
+  - reacts to skip/playlist/override signals for that display.
 
 ## API Overview
 
@@ -159,11 +168,24 @@ These options also support environment variables through `clap` `env` support.
 - `PUT /api/assets/{id}` — update asset metadata (currently duration)
 - `DELETE /api/assets/{id}` — delete file + DB row
 
-### Playlist
+### Playlists
 
-- `GET /api/playlist` — list playlist items with joined asset info
-- `POST /api/playlist` — add item (asset or URL)
+- `GET /api/playlists` — list playlists, each with the number of items it holds
+- `POST /api/playlists` — create one from `{ "name": "…" }`
+- `PUT /api/playlists/{id}` — rename
+- `DELETE /api/playlists/{id}` — refused with `409` while it still holds items,
+  and the message says how many. Deleting an empty one that a display is playing
+  leaves the display's row alone and simply unassigns it
+
+### Playlist items
+
+- `GET /api/playlist` — list items with joined asset info; `?playlist_id=<id>`
+  narrows it to one playlist, and leaving it off still returns everything
+- `POST /api/playlist` — add item (asset or URL). `playlist_id` is **required**:
+  an item in no playlist is one no screen would ever play, and nothing would say
+  so
 - `PUT /api/playlist/{id}` — update order/duration/enabled/schedule/scroll config
+- `POST /api/playlist/{id}/move` — renumber within the item's own playlist
 - `DELETE /api/playlist/{id}` — remove playlist item
 
 ### Settings
@@ -335,6 +357,12 @@ to muted playback, since nobody is there to click.
 Notes and limitations:
 
 - Only one sender at a time; a second one is told the display is busy.
+- **One cast session for the whole controller, on one screen.** With several
+  displays declared, `--cast-display <name>` picks which one a cast pins; without
+  it, the first declared. Per-display casting is not built yet, so the QR code and
+  the invitation on the idle screen are still global — a second panel standing
+  idle advertises a cast that will appear on the cast display instead. See
+  [docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
 - Screen sharing needs a desktop browser. Mobile browsers have no
   `getDisplayMedia`, though camera sharing works.
 - Screen *audio* is only shared reliably by Chrome, and only when the user ticks
@@ -350,41 +378,67 @@ This is a property of the browser connection and cannot be set per playlist item
 
 ## Two displays on one machine
 
-Run one controller per screen. Everything that can collide must differ:
+One controller drives as many screens as it is told to. Declare them:
 
 ```bash
-miniclientcontrol --port 3000 --cdp-url http://127.0.0.1:9222 \
-    --chromium-class chrome-1 --database-path .../one.db --assets-dir .../one
-miniclientcontrol --port 3001 --cdp-url http://127.0.0.1:9223 \
-    --chromium-class chrome-2 --database-path .../two.db --assets-dir .../two
+miniclientcontrol --display foyer --display werkstatt
 ```
 
-`--chromium-user-data-dir` and `--chromium-class` default to values derived from
-the CDP port, so they are already distinct; the TLS port picks the next free one
-by itself (3443, then 3444). Only the HTTP port, the database and the assets
-directory have to be spelled out.
+That is the whole configuration. One HTTP port, one database, one asset library
+and one admin page; each screen gets its own Chromium, its own control loop and
+its own assigned playlist. Assign the playlists on `/displays.html`.
 
-Window placement is the window manager's job. `--chromium-class` sets `WM_CLASS`,
-which i3 matches on:
+Each declared display derives what a separate controller used to be given by
+hand:
+
+| | derived from | `--display werkstatt` (second) |
+|---|---|---|
+| CDP port | `9222 + declaration index`, or the `name:port` form | `9223` |
+| WM class / Wayland `app_id` | `miniclientcontrol-<name>` | `miniclientcontrol-werkstatt` |
+| browser profile | `/tmp/miniclientcontrol-chromium-<name>` | `…-chromium-werkstatt` |
+
+`--display werkstatt:9300` pins one display's port without shifting any other's:
+the implicit ports still count from 9222 by declaration index. A name reaches a
+window-manager config and a filesystem path, so it is restricted to letters,
+digits, `-` and `_`.
+
+Because the declared branch derives all three, `--chromium-class`,
+`--chromium-user-data-dir` and a non-default `--cdp-url` are **refused** at
+startup alongside any `--display`, rather than being accepted and ignored. So is
+a `--class` smuggled in through `--chromium-arg`: Chromium takes the last
+`--class` on the command line, which would collapse every display onto one
+`app_id`. With no `--display` at all, none of that changes — one implicit display
+named `default` on `--cdp-url`, with exactly the previous defaults.
+
+Window placement is still the window manager's job. Under sway the class is the
+`app_id`:
 
 ```
-assign [class="chrome-1"] 1
-assign [class="chrome-2"] 2
+assign [app_id="miniclientcontrol-foyer"]     output HDMI-A-1
+assign [app_id="miniclientcontrol-werkstatt"] output DP-1
+```
+
+Under i3 it is `WM_CLASS`, and `assign` only chooses a workspace — pin the
+workspaces to outputs as well, or i3 decides which screen a workspace lands on
+and not reliably the same way after a restart:
+
+```
+assign [class="miniclientcontrol-foyer"] 1
+assign [class="miniclientcontrol-werkstatt"] 2
 workspace 1 output HDMI-1
 workspace 2 output HDMI-3
 ```
 
-The last two lines matter: `assign` only chooses a workspace, and without pinning
-them to outputs i3 decides which screen a workspace lands on — not reliably the
-same way after a restart.
-
-A systemd unit that lets the controller start the browser needs the display in
+A systemd unit that lets the controller start the browsers needs the display in
 its environment:
 
 ```ini
 [Service]
 Environment=DISPLAY=:0
 ```
+
+One process for every screen is a deliberate trade — see
+[docs/deployment.md](docs/deployment.md#declaring-the-screens-a-deployment-drives).
 
 ## The "translate this page?" bubble
 
@@ -414,6 +468,8 @@ PDFs are rendered through the internal viewer (`/pdf_viewer.html`) and support b
 - `src/handlers.rs` — REST API handlers
 - `src/browser.rs` — browser/session/playback loop
 - `src/db.rs` — schema init + lightweight migrations
+- `src/display.rs` — the declared screens, their derivation, and the display API
+- `src/playlists.rs` — playlists as objects (`/api/playlists`)
 - `src/models.rs` — CLI args, DTOs, app state
 - `src/web.rs` — embedded static file serving
 - `src/cast.rs` — cast signaling relay and session lifecycle

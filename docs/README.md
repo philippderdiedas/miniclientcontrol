@@ -10,7 +10,7 @@ share their screen to the display over WebRTC.
 | [features.md](features.md) | What the thing does, from the operator's and the guest's side |
 | [architecture.md](architecture.md) | How it is put together, and the invariants that hold it together |
 | [casting.md](casting.md) | The screen-cast subsystem in detail: signaling, auth, quality |
-| [deployment.md](deployment.md) | Building, shipping, service files, one and two displays |
+| [deployment.md](deployment.md) | Building, shipping, service files, declaring the screens |
 | [raspberry-pi.md](raspberry-pi.md) | Device quirks, measurements, and what they cost |
 | [troubleshooting.md](troubleshooting.md) | Symptoms, what they mean, and how to tell them apart |
 

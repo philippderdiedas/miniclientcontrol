@@ -125,42 +125,123 @@ disables starting one entirely.
 It also restarts the browser if it exits, which the connect-only arrangement could
 not do: the loop just sat there reconnecting.
 
-## Two displays on one machine
+## Declaring the screens a deployment drives
 
-Run one controller per screen. Everything that can collide must differ:
+One controller drives every screen in the venue. Say which:
 
 ```bash
-miniclientcontrol --port 3000 --cdp-url http://127.0.0.1:9222 \
-    --chromium-class chrome-1 --database-path .../one.db --assets-dir .../one
-miniclientcontrol --port 3001 --cdp-url http://127.0.0.1:9223 \
-    --chromium-class chrome-2 --database-path .../two.db --assets-dir .../two
+miniclientcontrol --display foyer --display werkstatt
 ```
 
-`--chromium-user-data-dir` and `--chromium-class` default to values derived from
-the CDP port, so they are already distinct, and the TLS port takes the next free
-one by itself. Only the HTTP port, the database and the assets directory have to
-be spelled out.
+One HTTP port, one database, one asset library and one admin page; each declared
+screen gets its own Chromium, its own control loop and its own assigned playlist.
+Which playlist is an operator decision, made on `/displays.html` and stored
+against the display's name, so it survives a restart.
 
-Sharing a profile directory is the nasty one: a second Chromium started on a
-profile that is already in use hands its URL to the running instance and exits,
-taking its debugging port with it — so the second display silently never appears
-and nothing looks wrong except that it is not there.
+Each display derives what running a second controller used to make somebody spell
+out:
+
+| | derived from |
+|---|---|
+| CDP port | `9222 + declaration index`, or the explicit `name:port` form |
+| WM class / Wayland `app_id` | `miniclientcontrol-<name>` |
+| browser profile | `/tmp/miniclientcontrol-chromium-<name>` |
+
+`--display werkstatt:9300` pins one screen's CDP port and leaves the others
+alone: implicit ports still count from 9222 by declaration index, so pinning one
+does not shift another. A name is the identity an assignment is stored against and
+it reaches both a window-manager config and a filesystem path, so it is restricted
+to letters, digits, `-` and `_`. A duplicate name, a duplicate port or a name with
+a space in it is a refusal to boot, not a screen quietly missing.
+
+**With no `--display` at all, nothing changes.** One implicit display named
+`default`, on `--cdp-url`, with the class and profile derived from its port as
+before. These machines run unattended in venues; an upgrade must not move a CDP
+port.
+
+### Flags that are refused rather than ignored
+
+Alongside any `--display`, these are startup errors:
+
+- `--chromium-class`, `--chromium-user-data-dir`, and a `--cdp-url` that is not
+  the default. The declared branch derives all three from the display's name and
+  position and never reads the flags back, so accepting them would be a setting
+  that silently does nothing — the failure mode the "a flag actually passed pins
+  that setting" rule exists to prevent. Refused for one declared display as well
+  as for several, because a rule that changes meaning when a venue adds a second
+  panel is a rule that breaks later. The `--cdp-url` check compares the whole
+  URL, not the port: `--cdp-url http://192.168.1.5:9222` names a different host,
+  and waving it through would silently rewrite it to loopback.
+- `--class` smuggled in through `--chromium-arg`. It is appended after the derived
+  `--class` on the Chromium command line and Chromium is last-wins for a repeated
+  switch, so it would collapse every display onto one `app_id` — precisely the
+  placement failure a named display exists to avoid. Without any `--display` it is
+  still accepted, because there is no second window for it to collide with and
+  refusing would break a command line that works today.
+- `--cast-display` naming a screen that is not declared. Checked at startup rather
+  than at use, because `AppState::cast_display()` falls back to the primary
+  display rather than panicking: the mistake would otherwise surface hours later
+  as a guest scanning a QR code and the picture appearing on the wrong panel.
+
+Sharing one profile directory between two Chromiums is the reason the profile is
+derived per display at all. A second Chromium started on a profile that is already
+in use hands its URL to the running instance and exits, taking its debugging port
+with it — so that display silently never appears and nothing looks wrong except
+that it is not there.
 
 ### Placing the windows
 
-That is the window manager's job. `--chromium-class` sets `WM_CLASS`, which i3
-matches on:
+Still the window manager's job, which is where this project has always put it.
+The controller only makes its windows distinguishable: the display's class becomes
+`WM_CLASS` under X11 and the `app_id` under Wayland. Measured on a real sway 1.12
+session — a Chromium launched with `--class=screen-A` appears in
+`swaymsg -t get_tree` as `app_id: "screen-A"`, and
+`[app_id="screen-A"] move container to output …` moves it. Not verified under
+GNOME/mutter, which matches `app-id` against `.desktop` files differently.
 
 ```
-assign [class="chrome-1"] 1
-assign [class="chrome-2"] 2
+assign [app_id="miniclientcontrol-foyer"]     output HDMI-A-1
+assign [app_id="miniclientcontrol-werkstatt"] output DP-1
+```
+
+Under i3, `assign` only chooses a workspace, so pin the workspaces to outputs as
+well — without that i3 decides which screen a workspace lands on, and not reliably
+the same way after a restart:
+
+```
+assign [class="miniclientcontrol-foyer"] 1
+assign [class="miniclientcontrol-werkstatt"] 2
 workspace 1 output HDMI-1
 workspace 2 output HDMI-3
 ```
 
-The last two lines matter. `assign` only chooses a workspace; without pinning
-workspaces to outputs, i3 decides which screen a workspace lands on, and not
-reliably the same way after a restart.
+### Why not discover the screens
+
+Discovery was prototyped against sway 1.12 and it works: `swaymsg -t get_outputs`
+lists the connector names, `[app_id="…"] move container to output …` places a
+window, and an unplugged output hands its window to another rather than losing it.
+It was dropped anyway, for two reasons. It puts compositor-specific knowledge
+inside the controller — sway names an output `HDMI-A-1` where i3 says `HDMI-1` —
+and it takes window placement away from the window manager. A third screen is a
+once-per-installation act, not a daily one, and a flag plus two lines of
+window-manager config is the right price for it.
+
+### One process, every screen: what that costs
+
+Two controllers had one genuine virtue, and folding them into one process gives it
+up: **a crash now takes every screen, where before it took one.** So does a
+restart, and so does a deploy that goes wrong. That is not a detail that turned out
+not to matter — it is a cost that was accepted, because the separation charged more
+than it paid: the same PDF uploaded twice into two asset directories, two ports to
+keep straight, two admin pages to choose between before any edit, and no prospect
+of ever sending a guest to a particular screen, since each controller only knew
+about its own. (That last one is not collected yet — casting still lands on one
+configured screen; see [casting.md](casting.md#which-screen-a-cast-lands-on).)
+
+If it does bite, **the answer is a supervisor that restarts the process, not a
+second controller.** `Restart=always` in the unit file (see [Service
+files](#service-files)) brings every screen back together; a second controller
+brings back the two asset libraries.
 
 ## Giving the controller port 443
 
@@ -215,8 +296,10 @@ A systemd **user** service cannot be given `AmbientCapabilities`: the user
 manager has no capabilities to hand out. That leaves options 1 and 2 for the
 usual kiosk arrangement.
 
-On a machine driving two displays only one instance can hold 443. The other falls
-back, which works, but only one of the two gets the short address.
+A machine driving several displays runs one process and therefore needs 443 once,
+however many screens it drives. Two *controllers* on one machine are the case where
+only one can hold it — the other falls back, which works, but only one of the two
+gets the short address.
 
 ## Runtime settings versus flags
 

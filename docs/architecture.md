@@ -6,8 +6,10 @@
 src/main.rs      CLI, database bootstrap, auth middleware, router, two listeners
 src/models.rs    CLI arguments, DTOs, AppState
 src/db.rs        run_migrations(): idempotent CREATE TABLE + ADD COLUMN probes
-src/handlers.rs  assets, playlist, playback control, override
-src/browser.rs   the CDP control loop -- all playback logic lives here
+src/handlers.rs  assets, playlist items, playback control, override
+src/display.rs   the declared screens: derivation, registration, /api/displays
+src/playlists.rs playlists as objects: /api/playlists and the delete guard
+src/browser.rs   the CDP control loop -- all playback logic lives here, one per display
 src/cast.rs      cast signaling relay and session lifecycle
 src/settings.rs  runtime settings, operator credentials, overlay config, /api/settings
 src/chromium.rs  finds, launches and supervises the display browser
@@ -24,13 +26,16 @@ it is not read from disk at runtime.
 
 ## The control loop
 
-`browser_loop` is three nested loops:
+`browser_loop(state, display)` is spawned once per declared display, and each
+copy owns one screen. Nothing is shared between two loops but the database, the
+settings and the webhook dispatcher. It is three nested loops:
 
 - **outer** — connect to CDP, subscribe to target events, pick and clean a single
   control page, install the injected runtimes. Any error that means the CDP
   session is gone breaks back out to here and reconnects.
-- **inner** — if an override is set, run the override loop; otherwise read the
-  active playlist, reconcile keep-loaded tabs, and iterate items.
+- **inner** — if an override is set, run the override loop; otherwise read this
+  display's assigned playlist and its active items, reconcile keep-loaded tabs,
+  and iterate them.
 - **per item** — navigate, wait for readiness, apply the overlay, start scrolling,
   then `select!` on the duration timer against the skip, playlist and overlay
   signals.
@@ -40,12 +45,19 @@ pokes a signal.
 
 ### Signals
 
-`AppState` carries several `Arc<Notify>`: skip, playlist, override, overlay.
+Each `Display` carries its own `Notify`: skip, playlist, override, overlay. A
+"play now" or an override names one screen and wakes only that one.
 
 **Always `notify_one()`, never `notify_waiters()`.** The loop is only parked on
 these for part of its cycle — navigation and readiness waiting can take ten
 seconds or more. `notify_waiters()` drops a notification when nobody is parked,
 which silently loses a "play now" click. `notify_one()` stores a permit.
+
+Two kinds of change are not one screen's, and reach all of them through
+`AppState::notify_playlist_changed` and `notify_overlay_changed`: an edited item
+can be in a playlist two screens share, and the overlay configuration is the
+building's rather than one panel's. Poking a screen the change does not affect
+costs one extra read of a table with single-digit rows.
 
 ### Why "play now" is not a field the API writes
 
@@ -55,6 +67,47 @@ overwrites it at the top of every item. A jump request therefore goes to
 **freshly read** playlist: the loop's snapshot can be a whole item duration stale,
 so an item added or re-enabled since the last read is simply not in it.
 
+## Displays
+
+A **display** is a name the deployment declares with `--display`. There is no
+discovery: the list of them is built once at startup from the flags, never
+changes afterwards, and therefore needs no lock of its own — only the fields
+inside a `Display` do.
+
+`AppState::displays` is that list. Each entry owns what could not be shared:
+`current_item_id`, `pending_jump`, `override_item`, the browser PID and the four
+signals. Everything else on `AppState` — the pool, the settings, the audio
+backend, the webhook dispatcher — stays one of. `primary()` is the first declared
+display; `display(name)` is the lookup the scoped routes resolve through.
+
+Each screen gets **its own Chromium**, on its own CDP port and its own profile
+directory, rather than one browser with several windows. That was measured: 515 MB
+PSS for one browser with two windows against 494 MB for two browsers with one
+each, because Chromium's cost is per renderer and not per browser process. One
+browser would also have cost the placement mechanism, since every window of one
+process shares an `app_id` and `Browser.setWindowBounds` does not move a window
+under native Wayland — the size takes effect, the position does not.
+
+The API grew a scoped form for the two things that are per screen:
+`/api/displays/{name}/control/current` and `/api/displays/{name}/override`. The
+unscoped `/api/control/current` and `/api/override` resolve to the one display
+while one is declared, and answer `409` naming the declared screens once several
+are. Picking one would be a coin flip an existing script cannot see, and a screen
+changing on its own is the failure this project treats as worst.
+
+`display::register` runs at startup, after the migration and before any loop
+reads an assignment, and gives every declared name a row. A single-screen
+deployment's one screen inherits the oldest playlist — which on an upgraded
+database is the `Standard` playlist the migration created — so a device that
+played something yesterday plays it today. With several screens declared nothing
+is inherited: handing the foyer a playlist made for the workshop is wrong content,
+which reads as deliberate, where an idle screen reads as "configure me".
+
+`displays.assignment_decided` is why that inheritance is safe to leave switched
+on. It separates "nobody has ever chosen a playlist for this screen" from
+"somebody chose none", which are both `playlist_id IS NULL`, and it is written in
+the same statement as every assignment so a power loss cannot tear the two apart.
+
 ## Three audiences for HTTP
 
 This is the thing to keep in mind when touching routes or middleware. The server
@@ -62,7 +115,7 @@ has three kinds of client, and they need different treatment:
 
 | Audience | Reaches | Credentials |
 |---|---|---|
-| **Operator** | `/admin.html`, `/playlist.html`, `/assets.html`, `/api/*` | required, when configured |
+| **Operator** | `/admin.html`, `/playlist.html`, `/assets.html`, `/displays.html`, `/webhooks.html`, `/api/*` | required, when configured |
 | **Display browser** | `/uploads/*`, `/pdf_viewer.html`, the pdf.js files, `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`, `/api/cast/state` | exempt, **loopback only** |
 | **Cast guest** | `/`, `/index.html`, `/cast.html`, `/cast.js`, `/cast_display.html`, `/api/cast/{ws,claim,pair,info,qr.svg,audio}` | exempt, **from any address** |
 
@@ -109,8 +162,10 @@ taken and logged, and `AppState::cast_tls_port` is the port actually bound.
 
 ## A cast is an override
 
-Starting a cast pins the existing override to the cast page; ending one puts back
-whatever was there before. `browser.rs` needed no changes for this, because two
+Starting a cast pins the cast display's override to the cast page; ending one puts
+back whatever was there before. Which display that is comes from `--cast-display`,
+defaulting to the first declared — casting is one session for the controller, not
+one per screen. `browser.rs` needed no changes for this, because two
 things there already do the right thing:
 
 - the per-item `select!` watches the override signal, so a cast interrupts the
@@ -164,9 +219,22 @@ on.
 
 ## Database
 
-SQLite, path from `--database-path`. Tables: `assets`, `playlist_items`,
-`settings` (key/value, for what the operator can change without a restart), and
-`webhooks` (one row per outbound target).
+SQLite, path from `--database-path`. Tables: `assets`, `playlists`,
+`playlist_items` (each with a `playlist_id`), `displays` (name, label, assigned
+playlist), `settings` (key/value, for what the operator can change without a
+restart), and `webhooks` (one row per outbound target).
+
+`displays.playlist_id` is `ON DELETE SET NULL`, which is what makes "a playlist is
+never deleted with a display" true in the schema rather than only in a handler:
+deleting a playlist unassigns it wherever it was assigned, and deleting a display
+row cannot reach the playlist at all. The other direction is the API's job —
+deleting a playlist that still holds items is refused, because `ON DELETE` has no
+setting that would leave those items anywhere a screen would find them.
+
+The migration that introduced all this backfills once: if there are no playlists
+at all and items exist without one, a playlist named `Standard` is created and
+takes them. A database that already has playlists is left alone, and running it
+twice changes nothing.
 
 Schema lives **only** in `db::run_migrations`, which is idempotent:
 `CREATE TABLE IF NOT EXISTS` plus a `pragma_table_info` probe before each

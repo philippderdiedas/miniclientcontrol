@@ -1,6 +1,6 @@
 # Multiple displays from one controller
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-12
 
 ## What and why
