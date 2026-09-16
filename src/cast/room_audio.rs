@@ -53,10 +53,25 @@ async fn display_label(state: &AppState, name: &str) -> String {
 /// The screen currently holding the room audio, if any -- and the
 /// self-healing half of the contract on `AppState::audio_owner`.
 ///
-/// Read and validated together: a cast that ended without a clean teardown
-/// (a crash, a killed browser) leaves the field set with nothing to release
-/// it, and checking `is_active()` on every read is what frees the room again
-/// on its own instead of leaving it mute until a restart.
+/// Two independent ways the recorded owner can point at a display that no
+/// longer holds anything, neither of which any code path releases directly:
+///
+/// - The display was undeclared from the configuration between the claim and
+///   this read, so `state.display(&held)` returns `None`.
+/// - The claiming session's own socket dropped before it was ever activated.
+///   `caster_only` only requires a registered sender at a matching address --
+///   a page-mode guest satisfies that, and so can claim the room audio, the
+///   moment its socket registers, well before it says what to show. If that
+///   socket drops in that window, `unregister_peer` clears `sender` while
+///   `holding_override` is still `false`, so `deactivate_display` never runs
+///   (it no-ops unless `holding_override` is set) and never had anything to
+///   release.
+///
+/// Checking `is_active()` on every read is what frees the room again in
+/// either case, instead of leaving it mute until a restart. It is *not* what
+/// frees a cast that crashes or a browser that is killed: those never touch
+/// `CastSession` at all, so `is_active()` would still read true -- see the
+/// GPU-wedge case in `CLAUDE.md`.
 ///
 /// Deliberately two separate short-lived locks rather than one held across
 /// both: `audio_owner` is a leaf everywhere in this module (see
@@ -87,10 +102,28 @@ async fn owning_display(state: &AppState) -> Option<String> {
 /// presentation" -- the second is not a guest's call, so this is never on the
 /// path from `/api/audio`, which reaches `apply_audio` directly under the
 /// operator's own credentials instead.
+///
+/// The read-or-claim has to be one critical section, not two. `owning_display`
+/// above only ever *releases* the lock it takes, so running it first is safe
+/// -- but the decision "is it free, and if so mine" must happen under a single
+/// `audio_owner` acquisition, or two concurrent callers for two different
+/// screens can both observe it free and both write, the second silently
+/// clobbering the first with no `409` ever shown to either guest. `audio_owner`
+/// stays a leaf: nothing else is locked while it is held, here or anywhere else
+/// in this module.
 async fn claim_audio(state: &AppState, display: &Arc<Display>) -> Result<(), Response> {
-    match owning_display(state).await {
+    // Self-heal first, in its own short-lived lock scope: it can only clear a
+    // stale owner, never set one, so nothing below can race against it in a
+    // way that matters -- the atomic check-and-write is what actually decides.
+    owning_display(state).await;
+
+    let mut owner = state.audio_owner.lock().await;
+    match owner.clone() {
         Some(name) if name == display.name => Ok(()),
         Some(name) => {
+            // Nothing further is written on this path, so the lock can be
+            // dropped before the (awaiting) label lookup.
+            drop(owner);
             let label = display_label(state, &name).await;
             Err((
                 StatusCode::CONFLICT,
@@ -99,7 +132,7 @@ async fn claim_audio(state: &AppState, display: &Arc<Display>) -> Result<(), Res
                 .into_response())
         }
         None => {
-            *state.audio_owner.lock().await = Some(display.name.clone());
+            *owner = Some(display.name.clone());
             Ok(())
         }
     }
@@ -194,4 +227,156 @@ pub async fn control_audio(
     }
 
     apply_audio(&state, &display, command).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// A minimal multi-display state, with no webhook receiver.
+    ///
+    /// Nothing under test here fires a webhook directly (only
+    /// `activate_display`/`deactivate_display` in `cast::mod` do that), but
+    /// `max_connections(1)` is still load-bearing exactly as it is in
+    /// `cast::mod`'s own `state_for_displays`: a second connection to a fresh
+    /// anonymous `sqlite::memory:` database sees no schema at all, and nothing
+    /// here needs more than one connection at a time.
+    async fn state_for_displays(names: &[&str]) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        let mut args = crate::models::Args::parse_from(["miniclientcontrol"]);
+        args.display = names.iter().map(|n| n.to_string()).collect();
+        let settings = crate::settings::load(&pool, &args).await;
+        let displays = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                Arc::new(Display::new(name, &format!("http://127.0.0.1:{}", 9222 + index)))
+            })
+            .collect();
+        AppState {
+            pool: pool.clone(),
+            args: Arc::new(args),
+            displays: Arc::new(displays),
+            cast_tls_port: 0,
+            managed_cert: false,
+            settings: Arc::new(tokio::sync::RwLock::new(settings)),
+            locks: Default::default(),
+            auth_cache: Default::default(),
+            audio: Arc::new(crate::audio::Backend::Unavailable),
+            audio_owner: Default::default(),
+            cast_attempts: Default::default(),
+            webhooks: Arc::new(crate::webhook::Dispatcher::new(pool)),
+        }
+    }
+
+    /// The regression this exists to catch: before the fix, `claim_audio`'s
+    /// `None` arm read `owning_display` (one lock, released) and then
+    /// unconditionally wrote the owner under a second, independent lock, with
+    /// no re-check in between. Many callers racing that gap could all observe
+    /// "free" and all win.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_claims_for_different_screens_admit_exactly_one() {
+        const N: usize = 32;
+        // The race window (between `owning_display` releasing its lock and
+        // `claim_audio`'s old second, independent acquisition) is narrow, so
+        // one round is not reliable evidence either way. Repeating the whole
+        // race many times against a fresh `audio_owner` makes a single-round
+        // near-miss irrelevant: it only takes one round out of many to prove
+        // the property false.
+        const ROUNDS: usize = 25;
+
+        let names: Vec<String> = (0..N).map(|i| format!("screen{i}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let state = state_for_displays(&name_refs).await;
+
+        // Every screen is an active cast, or `owning_display`'s self-heal
+        // would treat each claim as stale the moment a *different* screen's
+        // task takes it and clear it back to `None` on its own -- that is a
+        // real behaviour of this module, but it is the *other* finding, and
+        // would otherwise mask the race this test exists to catch.
+        for name in &names {
+            state.display(name).unwrap().cast.lock().await.holding_override = true;
+        }
+
+        for round in 0..ROUNDS {
+            *state.audio_owner.lock().await = None;
+
+            let mut handles = Vec::new();
+            for name in &names {
+                let state = state.clone();
+                let display = state.display(name).unwrap();
+                handles.push(tokio::spawn(async move { claim_audio(&state, &display).await }));
+            }
+
+            let mut winners = 0;
+            for handle in handles {
+                if handle.await.unwrap().is_ok() {
+                    winners += 1;
+                }
+            }
+
+            assert_eq!(
+                winners, 1,
+                "round {round}: exactly one of {N} concurrent claims for different screens \
+                 should win the room audio -- more than one means the check-then-act race let \
+                 two screens both believe they own it"
+            );
+            assert!(
+                state.audio_owner.lock().await.is_some(),
+                "round {round}: the room audio must end up claimed by whichever screen won"
+            );
+        }
+    }
+
+    /// `owning_display`'s first branch: the recorded owner no longer names a
+    /// declared display at all.
+    #[tokio::test]
+    async fn self_heal_frees_audio_left_by_an_undeclared_display() {
+        let state = state_for_displays(&["foyer"]).await;
+        *state.audio_owner.lock().await = Some("werkstatt".to_string());
+
+        assert_eq!(
+            owning_display(&state).await, None,
+            "a name that names no declared display must be treated as free"
+        );
+        assert_eq!(
+            *state.audio_owner.lock().await, None,
+            "the stale owner must be cleared, not just ignored for this one read"
+        );
+    }
+
+    /// `owning_display`'s second branch: a declared display whose session
+    /// never became active. This is the shape a page-mode guest's socket
+    /// leaves behind if it drops before ever presenting -- `caster_only` only
+    /// needs a registered sender, so it can claim the audio before
+    /// `activate_display` (and therefore `deactivate_display`) ever runs for
+    /// it; see the updated doc comment on `owning_display`.
+    #[tokio::test]
+    async fn self_heal_frees_audio_from_a_session_that_was_never_activated() {
+        let state = state_for_displays(&["foyer"]).await;
+        let foyer = state.display("foyer").unwrap();
+        assert!(
+            !foyer.cast.lock().await.is_active(),
+            "a freshly built session must start inactive, or this test proves nothing"
+        );
+        *state.audio_owner.lock().await = Some("foyer".to_string());
+
+        assert_eq!(
+            owning_display(&state).await, None,
+            "a declared display whose session was never activated must be treated as free"
+        );
+        assert_eq!(*state.audio_owner.lock().await, None);
+
+        // And `claim_audio` must be able to hand it to the same screen
+        // afterwards -- the self-heal is only useful if a later claim actually
+        // succeeds because of it.
+        assert!(claim_audio(&state, &foyer).await.is_ok());
+    }
 }
