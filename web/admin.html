@@ -110,6 +110,21 @@
         <input id="setCode" maxlength="4" size="6" autocomplete="off" />
         <span class="lock" id="lockCode" hidden>per Kommandozeile festgelegt</span>
       </p>
+      <p>
+        <label>QR-Code auf dem Schirm führt zu:</label>
+        <label class="inline">
+          <input type="radio" name="setQrTarget" id="setQrTargetScreen" value="screen" />
+          diesem Schirm
+        </label>
+        <label class="inline">
+          <input type="radio" name="setQrTarget" id="setQrTargetChooser" value="chooser" />
+          Auswahl aller Schirme
+        </label>
+      </p>
+      <p class="muted" id="setQrTargetNote" hidden>
+        Wirkungslos, solange nur ein Bildschirm deklariert ist — beide
+        Varianten führen dann auf denselben Schirm.
+      </p>
     </div>
   </div>
 
@@ -501,6 +516,9 @@
       document.getElementById('setGuestPages').checked = settings.guest_pages_enabled;
       document.getElementById('setAuth').value = settings.cast_auth;
       document.getElementById('setCode').value = settings.cast_code || '';
+      const qrTarget = settings.cast_qr_target || 'screen';
+      document.getElementById('setQrTargetScreen').checked = qrTarget === 'screen';
+      document.getElementById('setQrTargetChooser').checked = qrTarget === 'chooser';
       document.getElementById('authEnabled').checked = settings.auth_enabled;
       document.getElementById('authUser').value = settings.auth_user || '';
       document.getElementById('authPassword').value = '';
@@ -563,6 +581,7 @@
         guest_pages_enabled: document.getElementById('setGuestPages').checked,
         cast_auth: document.getElementById('setAuth').value,
         cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
+        cast_qr_target: document.getElementById('setQrTargetChooser').checked ? 'chooser' : 'screen',
         locale: document.getElementById('setLocale').value.trim(),
         auth_enabled: document.getElementById('authEnabled').checked,
         auth_user: document.getElementById('authUser').value.trim(),
@@ -801,6 +820,21 @@
           castSenderUrl = info.sender_url;
           syncQrSource();
         }
+      })
+      .catch(() => { /* the status poll reports unreachability */ });
+
+    // With exactly one declared display the setting has no effect -- both
+    // values land the guest on the only screen there is -- so the control says
+    // so rather than pretending a choice is being made. Fetched once: which
+    // displays are declared does not change while this page is open.
+    fetch('/api/displays')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((displays) => {
+        if (!displays) return;
+        const single = displays.filter((d) => d.declared).length <= 1;
+        document.getElementById('setQrTargetScreen').disabled = single;
+        document.getElementById('setQrTargetChooser').disabled = single;
+        document.getElementById('setQrTargetNote').hidden = !single;
       })
       .catch(() => { /* the status poll reports unreachability */ });
 

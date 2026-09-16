@@ -160,6 +160,37 @@ async def main():
         status, _ = put({"guest_pages_enabled": False, "cast_code": "ABCD"})
         check("an unchanged value does not trip the lock", status == 200, status)
 
+    print("\n[16e] the QR-code target")
+    with Server():
+        st = settings()
+        check("default is the guest's own screen", st["cast_qr_target"] == "screen", st)
+        check("nothing locks it -- there is no flag for it",
+              "cast_qr_target" not in st["locks"], st["locks"])
+
+        status, body = put({"cast_qr_target": "bogus"})
+        check("an unknown target is rejected", status == 400 and "error" in body, (status, body))
+        check("and the stored value is untouched", settings()["cast_qr_target"] == "screen")
+
+        status, body = put({"cast_qr_target": "chooser"})
+        check("chooser is accepted and reads back",
+              status == 200 and body["cast_qr_target"] == "chooser", (status, body))
+
+    with Server(fresh=False):
+        check("it survived the restart", settings()["cast_qr_target"] == "chooser")
+        put({"cast_qr_target": "screen"})
+
+    print("\n[16f] the setting steers which URL a screen's own state carries")
+    with Server(display="foyer:9931,werkstatt:9932"):
+        put({"cast_qr_target": "screen"})
+        status, st = http("GET", "/api/cast/state?screen=foyer")
+        check("under 'screen', the state for one display names it",
+              status == 200 and "?screen=foyer" in st["sender_url"], st)
+
+        put({"cast_qr_target": "chooser"})
+        status, st = http("GET", "/api/cast/state?screen=foyer")
+        check("under 'chooser', the same display gets the bare chooser URL",
+              status == 200 and "screen=" not in st["sender_url"], st)
+
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
 sys.exit(1 if failures else 0)

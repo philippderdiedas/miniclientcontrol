@@ -288,7 +288,11 @@ async def settings_flow():
         check("a cast QR alone counts as content, so it is not refused as empty",
               status == 200 and body["overlay"]["qr_source"] == "cast", (status, body))
 
-        sender_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        # /api/cast/state, not /api/cast/info: the latter is the guest chooser's
+        # bare URL regardless of `cast_qr_target`, while the overlay QR follows
+        # the same per-screen setting `/api/cast/state` does -- comparing against
+        # it is what actually pins the two drawers to agreeing with each other.
+        sender_url = http("GET", "/api/cast/state")[1]["sender_url"]
         auto_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
         check("and it renders a code", len(auto_rows) >= 21, len(auto_rows))
         check("with nothing stored in qr_text", body["overlay"]["qr_text"] == "",

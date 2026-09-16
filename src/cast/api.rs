@@ -197,7 +197,6 @@ pub async fn cast_state(
     State(state): State<AppState>,
     Query(query): Query<ScreenQuery>,
 ) -> Response {
-    let sender_url = sender_url(&state, None);
     // Resolved once per handler and passed on, never resolved again further
     // down: one request must not read one session and write another.
     let display = match crate::display::resolve(&state, query.screen.as_deref()) {
@@ -205,6 +204,14 @@ pub async fn cast_state(
         Err(response) => return response,
     };
     let settings = state.settings.read().await;
+    // `cast_qr_target` decides whether this screen's own invitation names it
+    // (`?screen=<name>`) or hands over the bare chooser URL -- the same choice
+    // `settings::overlay_payload` makes for the overlay QR, read from the same
+    // setting so the two cannot disagree.
+    let sender_url = match settings.cast_qr_target {
+        crate::settings::CastQrTarget::Screen => sender_url(&state, Some(&display)),
+        crate::settings::CastQrTarget::Chooser => sender_url(&state, None),
+    };
     let session = display.cast.lock().await;
     Json(CastStateResponse {
         enabled: settings.cast_enabled,
