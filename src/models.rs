@@ -48,6 +48,16 @@ pub struct Args {
     #[arg(long = "display", env = "DISPLAYS", value_delimiter = ',')]
     pub display: Vec<String>,
 
+    /// Which declared display a cast pins. Defaults to the first declared.
+    ///
+    /// One session for the whole controller, on one screen: a cast per display
+    /// is its own piece of work, because `cast.rs` carries the session state
+    /// machine and one session is all a venue with a single guest needs. The
+    /// name is checked against the declared displays at startup, so a typo is a
+    /// refusal to boot rather than a cast landing on the wrong panel.
+    #[arg(long, env = "CAST_DISPLAY")]
+    pub cast_display: Option<String>,
+
     /// Basic auth username (set together with basic_auth_password)
     #[arg(long, env)]
     pub basic_auth_user: Option<String>,
@@ -399,8 +409,8 @@ pub struct AppState {
     pub auth_cache: Arc<Mutex<Option<String>>>,
     /// How the venue's audio is controlled, decided once at startup.
     pub audio: Arc<crate::audio::Backend>,
-    /// Screen-cast session. A running cast owns the primary display's
-    /// `override_item`; see `cast.rs`.
+    /// Screen-cast session. A running cast owns the `override_item` of the
+    /// display `cast_display()` names; see `cast.rs`.
     pub cast: crate::cast::SharedCastSession,
     /// Outbound webhooks. `fire` is synchronous and infallible, which is what
     /// lets the control loop call it.
@@ -418,13 +428,30 @@ impl AppState {
     }
 
     /// The first declared display. What an unscoped legacy API path resolves to
-    /// when only one display exists, and what casting pins until per-display
-    /// casting is built.
+    /// when only one display exists, and the fallback for anything that has to
+    /// name one screen without being told which.
     ///
     /// The index cannot panic: `display::configure` returns at least the
     /// implicit `default` display, so the list is never empty.
     pub fn primary(&self) -> Arc<Display> {
         self.displays[0].clone()
+    }
+
+    /// The display a cast pins. `--cast-display` when given, else the first
+    /// declared.
+    ///
+    /// Every site in `cast.rs` that needs a screen resolves it through here, so
+    /// the pinned override, the webhook events and the audio subtree all name
+    /// the same one. The lookup cannot miss in practice -- `display::configure`
+    /// refuses an undeclared name at startup -- and falling back to the primary
+    /// display rather than panicking keeps a mistake here from taking the
+    /// signage down.
+    pub fn cast_display(&self) -> Arc<Display> {
+        self.args
+            .cast_display
+            .as_deref()
+            .and_then(|name| self.display(name))
+            .unwrap_or_else(|| self.primary())
     }
 
     /// Tell every display that the playlist content changed.
