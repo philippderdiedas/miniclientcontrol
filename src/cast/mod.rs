@@ -300,6 +300,16 @@ impl CastSession {
     }
 }
 
+/// The guest-facing cast surface, and only that.
+///
+/// Every path here is a literal in `is_cast_public_path`, which is what keeps
+/// that predicate an exact-string match rather than a prefix test — so the
+/// screen a request is about travels as a body field or a query parameter,
+/// never as a path segment. The one cast route that *does* take a path
+/// segment, `DELETE /api/displays/{name}/cast/session`, is operator-only and is
+/// registered in `display::routes()` beside the other `/api/displays/{name}/…`
+/// paths; it is in neither exemption list, which is why it may be shaped that
+/// way at all.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/cast/ws", get(cast_ws))
