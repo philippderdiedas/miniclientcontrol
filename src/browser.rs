@@ -186,7 +186,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
         // crash reports `reconnect: false` while the browser it attached to never
         // went anywhere. Widening it would mean persisting the flag, which is an
         // SD-card write for a field nobody acts on.
-        state.webhooks.fire(crate::webhook::Event::DisplayConnected {
+        state.webhooks.fire(&display_name, crate::webhook::Event::DisplayConnected {
             reconnect: connected_before,
         });
         connected_before = true;
@@ -322,7 +322,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
 
                 if !announced_empty {
                     announced_empty = true;
-                    state.webhooks.fire(crate::webhook::Event::PlaylistEmpty);
+                    state.webhooks.fire(&display_name, crate::webhook::Event::PlaylistEmpty);
                 }
 
                 // The idle screen is a page like any other. It is also the one
@@ -403,7 +403,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // Something is playing again, so the next empty playlist is worth
                 // announcing afresh.
                 announced_empty = false;
-                state.webhooks.fire(crate::webhook::Event::ItemChanged {
+                state.webhooks.fire(&display_name, crate::webhook::Event::ItemChanged {
                     item_id: item.id,
                     kind: if item.asset_id.is_some() { "asset" } else { "url" },
                     // A URL item has no name but its URL, and that URL can carry
@@ -630,7 +630,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             // loses a connection that was working. The guard is belt and braces
             // against a future early `continue` slipping in above.
             if connected_before {
-                state.webhooks.fire(crate::webhook::Event::DisplayDisconnected {
+                state.webhooks.fire(&display_name, crate::webhook::Event::DisplayDisconnected {
                     error: "the CDP connection was lost".to_string(),
                 });
             }

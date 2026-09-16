@@ -628,7 +628,7 @@ async def case_62():
               cat["field_prefix"] == "data." and cat["placeholder_suffix"] == " | tojson",
               cat)
         check("the envelope fields are published",
-              cat["envelope"] == ["event", "timestamp", "device"], cat["envelope"])
+              cat["envelope"] == ["event", "timestamp", "device", "display"], cat["envelope"])
         check('"test" is not offered as a placeholder', "test" not in cat["envelope"], cat)
 
         _, hook_id = add_hook(receiver.url, names, name="All")
@@ -940,9 +940,31 @@ async def case_69():
               authed("GET", "/api/webhooks/events")[0] == 401)
 
 
+async def case_70():
+    print("\n[70] a delivery names the display it is about")
+    # Not `Display`: that helper defaults `--cdp-url` to the running Chrome,
+    # and `--display` refuses to coexist with a pinned `--cdp-url` (its port is
+    # derived from the display's position instead). Naming the port after the
+    # colon points this one declared display at the same Chrome directly.
+    with Receiver() as receiver, Server(display=f"werkstatt:{CDP_PORT}"):
+        add_hook(receiver.url, ["playback.item_changed"])
+        add_item()
+        check("a request arrived", receiver.wait(1), receiver.count())
+        if receiver.count():
+            payload = receiver.bodies()[0]
+            check("the display names the screen the event is about",
+                  payload.get("display") == "werkstatt", payload)
+            # Additive: a target configured before several displays existed
+            # keeps receiving everything it received before, in the same shape.
+            check("the device is still named beside it",
+                  isinstance(payload.get("device"), str), payload)
+            check("and the event itself is unaffected",
+                  payload.get("event") == "playback.item_changed", payload)
+
+
 CASES = [case_52, case_53, case_54, case_55, case_56, case_57, case_58, case_59,
          case_60, case_61, case_62, case_63, case_64, case_65, case_66, case_67,
-         case_68, case_69]
+         case_68, case_69, case_70]
 
 
 async def main(wanted):

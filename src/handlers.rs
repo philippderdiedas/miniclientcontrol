@@ -872,7 +872,7 @@ async fn set_override_of(
     // An asset override has no URL to announce, and inventing one would be a
     // link to something the receiver cannot fetch. The `asset_id` in the
     // operator's own request is the identifier; the empty string says "not a URL".
-    state.webhooks.fire(crate::webhook::Event::OverrideSet {
+    state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
         url: crate::browser::redact_str(&announced_url),
         source: "operator",
     });
@@ -907,7 +907,7 @@ async fn clear_override_of(state: &AppState, display: &Display) -> Response {
 
     state
         .webhooks
-        .fire(crate::webhook::Event::OverrideCleared { source: "operator" });
+        .fire(&display.name, crate::webhook::Event::OverrideCleared { source: "operator" });
 
     (StatusCode::OK, Json(OverrideResponse { active: false })).into_response()
 }

@@ -468,7 +468,7 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
             // above means it never runs a second time. `register_peer` announces
             // the cast instead. `override.set` stays, because pinning the
             // display is exactly what did happen.
-            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+            state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
                 url: cast_display_url(state.args.port),
                 source: "cast",
             });
@@ -479,11 +479,11 @@ async fn activate_display(state: &AppState, showing: Showing, sender_ip: Option<
         }
         Showing::Page { url, .. } => {
             info!("Cast: guest page pinned to {}", redact(url));
-            state.webhooks.fire(crate::webhook::Event::GuestPageShown {
+            state.webhooks.fire(&display.name, crate::webhook::Event::GuestPageShown {
                 url: redact(url),
                 sender_ip: sender_ip.map(|addr| addr.to_string()).unwrap_or_default(),
             });
-            state.webhooks.fire(crate::webhook::Event::OverrideSet {
+            state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
                 url: redact(url),
                 source: "guest_page",
             });
@@ -567,19 +567,19 @@ async fn deactivate_display(state: &AppState, reason: &'static str) {
             if announced {
                 state
                     .webhooks
-                    .fire(crate::webhook::Event::CastEnded { reason, duration_secs });
+                    .fire(&display.name, crate::webhook::Event::CastEnded { reason, duration_secs });
             }
             state
                 .webhooks
-                .fire(crate::webhook::Event::OverrideCleared { source: "cast" });
+                .fire(&display.name, crate::webhook::Event::OverrideCleared { source: "cast" });
         }
         Showing::Page { .. } => {
             state
                 .webhooks
-                .fire(crate::webhook::Event::GuestPageEnded { reason, duration_secs });
+                .fire(&display.name, crate::webhook::Event::GuestPageEnded { reason, duration_secs });
             state
                 .webhooks
-                .fire(crate::webhook::Event::OverrideCleared { source: "guest_page" });
+                .fire(&display.name, crate::webhook::Event::OverrideCleared { source: "guest_page" });
         }
         Showing::Nothing => {}
     }
@@ -1191,7 +1191,11 @@ async fn register_peer(
         // the state the event describes is already settled here: the sender slot
         // is filled and its address recorded.
         if announce {
-            state.webhooks.fire(crate::webhook::Event::CastStarted {
+            // No per-display `Display` is bound here yet; casting is still
+            // pinned to the primary display until Task 11 makes it
+            // configurable, so this names the same screen `activate_display`
+            // is about to pin below.
+            state.webhooks.fire(&state.primary().name, crate::webhook::Event::CastStarted {
                 sender_ip: addr.to_string(),
                 mode: "cast".to_string(),
             });
