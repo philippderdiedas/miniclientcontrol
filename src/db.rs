@@ -207,6 +207,13 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // once they do, a stray item with no playlist is their business, and
     // sweeping it into a new "Standard" would be the migration inventing a
     // decision nobody asked for.
+    //
+    // That gate is also why the two statements below are one transaction. They
+    // describe one decision, and a machine that loses power -- or meets a
+    // SQLITE_BUSY -- between them must come back to either both or neither: a
+    // committed playlist with the items still unmoved closes the gate for good,
+    // and every item is then stranded where no loop selects it, no page lists it
+    // and no API can adopt it.
     let playlists: i64 = sqlx::query_scalar("SELECT count(*) FROM playlists")
         .fetch_one(pool)
         .await
@@ -217,14 +224,16 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         .unwrap_or(0);
 
     if playlists == 0 && orphans > 0 {
+        let mut tx = pool.begin().await?;
         let row = sqlx::query("INSERT INTO playlists (name) VALUES ('Standard') RETURNING id")
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await?;
         let id: i64 = row.get(0);
         sqlx::query("UPDATE playlist_items SET playlist_id = ? WHERE playlist_id IS NULL")
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         tracing::info!("Moved {} existing items into the 'Standard' playlist", orphans);
     }
 
@@ -358,6 +367,62 @@ mod tests {
             count(&pool, "SELECT count(*) FROM playlists").await,
             1,
             "a second run must not create a second Standard playlist"
+        );
+    }
+
+    /// The backfill is two statements, and the gate it runs behind closes the
+    /// moment the first one lands. So a run that dies between them must leave
+    /// nothing behind: a committed 'Standard' with the items still unmoved is
+    /// permanent -- the next start sees a playlist, skips the backfill, and the
+    /// items belong to nothing for good.
+    ///
+    /// The interruption is a trigger that aborts the UPDATE rather than a real
+    /// power loss, because the failure mode is the same one SQLITE_BUSY has: the
+    /// second statement does not run and the first must not survive it.
+    #[tokio::test]
+    async fn an_interrupted_backfill_leaves_the_items_adoptable() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE playlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER, url TEXT,
+                play_order INTEGER NOT NULL, duration INTEGER, is_enabled BOOLEAN DEFAULT 1,
+                start_date TEXT, end_date TEXT, keep_loaded BOOLEAN DEFAULT 0,
+                scroll_config TEXT DEFAULT '{\"type\":\"None\",\"options\":null}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO playlist_items (url, play_order) VALUES ('https://a.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER stop_the_backfill BEFORE UPDATE ON playlist_items
+             BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            run_migrations(&pool).await.is_err(),
+            "the second half of the backfill was supposed to fail"
+        );
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM playlists").await,
+            0,
+            "a 'Standard' that outlives the move it was created for closes the gate forever"
+        );
+
+        // The machine comes back up, with whatever stopped the write gone.
+        sqlx::query("DROP TRIGGER stop_the_backfill").execute(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        assert_eq!(count(&pool, "SELECT count(*) FROM playlists").await, 1);
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM playlist_items WHERE playlist_id IS NULL").await,
+            0,
+            "the retry must still adopt the items the interrupted run left"
         );
     }
 
