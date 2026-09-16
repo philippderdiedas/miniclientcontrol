@@ -145,14 +145,32 @@ list, and as a path segment only on authenticated routes.**
 
 | Route | Audience | Names the screen by |
 |---|---|---|
-| `GET /api/cast/info` | public, any address | returns `screens: [{name, label, busy}]` |
+| `GET /api/cast/info` | public, any address | returns `screens: [{name, label, busy, max_edge}]` |
 | `POST /api/cast/claim` | public | `display` in the body |
+| `DELETE /api/cast/claim` | public | the ticket |
 | `POST /api/cast/pair` | public | `display` in the body |
 | `GET /api/cast/ws` | public | the ticket; the display peer passes `?screen=` |
 | `GET /api/cast/qr.svg` | public | `?screen=`, omitted for the chooser QR |
 | `GET /api/cast/audio` | caster only | the ticket |
 | `GET /api/cast/state` | loopback + operator | `?screen=` — stays literal for the idle page |
 | `DELETE /api/displays/{name}/cast/session` | operator only | path segment |
+
+**An omitted screen resolves while exactly one display is declared, and only
+then.** This is `display::resolve`'s rule, which the multi-display work already
+applied to `/api/control/current` and `/api/override` and which
+`test_display.py` `[75]` pins: one screen means no ambiguity to report, several
+means refuse rather than guess. So a single-screen venue never meets a chooser
+with one entry in it, and a guest who types the bare URL on a two-screen
+controller does. It also keeps roughly sixty existing assertions across
+`test_cast.py`, `test_pairing.py`, `test_reserve.py` and `test_guestpage.py`
+meaning exactly what they mean today — those suites declare one screen, and the
+alternative was editing them all to say so.
+
+**`max_edge` rides along in the screen list** because a sender constrains its
+capture *before* it has a socket — that is the whole reason `display_limits`
+outlives a session — and with one session per screen there is no single limit to
+report. The `welcome` frame and the later `display_limits` push are unchanged;
+this only answers what a guest can know before choosing.
 
 `cast_display.html` and `empty_playlist.html` are both navigated by `browser.rs`,
 which knows which display it is driving, so each is sent a URL carrying its own
@@ -196,7 +214,13 @@ wrong screen is wrong rather than accidentally valid.
 ## Operator experience
 
 `admin.html`'s per-screen rows gain a cast line: who is casting, since when, what
-is showing, and a *Beenden* button per screen. The cast section keeps the global
+is showing, and a *Beenden* button per screen.
+
+That button is **new work, not a move.** `button#castStop` has existed in
+`admin.html` since the page was written and has never had a handler, and nothing
+in `web/` has ever called `DELETE /api/cast/session` — so the route being
+rescoped here has exactly one consumer today, the Python suite. An operator has
+never been able to stop a cast from the UI; after this they can, per screen. The cast section keeps the global
 switches (`cast_enabled`, auth mode, guest pages) and gains the QR setting from
 decision 2.
 
@@ -231,9 +255,38 @@ teardown, and the operator's override of it; pairing codes per screen and unique
 while alive. And the negative that matters most — a cast on one screen leaving
 the other screen's overlay, playlist and current item untouched.
 
+## `src/cast.rs` is split first, as a pure move
+
+At 2001 lines it is the largest file in the repo and this feature makes it
+bigger. It becomes a `cast/` directory, following the `src/webhook/` precedent —
+whose own comment says it was split "only for file size": `mod.rs` for the
+machinery, `api.rs` for the handlers over it.
+
+Five files: `mod.rs` (the types, `CastSession` and its impl, the constants,
+`routes()`, `activate_display`/`deactivate_display`/`end_session`, the three
+`watch_*`, and the existing tests), `signaling.rs` (the socket: `cast_ws`,
+`handle_socket`, `handle_frame`, `register_peer`, `unregister_peer`), `api.rs`
+(the HTTP handlers), `room_audio.rs` (named so the tree does not carry two
+modules called `audio`), and `url.rs` (`sender_url`, the QR).
+
+**It is its own commit, before any behaviour changes**, and the commit is a pure
+move: a diff in which a relocation and a behaviour change are indistinguishable,
+in the one subsystem whose failure mode is a black screen in somebody else's
+building, is the expensive kind.
+
+The price is stated rather than hidden: twelve of `CastSession`'s fourteen
+private fields are touched from more than one of the new files and become
+`pub(super)`. Today the compiler guarantees nothing outside one file can corrupt
+the session; afterwards that guarantee covers a directory. `url.rs` touches no
+session state and `room_audio.rs` two fields, so both are free of it.
+
+The test module is **not** split in the same move: ~150 of its 427 lines are a
+shared `state_for_displays` harness, and splitting would mean promoting it to
+`pub(crate)` on top of everything else.
+
 ## Work breakdown
 
-Roughly fourteen tasks: the session moves into `Display` → per-screen timers and
+Roughly fourteen tasks, after the split above: the session moves into `Display` → per-screen timers and
 watchdogs → the ticket binds a screen → `claim`/`pair` take a display → `info`
 gains the list and `state` the parameter → operator-scoped session delete, and
 `--cast-display` removed → audio ownership → `is_active` per display → the QR
