@@ -1023,11 +1023,12 @@
           codeInputs[0].focus();
         }
 
-        // The screen list only exists while `cast_info` reports `enabled`
-        // (casting itself, not the page feature) -- see `cast::api::cast_info`.
-        // Without it there is nothing to bind against, so the page falls back
-        // to the server's own default resolution (`display::resolve(None)`),
-        // exactly as it did before per-screen casting existed.
+        // The screen list exists whenever *either* guest-facing capability is
+        // reachable -- casting or the guest-page feature -- not only while
+        // casting itself (`enabled`) is on; see `cast::api::cast_info`. Without
+        // it there is nothing to bind against, so the page falls back to the
+        // server's own default resolution (`display::resolve(None)`), exactly
+        // as it did before per-screen casting existed.
         screens = info.screens || [];
         if (screens.length) {
           resolveInitialBinding();
