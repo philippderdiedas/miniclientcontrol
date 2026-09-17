@@ -89,7 +89,16 @@ async fn owning_display(state: &AppState) -> Option<String> {
     if active {
         Some(held)
     } else {
-        *state.audio_owner.lock().await = None;
+        // Compare-and-clear, not an unconditional write: between the read above
+        // and this reacquisition, a different screen's `claim_audio` can have
+        // already self-healed the same staleness and claimed the room for
+        // itself. Clearing unconditionally here would erase that newer claim
+        // instead of the stale one this call observed. Same shape as
+        // `deactivate_display` in `cast::mod`.
+        let mut owner = state.audio_owner.lock().await;
+        if owner.as_deref() == Some(held.as_str()) {
+            *owner = None;
+        }
         None
     }
 }
@@ -297,10 +306,18 @@ mod tests {
         let state = state_for_displays(&name_refs).await;
 
         // Every screen is an active cast, or `owning_display`'s self-heal
-        // would treat each claim as stale the moment a *different* screen's
-        // task takes it and clear it back to `None` on its own -- that is a
-        // real behaviour of this module, but it is the *other* finding, and
-        // would otherwise mask the race this test exists to catch.
+        // would legitimately treat a screen's own just-won claim as stale the
+        // moment a *different* screen's task re-reads it -- self-heal only
+        // ever knows `is_active()`, not "did someone else just win this" --
+        // and clear it back to `None`. That is a separate, correct behaviour
+        // of this module (a real cast always has `is_active()` true by the
+        // time it can claim audio at all; these bare test displays do not),
+        // and it would mask the winner count here, so every screen is made
+        // active to take it out of play. It is not the check-then-act race
+        // this test exists to catch; that race is instead covered below by
+        // `stale_recorded_owner_cannot_be_cleared_out_from_under_a_winner`,
+        // which races a *stale, inactive* recorded owner against winners
+        // that stay active throughout.
         for name in &names {
             state.display(name).unwrap().cast.lock().await.holding_override = true;
         }
@@ -331,6 +348,72 @@ mod tests {
             assert!(
                 state.audio_owner.lock().await.is_some(),
                 "round {round}: the room audio must end up claimed by whichever screen won"
+            );
+        }
+    }
+
+    /// The regression `owning_display` used to have: it read the recorded
+    /// owner, released the lock, awaited the owning display's `cast` mutex,
+    /// and then cleared the owner **unconditionally** -- not "if it is still
+    /// what I read". A task whose read lands on a stale name and then loses
+    /// the scheduler for a while can wake up long after a different screen
+    /// has legitimately won the claim, and wipe that screen's claim out from
+    /// under it.
+    ///
+    /// Every candidate screen here is held active (`holding_override`) for
+    /// the same reason as the sibling test above: a real winner's own
+    /// `is_active()` is always true by the time it can claim audio at all
+    /// (`caster_only` already requires a registered sender), so making these
+    /// test displays active too keeps self-heal from correctly-but-
+    /// distractingly reclaiming a winner for being "inactive". What is
+    /// deliberately left stale is the *recorded owner* itself: `"ghost"`
+    /// names no declared display, so every task's `owning_display` call
+    /// finds it inactive and, on the buggy code, unconditionally clears
+    /// whatever `audio_owner` holds *at that later moment* -- which by then
+    /// can easily be a different screen's real, active win.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn stale_recorded_owner_cannot_be_cleared_out_from_under_a_winner() {
+        const N: usize = 32;
+        // Measured against the pre-fix code: 50 rounds only caught the bug
+        // about half the time, since the window between `owning_display`'s
+        // two lock acquisitions is narrow. 300 pushes that well past even
+        // odds while still running in well under a second.
+        const ROUNDS: usize = 300;
+
+        let names: Vec<String> = (0..N).map(|i| format!("screen{i}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let state = state_for_displays(&name_refs).await;
+
+        for name in &names {
+            state.display(name).unwrap().cast.lock().await.holding_override = true;
+        }
+
+        for round in 0..ROUNDS {
+            // Stale and undeclared: no task claiming one of the real screens
+            // above can ever be "still the recorded owner" here except by
+            // way of the very self-heal under test.
+            *state.audio_owner.lock().await = Some("ghost".to_string());
+
+            let mut handles = Vec::new();
+            for name in &names {
+                let state = state.clone();
+                let display = state.display(name).unwrap();
+                handles.push(tokio::spawn(async move { claim_audio(&state, &display).await }));
+            }
+
+            let mut winners = 0;
+            for handle in handles {
+                if handle.await.unwrap().is_ok() {
+                    winners += 1;
+                }
+            }
+
+            assert_eq!(
+                winners, 1,
+                "round {round}: a stale, undeclared recorded owner raced by {N} concurrent \
+                 claims must still leave exactly one winner -- more than one (or the winner \
+                 changing after the fact) means a late self-heal cleared a screen that had \
+                 already legitimately won"
             );
         }
     }
