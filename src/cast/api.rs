@@ -457,6 +457,13 @@ pub async fn release_session(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(payload): Json<ReleaseRequest>,
 ) -> Response {
+    // Checked before `display::resolve`, same order and same reason as
+    // `claim_session`: resolving first would let a guest enumerate every
+    // declared screen off the `404`/`409` body while neither guest-facing
+    // capability is reachable.
+    if !super::any_guest_capability(&state).await {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
     let display = match crate::display::resolve(&state, payload.display.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,
