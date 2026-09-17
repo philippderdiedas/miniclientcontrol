@@ -263,8 +263,9 @@ the playback routes follow.
   `{ enabled, page_enabled, auth, sender_url, screens: [{ name, label, busy,
   max_edge }] }`. `busy` is relative to the asking address. `screens` is omitted
   entirely when neither casting nor guest pages is reachable
-- `GET /api/cast/qr.svg` — public: QR code for the guest URL. Takes no screen: it
-  always encodes the chooser address
+- `GET /api/cast/qr.svg?screen=` — public: QR code for the guest URL. Same screen
+  resolution as `/api/cast/state`, and follows `cast_qr_target` the same way: the
+  address named or the bare chooser address, matching what is printed beside it
 - `GET /api/cast/state?screen=` — operator and loopback: who is casting on that
   screen and since when, plus `showing`: `null`, `"cast"`, or
   `{ "page": "<url, credentials stripped>" }`, and the `sender_url` that screen

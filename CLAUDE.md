@@ -445,11 +445,11 @@ One session per declared screen, living on `Display`. What a guest sees and why:
 - **`cast_enabled` off ends every session**, looping the displays;
   `DELETE /api/displays/{name}/cast/session` ends one. The switches
   (`cast_enabled`, the auth mode, guest pages) are the venue's and stay global.
-- **`cast_qr_target` is read in two places and must stay that way**:
+- **`cast_qr_target` is read in three places and must stay that way**:
   `settings::overlay_payload` for the overlay QR, `cast_state` for the address a
-  screen prints while idle. A third reader is how the panel and the badge start
-  disagreeing. `cast::url::cast_qr` (`/api/cast/qr.svg`) reads neither and always
-  encodes the chooser URL — a gap, not a decision, so do not codify it.
+  screen prints while idle, `cast::url::cast_qr` (`/api/cast/qr.svg`) for the
+  picture drawn beside it. A fourth reader is how the panel and the badge start
+  disagreeing.
 
 ### The managed certificate (`src/managed_cert.rs`)
 

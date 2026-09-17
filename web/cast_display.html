@@ -154,8 +154,14 @@
       .then((state) => {
         if (state && state.sender_url) {
           document.getElementById('senderUrl').textContent = state.sender_url;
-          document.getElementById('qr').src =
-            '/api/cast/qr.svg?v=' + encodeURIComponent(state.sender_url);
+          // `?screen=` so the picture resolves `cast_qr_target` for *this*
+          // screen, exactly like the state fetch above -- without it the SVG
+          // would fall back to the bare chooser address regardless of the
+          // setting. Cache-busted so the QR follows a changed address without
+          // a reload loop.
+          const qrParams = new URLSearchParams({ v: state.sender_url });
+          if (screenName) qrParams.set('screen', screenName);
+          document.getElementById('qr').src = '/api/cast/qr.svg?' + qrParams.toString();
         }
       })
       .catch(() => { /* the placeholder dash stays */ });

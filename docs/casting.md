@@ -145,13 +145,10 @@ folded into the overlay's `qr_source` either — the idle page draws its own
 invitation without consulting the overlay configuration, so the rule would have to
 be known in two places and would drift.
 
-**One gap, as of this writing:** `/api/cast/qr.svg` takes no screen and always
-encodes the chooser address. The overlay's QR is built by
-`settings::overlay_payload` and follows the setting; the address printed on the
-idle and standby screens follows it too, but the picture drawn next to that
-address does not. On a single-screen deployment the two addresses are identical
-and nothing shows; on several, a guest scanning an idle panel lands on the chooser
-and has one tap to make.
+`/api/cast/qr.svg` (`cast::url::cast_qr`) takes the same `?screen=` every other
+scoped cast route does and reads the setting itself, so the picture drawn on the
+idle and standby screens agrees with the address printed beside it and with the
+overlay's own QR — one setting, read in three places, never a fourth.
 
 ### What the chooser can be told, and by whom
 

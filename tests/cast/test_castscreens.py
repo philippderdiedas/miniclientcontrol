@@ -33,6 +33,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import ssl
 import sys
 import urllib.request
@@ -71,6 +72,60 @@ def override_of(display):
 
 def state_of(display):
     return http("GET", f"/api/cast/state?screen={display}")[1] or {}
+
+
+def qr_svg(screen=None, port=None):
+    """Raw bytes from `/api/cast/qr.svg`, bypassing `http()`'s JSON parsing --
+    an SVG body is not JSON, and `http()` would raise trying to decode it (see
+    `test_overlay.py`'s own `qr()` helper, which sidesteps the same thing)."""
+    path = "/api/cast/qr.svg" + (f"?screen={screen}" if screen else "")
+    req = urllib.request.Request(f"http://127.0.0.1:{port or HTTP}{path}")
+    with urllib.request.urlopen(req, timeout=5) as res:
+        return res.status, res.read().decode()
+
+
+def svg_dark_cells(svg):
+    """The set of dark-module grid coordinates a served QR SVG draws.
+
+    Not a general SVG/QR decoder: `qr_svg` in `src/cast/url.rs` renders through
+    the vendored `qrcode` crate's fixed svg output -- a background `<rect>` plus
+    one `<path>` whose `d` is a run of `M<x> <y>h<n>v<n>H<x>V<y>` per dark
+    module, one square cell each. The cell size is not hardcoded: it grows with
+    the QR version (`min_dimensions` scales to fit), and a longer encoded URL --
+    exactly the difference between a screen's own address and the bare chooser
+    one -- already produced 6-unit cells for one and 7-unit for the other while
+    this test was written. Normalised against the top-left dark module actually
+    drawn, and against the cell size actually used, rather than trusting the
+    absolute quiet-zone offset -- so two matrices of the same shape compare
+    equal regardless of either.
+    """
+    matches = re.findall(r"M(\d+) (\d+)h(\d+)v\d+H", svg)
+    if not matches:
+        return frozenset()
+    cell = int(matches[0][2])
+    coords = [(int(x), int(y)) for x, y, _ in matches]
+    min_x = min(x for x, _ in coords)
+    min_y = min(y for _, y in coords)
+    return frozenset(((x - min_x) // cell, (y - min_y) // cell) for x, y in coords)
+
+
+def overlay_dark_cells(text):
+    """The matrix `/api/overlay` renders for arbitrary `text`, as the same
+    dark-cell-coordinate shape `svg_dark_cells` returns for a served SVG.
+
+    This is "the matrix generated for the expected URL", the established idiom
+    `test_overlay.py`'s `[41c]`/`[41e]` use (`qr_source: text` echoes `qr_text`
+    verbatim -- see `settings::overlay_payload` -- regardless of which display
+    is asked, so this needs no screen of its own). It is built from the exact
+    same `qrcode` crate call `qr_svg` makes, just read back as a JSON grid
+    instead of rendered, which is what makes comparing the two a real check of
+    content and not just of the two being non-empty.
+    """
+    http("PUT", "/api/settings",
+         {"overlay": {"enabled": True, "qr_source": "text", "qr_text": text, "text": ""}})
+    rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+    return frozenset((col, row) for row, line in enumerate(rows)
+                      for col, ch in enumerate(line) if ch == "1")
 
 
 async def case_80():
@@ -504,8 +559,63 @@ def case_90():
               (cdp.page_ws(PORTS["werkstatt"])[1] or {}).get("url"))
 
 
+def case_91():
+    print("\n[91] /api/cast/qr.svg follows ?screen= and cast_qr_target, exactly "
+          "like /api/cast/state -- the picture on an idle or standby screen "
+          "must encode the address printed beside it, not always the bare "
+          "chooser address")
+    with Alone():
+        http("PUT", "/api/settings", {"cast_qr_target": "screen"})
+
+        foyer_url = state_of("foyer")["sender_url"]
+        werkstatt_url = state_of("werkstatt")["sender_url"]
+        check("the two screens' own addresses differ",
+              foyer_url != werkstatt_url and "screen=foyer" in foyer_url
+              and "screen=werkstatt" in werkstatt_url, (foyer_url, werkstatt_url))
+
+        status, foyer_svg = qr_svg(screen="foyer")
+        check("foyer's qr.svg is served", status == 200, status)
+        foyer_expected = overlay_dark_cells(foyer_url)
+        foyer_served = svg_dark_cells(foyer_svg)
+        check("under 'screen', foyer's QR encodes foyer's own address, module "
+              "for module -- not always the bare chooser URL",
+              len(foyer_served) > 0 and foyer_served == foyer_expected,
+              (len(foyer_served), len(foyer_expected)))
+
+        status, werkstatt_svg = qr_svg(screen="werkstatt")
+        check("werkstatt's qr.svg is served", status == 200, status)
+        werkstatt_expected = overlay_dark_cells(werkstatt_url)
+        werkstatt_served = svg_dark_cells(werkstatt_svg)
+        check("and werkstatt's own QR is werkstatt's address -- not foyer's, "
+              "and not the chooser's",
+              werkstatt_served == werkstatt_expected and werkstatt_served != foyer_served,
+              (len(werkstatt_served), len(foyer_served)))
+
+        http("PUT", "/api/settings", {"cast_qr_target": "chooser"})
+        # `/api/cast/info`'s `sender_url` is unaffected by `cast_qr_target` --
+        # always the bare chooser address -- so it is the reference for what
+        # 'chooser' ought to produce here too, the same reasoning
+        # `test_overlay.py`'s `[41e]` uses.
+        chooser_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        check("the chooser address carries no ?screen= scoping",
+              "screen=" not in chooser_url, chooser_url)
+        chooser_expected = overlay_dark_cells(chooser_url)
+
+        _, foyer_chooser_svg = qr_svg(screen="foyer")
+        _, werkstatt_chooser_svg = qr_svg(screen="werkstatt")
+        foyer_chooser_served = svg_dark_cells(foyer_chooser_svg)
+        werkstatt_chooser_served = svg_dark_cells(werkstatt_chooser_svg)
+        check("under 'chooser', foyer's picture is the bare chooser address",
+              foyer_chooser_served == chooser_expected, len(foyer_chooser_served))
+        check("and so is werkstatt's -- the setting decides now, not the screen",
+              werkstatt_chooser_served == chooser_expected, len(werkstatt_chooser_served))
+        check("which is a different code than either screen's own address above",
+              chooser_expected != foyer_expected and chooser_expected != werkstatt_expected,
+              (len(chooser_expected), len(foyer_expected), len(werkstatt_expected)))
+
+
 CASES = [case_80, case_81, case_82, case_83, case_84, case_85, case_86, case_87,
-         case_88, case_89, case_90]
+         case_88, case_89, case_90, case_91]
 
 # The only two cases that touch a real browser. `python3 test_castscreens.py 85`
 # (say) has no use for two Chromes it will never attach to, and starting them

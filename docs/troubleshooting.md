@@ -80,14 +80,11 @@ persists for a different address, check `/api/cast/state?screen=<name>` for
 guest holding one sees it as free while everyone else sees it as taken.
 
 **A guest scans a panel and gets the screen chooser instead of that screen.**
-Two different causes, and the QR they scanned tells them apart. The overlay's cast
-QR follows **QR-Code auf dem Schirm führt zu** in the admin page's cast section: if
-that is set to *Auswahl aller Schirme*, the chooser is what it is supposed to do.
-The QR *picture* on the idle screen and the cast standby screen is the other cause
-and is not a setting — `/api/cast/qr.svg` takes no screen and always encodes the
-chooser address, whatever the setting says, while the address printed beside it
-follows the setting. Either way the guest is one tap from the right screen; the
-list marks each one `frei` or `belegt`.
+Check **QR-Code auf dem Schirm führt zu** in the admin page's cast section: if
+that is set to *Auswahl aller Schirme*, the chooser is what it is supposed to do,
+for the QR *picture* and the overlay's cast QR alike — both read the same
+setting, so they cannot disagree. Either way the guest is one tap from the right
+screen; the list marks each one `frei` or `belegt`.
 
 **A cast lands on the wrong screen.**
 The guest was bound to that screen, so look at what bound them. A QR printed or

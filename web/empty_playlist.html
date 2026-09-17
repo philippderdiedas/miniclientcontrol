@@ -102,8 +102,13 @@
         }
 
         document.getElementById('url').textContent = cast.sender_url;
+        // `?screen=` so the picture resolves `cast_qr_target` for *this* screen,
+        // exactly like the state fetch above -- without it the SVG would fall
+        // back to the bare chooser address regardless of the setting.
         // Cache-busted so the QR follows a changed address without a reload loop.
-        document.getElementById('qr').src = '/api/cast/qr.svg?v=' + encodeURIComponent(cast.sender_url);
+        const qrParams = new URLSearchParams({ v: cast.sender_url });
+        if (screen) qrParams.set('screen', screen);
+        document.getElementById('qr').src = '/api/cast/qr.svg?' + qrParams.toString();
 
         const codeBox = document.getElementById('code');
         codeBox.replaceChildren();
