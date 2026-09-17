@@ -23,12 +23,17 @@ python3 test_browser.py     # real WebRTC between two Chrome instances
 python3 test_overlay.py     # the settings, and the badge really on the page
 python3 test_webhook.py     # outbound webhooks, end to end (~50s, needs Chrome)
 python3 test_display.py     # several screens at once (needs a Chrome per screen)
+python3 test_castscreens.py # two screens casting at once, independently (needs a Chrome per screen)
 ```
 
 Four of them need a real Chrome — `test_browser.py`, `test_overlay.py`,
-`test_webhook.py` and `test_display.py`, each for its own reason, given below.
-**`test_display.py` and `test_webhook.py` both use CDP port 9242, so they must not
-run at the same time.**
+`test_webhook.py` and `test_display.py` — for their own reasons, given below.
+`test_castscreens.py` reuses `test_display.py`'s harness rather than starting
+its own, so it is a fifth: passing a case number that needs a browser (`86` or
+`90`; every other case is plain HTTP/WebSocket and starts no Chrome at all)
+launches Chrome on the very same two ports. **`test_display.py`,
+`test_webhook.py` and `test_castscreens.py` all use CDP port 9242, so no two of
+these three may run at the same time.**
 
 `test_guestpage.py` is slow on purpose: the last case waits out the guest page's
 thirty-second grace period, which is the whole liveness contract of that feature.
@@ -58,6 +63,16 @@ undeclared display falls back to 9222 and would attach to a stray Chrome there a
 write item ids into cases that are asserting an absence of them. A playlist item
 pointed at `127.0.0.1:9` is likewise never loaded: Chromium refuses port 9 outright
 with `ERR_UNSAFE_PORT`, so the navigation never leaves the browser.
+
+`test_castscreens.py` (cases `[80]`-`[90]`) is `test_display.py`'s harness
+again, proving the same "own" for casting: its own session, claim,
+reservation, pairing code and room-audio contest per screen, not merely
+differently named ones. Most of its cases are HTTP/WebSocket state that does
+not depend on a browser at all and use the dead CDP ports, same as above; only
+`[86]` (a cast on one screen leaves another's playlist and overlay untouched)
+and `[90]` (each idle screen navigates to its own `?screen=` page, not
+another's) need a real loop and a real Chrome, so passing any other case
+number starts neither.
 
 `wsclient.py` is the minimal stdlib WebSocket client from the picklecast test
 suite (MIT, Evan Widloski); `cdp.py` layers just enough DevTools Protocol on top

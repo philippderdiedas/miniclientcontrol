@@ -7,13 +7,25 @@ It reuses `test_display.py`'s harness (declared screens on explicit CDP ports,
 one Chrome profile per screen, `atexit` cleanup) and `test_cast.py`'s signaling
 helpers (`ws`, `claim`, `wsclient`).
 
-Only `[86]` needs a real, running control loop -- it is the one case whose
-claim is about the *playlist and current item*, not just the session state, so
-it uses `test_display.Screens` (real headless Chrome per screen). Every other
-case is about HTTP/WebSocket state that does not depend on a browser being
-attached at all, so it uses `test_display.Alone` (CDP ports 9 and 10, where
-nothing ever listens) -- cheaper, and it keeps a stray loop from writing
-anything into a case that never asked for one.
+Only `[86]` and `[90]` need a real, running control loop -- `[86]`'s claim is
+about the *playlist and current item*, not just the session state, and `[90]`'s
+is about what a real browser actually navigated to. Both use
+`test_display.Screens` (real headless Chrome per screen). Every other case is
+about HTTP/WebSocket state that does not depend on a browser being attached at
+all, so it uses `test_display.Alone` (CDP ports 9 and 10, where nothing ever
+listens) -- cheaper, and it keeps a stray loop from writing anything into a
+case that never asked for one. `start_chromes`/`stop_chromes` are therefore
+only called when the run actually includes one of those two, not
+unconditionally -- a lone `python3 test_castscreens.py 85` has no use for two
+Chromes it will never attach to.
+
+`until()` (from `test_display`) defaults to a 30s timeout, the same as
+`src/cast/mod.rs`'s `DISPLAY_TIMEOUT`: a `Reservation` or an `Alone` session
+that never gets a display peer is torn down by `watch_display_arrival` at
+exactly that deadline. A case whose own `until()` burns the full 30s waiting on
+something else is therefore racing that teardown, and later assertions in the
+same case would fail for the wrong reason -- a session that watch_display_arrival
+already killed, not the behaviour under test.
 
 Pass a case number (`python3 test_castscreens.py 86`) to run just one.
 """
@@ -23,15 +35,15 @@ import json
 import os
 import ssl
 import sys
-import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cdp
 import wsclient
 from test_cast import http, ws, claim, check, failures, HTTP, TLS, is_cast_display
 from test_display import (
     Screens, Alone, until, make_playlist, add_item, assign, item_of,
-    playlist_id_of, start_chromes, stop_chromes,
+    playlist_id_of, start_chromes, stop_chromes, PORTS,
 )
 
 # A second source address, the same trick `test_reserve.py` and `test_audio.py`
@@ -99,32 +111,43 @@ async def case_80():
 
 
 async def case_81():
-    print("\n[81] a ticket minted for foyer is refused on a socket claiming werkstatt")
+    print("\n[81] a ticket minted for werkstatt is refused on a socket claiming foyer")
+    # Minted for werkstatt -- the *non*-primary screen -- and not foyer,
+    # deliberately: `display_for_ticket` (src/cast/signaling.rs) is exactly the
+    # function a mutant could replace with `state.primary()` and leave this case
+    # green if the ticket happened to be foyer's own, since foyer is
+    # `displays[0]`. Reversing the direction catches both the trust-the-query
+    # bug this case is named for and the primary-fallback shape.
     with Alone():
-        status, body = claim(display="foyer")
-        check("foyer's claim succeeds", status == 200 and body.get("ticket"), (status, body))
+        status, body = claim(display="werkstatt")
+        check("werkstatt's claim succeeds", status == 200 and body.get("ticket"), (status, body))
         ticket = body["ticket"]
 
         # `?screen=` on the socket is read for the display role alone -- a
         # sender's screen comes only from its ticket. Appending it here is
         # exactly the attack `cast_ws`'s own comment names: trusting it would
         # let a sender claim a screen its ticket was never issued for.
-        path = f"/api/cast/ws?role=sender&ticket={ticket}&screen=werkstatt"
+        path = f"/api/cast/ws?role=sender&ticket={ticket}&screen=foyer"
         sr, sw = await wsclient.connect("127.0.0.1", HTTP, path, secure=False)
         welcome = await wsclient.recv_json(sr)
         check("the socket still opens", welcome.get("type") == "welcome", welcome)
 
         # The barrier: the cast genuinely landed somewhere before claiming it
-        # did not land on werkstatt means anything.
-        check("the cast lands on the ticket's own screen, foyer",
-              until(lambda: override_of("foyer").get("active") is True),
-              override_of("foyer"))
+        # did not land on foyer means anything.
+        check("the cast lands on the ticket's own screen, werkstatt",
+              until(lambda: override_of("werkstatt").get("active") is True),
+              override_of("werkstatt"))
 
-        check("werkstatt's own override stays untouched",
-              override_of("werkstatt").get("active") is False, override_of("werkstatt"))
-        check("and werkstatt never becomes busy for anyone",
-              screen(http("GET", "/api/cast/info")[1], "werkstatt")["busy"] is False,
-              http("GET", "/api/cast/info")[1])
+        check("foyer's own override stays untouched",
+              override_of("foyer").get("active") is False, override_of("foyer"))
+        # From a genuinely different address, not 127.0.0.1 -- `busy` is
+        # `taken_by_other(peer.ip())`, and the only sender in this case *is*
+        # 127.0.0.1, for which that predicate is always false regardless of
+        # what the server does. `info_from_lan()` is what `[83]` already uses
+        # for the same reason.
+        check("and foyer never becomes busy for anyone",
+              screen(info_from_lan(), "foyer")["busy"] is False,
+              info_from_lan())
 
         sw.close()
 
@@ -204,17 +227,37 @@ async def case_84():
     print("\n[84] room audio: first caster holds it, the second is told who has "
           "it, teardown releases it, the operator can take it through /api/audio")
     with Alone():
+        # `claim_audio` records ownership -- and can 409 -- before `apply_audio`
+        # ever touches a backend, so the 409-naming and post-grace-release
+        # checks below hold whatever this machine has. A bare `status != 409`
+        # after a *successful* claim does not: with no PulseAudio/PipeWire here,
+        # `apply_audio` always answers 502 (never 200), and "502 is not 409" is
+        # true whether or not the request actually acted. Read once, up front,
+        # and used to make the two claim-side checks assert the actual expected
+        # code either way, instead of a check that cannot fail regardless of the
+        # backend.
+        available = bool((http("GET", "/api/audio")[1] or {}).get("available"))
+
         sr1, sw1 = await ws("sender", display="foyer")
         await wsclient.recv_json(sr1)
-        await asyncio.sleep(0.4)
+        check("foyer's sender is registered before the audio contest starts",
+              until(lambda: state_of("foyer").get("active") is True),
+              state_of("foyer"))
 
         status, body = http("POST", "/api/cast/audio?screen=foyer",
                              {"target": "sink", "action": "mute", "value": False})
-        check("the first caster holds the room audio", status != 409, (status, body))
+        if available:
+            check("the first caster holds the room audio", status == 200, (status, body))
+        else:
+            check("the first caster's claim is at least not refused as busy "
+                  "(no audio backend here to prove it actually took hold)",
+                  status == 502, (status, body))
 
         sr2, sw2 = await ws("sender", display="werkstatt")
         await wsclient.recv_json(sr2)
-        await asyncio.sleep(0.4)
+        check("werkstatt's sender is registered too",
+              until(lambda: state_of("werkstatt").get("active") is True),
+              state_of("werkstatt"))
 
         status, body = http("POST", "/api/cast/audio?screen=werkstatt",
                              {"target": "sink", "action": "mute", "value": False})
@@ -227,18 +270,27 @@ async def case_84():
 
         status, body = http("GET", "/api/audio")
         check("the operator's own route answers regardless of who owns the room audio",
-              status == 200, (status, body))
+              status == 200 and body.get("available") == available, (status, body))
         status, body = http("POST", "/api/audio", {"target": "sink", "action": "mute", "value": False})
-        check("and the operator can act through it too, unblocked by the guest contest",
-              status != 409, (status, body))
+        if available:
+            check("and the operator can act through it too, unblocked by the guest contest",
+                  status == 200, (status, body))
+        else:
+            check("and the operator route is at least not blocked by the guest "
+                  "contest (no audio backend here to prove it acted)",
+                  status == 502, (status, body))
 
         sw1.close()
-        await asyncio.sleep(6.5)  # SENDER_GRACE (5s) plus margin
-
-        status, body = http("POST", "/api/cast/audio?screen=werkstatt",
-                             {"target": "sink", "action": "mute", "value": False})
+        await sw1.wait_closed()
+        # Polled rather than a fixed `SENDER_GRACE` (5s) plus margin sleep,
+        # which is tight on a loaded machine; this is deterministic and no
+        # slower than the grace actually takes.
         check("the first cast's teardown frees the room for the next screen",
-              status != 409, (status, body))
+              until(lambda: http("POST", "/api/cast/audio?screen=werkstatt",
+                                  {"target": "sink", "action": "mute", "value": False})[0] != 409,
+                    timeout=15.0),
+              http("POST", "/api/cast/audio?screen=werkstatt",
+                   {"target": "sink", "action": "mute", "value": False}))
 
         sw2.close()
 
@@ -275,6 +327,15 @@ def case_85():
         foyer_code2 = (state_of("foyer").get("pairing") or {}).get("code")
         http("POST", "/api/cast/pair", {"display": "werkstatt"})
         werkstatt_code2 = (state_of("werkstatt").get("pairing") or {}).get("code")
+        # If the re-mint regressed, `code2` is `None` and `claim(None, ...)`
+        # sends no code at all -- which `authorize_sender` refuses with the same
+        # 403 "Falscher Code." a wrong-screen code gets. Without this, both
+        # cross-screen checks below would pass while proving nothing.
+        check("both screens minted fresh, live codes the second time too",
+              bool(foyer_code2) and bool(werkstatt_code2),
+              (foyer_code2, werkstatt_code2))
+        check("and the fresh codes differ from each other",
+              foyer_code2 != werkstatt_code2, (foyer_code2, werkstatt_code2))
 
         status, body = claim(werkstatt_code2, display="foyer")
         check("werkstatt's live code does not open foyer",
@@ -287,6 +348,9 @@ def case_85():
 async def case_86():
     print("\n[86] a cast on one screen leaves the other screen's overlay, "
           "playlist and current item untouched -- the negative that matters most")
+    # The negative only: `/api/overlay` is primary-only by design, so there is
+    # no positive to add here about a cast *hiding* an overlay on the screen it
+    # actually lands on -- that is `test_overlay.py`'s `[41d]`.
     with Screens():
         http("PUT", "/api/settings",
              {"overlay": {"enabled": True, "text": "Foyer Hinweis", "hide_during_cast": True}})
@@ -415,7 +479,38 @@ async def case_89():
         sw2.close()
 
 
-CASES = [case_80, case_81, case_82, case_83, case_84, case_85, case_86, case_87, case_88, case_89]
+def case_90():
+    print("\n[90] a screen with no playlist lands on its own ?screen= idle page, "
+          "not another screen's")
+    # `[87]` tests `/api/cast/state?screen=`, the endpoint the idle page
+    # *calls* once it is loaded with the right query string. Nothing anywhere
+    # else tests the wiring that puts that query string on the page in the
+    # first place: `empty_playlist_url` in `src/browser.rs`. Drop that query
+    # parameter and every idle screen in a two-display deployment would 409
+    # against `/api/cast/state` and show no pairing code -- and this entire
+    # suite would stay green, since every other case here assigns a playlist
+    # before it ever looks at a screen. Read directly off each screen's own
+    # real Chrome over CDP, the way `test_browser.py` does, rather than through
+    # the HTTP API -- this is a claim about what the loop actually navigated
+    # to, not about database state.
+    with Screens():
+        check("foyer's own browser lands on its own idle page",
+              until(lambda: "empty_playlist.html?screen=foyer"
+                    in (cdp.page_ws(PORTS["foyer"])[1] or {}).get("url", "")),
+              (cdp.page_ws(PORTS["foyer"])[1] or {}).get("url"))
+        check("werkstatt's own browser lands on its own idle page, not foyer's",
+              until(lambda: "empty_playlist.html?screen=werkstatt"
+                    in (cdp.page_ws(PORTS["werkstatt"])[1] or {}).get("url", "")),
+              (cdp.page_ws(PORTS["werkstatt"])[1] or {}).get("url"))
+
+
+CASES = [case_80, case_81, case_82, case_83, case_84, case_85, case_86, case_87,
+         case_88, case_89, case_90]
+
+# The only two cases that touch a real browser. `python3 test_castscreens.py 85`
+# (say) has no use for two Chromes it will never attach to, and starting them
+# unconditionally would launch both for every single-case run.
+NEEDS_CHROME = {"86", "90"}
 
 
 def main(wanted):
@@ -431,12 +526,14 @@ def main(wanted):
 
 if __name__ == "__main__":
     wanted = sys.argv[1:]
-    if not start_chromes():
+    needs_chrome = not wanted or any(name in NEEDS_CHROME for name in wanted)
+    if needs_chrome and not start_chromes():
         print("  FAIL  headless Chrome did not come up")
         sys.exit(1)
     try:
         main(wanted)
     finally:
-        stop_chromes()
+        if needs_chrome:
+            stop_chromes()
     print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
     sys.exit(1 if failures else 0)
