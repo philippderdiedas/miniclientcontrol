@@ -13,6 +13,16 @@ def check(name, ok, detail=""):
     if not ok:
         failures.append(name)
 
+def is_cast_display(url):
+    """Whether an override URL is the cast page, for whichever screen.
+
+    `cast_display_url` appends `?screen=<name>` so a receiver knows which
+    display it is; a plain `endswith("cast_display.html")` would stop matching
+    the moment a query string follows it, so every case that asks "is this the
+    cast page" goes through here instead of repeating the split.
+    """
+    return url.split("?", 1)[0].endswith("cast_display.html")
+
 def http(method, path, body=None, port=None):
     url = f"http://127.0.0.1:{port or HTTP}{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -68,34 +78,46 @@ class Server:
     def __exit__(self, *a):
         self.proc.terminate(); self.proc.wait(timeout=10)
 
-def claim(code=None, port=None, mode=None):
+def claim(code=None, port=None, mode=None, display=None):
     """POST /api/cast/claim -> (status, body). This is where a code is checked.
 
     `mode` is "page" for a guest who wants a web page on the display rather than
     a stream. It is decided here and not on the socket, because the server pins
     the display as soon as a sender connects.
+
+    `display` names the screen the guest wants; omitted, the server resolves it
+    the same way the playback routes do (`display::resolve`).
     """
     body = {}
     if code:
         body["code"] = code
     if mode:
         body["mode"] = mode
+    if display:
+        body["display"] = display
     return http("POST", "/api/cast/claim", body, port=port)
 
 
-async def ws(role, code=None, host="127.0.0.1", ticket="auto", mode=None):
+async def ws(role, code=None, host="127.0.0.1", ticket="auto", mode=None, display=None):
     """Open a signaling socket, claiming the session first for senders.
 
     `ticket="auto"` claims with `code`; pass an explicit ticket (or None) to
     exercise the socket's own admission checks.
+
+    `display` names the screen. For a sender it is the claim's `display` field
+    (the ticket is what the socket itself carries the screen with); for the
+    display role it is the connection's own `?screen=` -- the only role that
+    parameter exists for, since a sender's screen already comes from its ticket.
     """
     if role == "sender" and ticket == "auto":
-        status, body = claim(code, mode=mode)
+        status, body = claim(code, mode=mode, display=display)
         assert status == 200, f"claim refused: {status} {body}"
         ticket = body["ticket"]
     elif ticket == "auto":
         ticket = None
     path = f"/api/cast/ws?role={role}" + (f"&ticket={ticket}" if ticket else "")
+    if role == "display" and display:
+        path += f"&screen={display}"
     return await wsclient.connect(host, HTTP, path, secure=False)
 
 
@@ -121,7 +143,7 @@ async def main_flow():
         await asyncio.sleep(0.4)
         status, ov = http("GET", "/api/override")
         check("cast pinned the override to the cast page",
-              ov["active"] and ov["url"].endswith("/cast_display.html"), ov)
+              ov["active"] and is_cast_display(ov["url"]), ov)
 
         # relay in both directions, payload untouched
         offer = {"sdp": {"type": "offer", "sdp": "v=0 fake"}}
@@ -153,7 +175,7 @@ async def main_flow():
         sw.close()
         await asyncio.sleep(1.0)
         status, ov = http("GET", "/api/override")
-        check("override still held during the grace period", ov["active"] and ov["url"].endswith("cast_display.html"), ov)
+        check("override still held during the grace period", ov["active"] and is_cast_display(ov["url"]), ov)
 
         await asyncio.sleep(5.5)
         status, ov = http("GET", "/api/override")
@@ -163,13 +185,51 @@ async def main_flow():
         check("state reports no cast", not st["active"], st)
         dw.close()
 
+    print("\n[1b] the refusal above is per screen, not global")
+    # Two declared displays, neither with a browser attached -- this only needs
+    # the HTTP/WS admission logic, not a running control loop.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        sr, sw = await ws("sender", display="foyer")
+        await wsclient.recv_json(sr)
+
+        status, body = claim(display="foyer")
+        check("a second guest on the same screen is still refused",
+              status == 409 and "error" in body, (status, body))
+
+        status, body = claim(display="werkstatt")
+        check("a different screen is untouched by the first screen's refusal",
+              status == 200 and "ticket" in body, (status, body))
+
+        sw.close()
+
+    print("\n[1c] a ticket for a non-primary screen pins that screen, not the primary one")
+    # [1b] only reads claim's HTTP responses, so it would pass identically if
+    # `display_for_ticket` were deleted and every sender socket fell straight to
+    # `state.primary()`. Claiming and connecting on `werkstatt` -- the *second*
+    # declared screen, never the primary -- and then reading back which screen
+    # actually got pinned is what pins the helper itself down.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        sr, sw = await ws("sender", display="werkstatt")
+        await wsclient.recv_json(sr)
+        await asyncio.sleep(0.4)
+
+        status, ov = http("GET", "/api/displays/werkstatt/override")
+        check("the claimed screen is pinned to the cast page",
+              status == 200 and ov["active"] and is_cast_display(ov["url"]), ov)
+
+        status, ov = http("GET", "/api/displays/foyer/override")
+        check("the other, unclaimed screen is untouched",
+              status == 200 and not ov["active"], ov)
+
+        sw.close()
+
     print("\n[3] operator can cut a cast short")
     with Server():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
-        check("override pinned", http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
-        status, _ = http("DELETE", "/api/cast/session")
+        check("override pinned", is_cast_display(http("GET", "/api/override")[1]["url"]))
+        status, _ = http("DELETE", "/api/displays/default/cast/session")
         check("DELETE session returns 204", status == 204, status)
         await asyncio.sleep(0.3)
         check("override cleared immediately", http("GET", "/api/override")[1]["active"] is False)
@@ -185,7 +245,7 @@ async def main_flow():
               status == 403 and "Falscher Code" in body.get("error", ""), (status, body))
         await asyncio.sleep(0.3)
         check("a refused sender does not touch the display", http("GET", "/api/override")[1]["active"] is False)
-        check("and does not hold the session", http("GET", "/api/cast/info")[1]["busy"] is False)
+        check("and does not hold the session", http("GET", "/api/cast/info")[1]["screens"][0]["busy"] is False)
 
         status, body = claim("QT7X")
         check("correct code reserves the session",

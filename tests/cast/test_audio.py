@@ -100,6 +100,18 @@ async def main():
         check("access ends with the cast", status == 403, (status, body))
         dw.close()
 
+    # [32] "the room has one speaker pair, whichever screen claims it first"
+    # used to live here, racing two screens' senders for the room audio with a
+    # bare `status != 409` and a fixed `sleep(6.5)` margin. Both are weaker
+    # than `test_castscreens.py`'s [84], which covers the identical claim /
+    # 409-naming / teardown-release sequence: it reads `/api/audio`'s
+    # `available` flag once up front so it can assert the actual expected
+    # status either way instead of a check that cannot fail regardless of the
+    # backend (`status != 409` is also true of an unrelated 502), and it polls
+    # for the release instead of sleeping past the grace period. Removed
+    # rather than fixed in place, to avoid keeping two copies of the same
+    # scenario that could drift.
+
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
 sys.exit(1 if failures else 0)

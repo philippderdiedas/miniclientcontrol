@@ -840,7 +840,7 @@ async def case_67():
         display_reader, display_writer = await ws("display")
         await wsclient.recv_json(display_reader)
 
-        status, _ = http("POST", "/api/cast/pair")
+        status, _ = http("POST", "/api/cast/pair", {})
         check("pairing was started", status == 200, status)
         pushed = await wsclient.recv_json(display_reader)
         code = pushed.get("code")

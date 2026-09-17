@@ -33,6 +33,7 @@ const KEY_CAST_ENABLED: &str = "cast_enabled";
 const KEY_GUEST_PAGES: &str = "guest_pages_enabled";
 const KEY_CAST_AUTH: &str = "cast_auth";
 const KEY_CAST_CODE: &str = "cast_code";
+const KEY_CAST_QR_TARGET: &str = "cast_qr_target";
 const KEY_OVERLAY: &str = "overlay_config";
 const KEY_LOCALE: &str = "locale";
 
@@ -53,6 +54,8 @@ pub struct AppSettings {
     pub guest_pages_enabled: bool,
     pub cast_auth: CastAuth,
     pub cast_code: String,
+    /// What the QR drawn on a screen points at.
+    pub cast_qr_target: CastQrTarget,
     /// Basic-auth user. `None` means the operator UI is open.
     pub auth_user: Option<String>,
     /// PBKDF2 hash, or the marker for a plaintext password supplied on the CLI.
@@ -63,6 +66,22 @@ pub struct AppSettings {
     /// "whatever the display browser would use on its own", which follows from
     /// `--browser-language`.
     pub locale: String,
+}
+
+/// What the QR drawn on a screen points at.
+///
+/// One setting for the venue, read by both drawers -- the overlay QR and the
+/// idle page's invitation -- so the two cannot disagree. Not part of the overlay
+/// configuration, because the idle page draws its own invitation without
+/// consulting it and would need the same rule a second time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CastQrTarget {
+    /// `…/?screen=<name>` -- the screen the guest is standing in front of.
+    #[default]
+    Screen,
+    /// the bare guest URL; the page offers the list.
+    Chooser,
 }
 
 /// What the overlay shows and where.
@@ -576,6 +595,21 @@ pub fn cast_auth_key(auth: CastAuth) -> &'static str {
     }
 }
 
+pub fn parse_cast_qr_target(raw: &str) -> Option<CastQrTarget> {
+    match raw {
+        "screen" => Some(CastQrTarget::Screen),
+        "chooser" => Some(CastQrTarget::Chooser),
+        _ => None,
+    }
+}
+
+pub fn cast_qr_target_key(target: CastQrTarget) -> &'static str {
+    match target {
+        CastQrTarget::Screen => "screen",
+        CastQrTarget::Chooser => "chooser",
+    }
+}
+
 /// Stored values, with anything given on the command line taking precedence.
 pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
     let stored_guest_pages = crate::db::load_setting(pool, KEY_GUEST_PAGES)
@@ -589,6 +623,9 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         .await
         .and_then(|raw| parse_cast_auth(&raw));
     let stored_code = crate::db::load_setting(pool, KEY_CAST_CODE).await;
+    let stored_qr_target = crate::db::load_setting(pool, KEY_CAST_QR_TARGET)
+        .await
+        .and_then(|raw| parse_cast_qr_target(&raw));
     let stored_locale = crate::db::load_setting(pool, KEY_LOCALE).await;
     let stored_overlay = crate::db::load_setting(pool, KEY_OVERLAY)
         .await
@@ -616,6 +653,9 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
             .clone()
             .or(stored_code)
             .unwrap_or_default(),
+        // No CLI flag: this is a UX choice, not a capability, so nothing ever
+        // pins it -- only the stored value, or the default of one's own screen.
+        cast_qr_target: stored_qr_target.unwrap_or_default(),
         auth_user,
         auth_secret,
         overlay: stored_overlay,
@@ -640,6 +680,10 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
         (KEY_GUEST_PAGES, settings.guest_pages_enabled.to_string()),
         (KEY_CAST_AUTH, cast_auth_key(settings.cast_auth).to_string()),
         (KEY_CAST_CODE, settings.cast_code.clone()),
+        (
+            KEY_CAST_QR_TARGET,
+            cast_qr_target_key(settings.cast_qr_target).to_string(),
+        ),
         (KEY_LOCALE, settings.locale.clone()),
         (
             KEY_AUTH_USER,
@@ -690,17 +734,18 @@ pub fn routes() -> Router<AppState> {
 /// shows what is really out there rather than the global half of it.
 pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
     // The primary display's item, permanently: the overlay configuration is
-    // global, so the only per-display thing in this payload is which item the
-    // layer belongs to. Answering for the first screen is the compromise --
-    // refusing an unscoped request the way the display-owned paths do would take
-    // the preview away from every multi-screen deployment to tell it something
-    // that is the same on all of them.
-    let current = *state.primary().current_item_id.lock().await;
+    // global, so the only per-display things in this payload are which item the
+    // layer belongs to and whether that screen is casting. Answering for the
+    // first screen is the compromise -- refusing an unscoped request the way the
+    // display-owned paths do would take the preview away from every multi-screen
+    // deployment to tell it something that is nearly the same on all of them.
+    let display = state.primary();
+    let current = *display.current_item_id.lock().await;
     let item = match current {
         Some(id) => crate::db::load_item_overlay(&state.pool, id).await,
         None => None,
     };
-    Json(overlay_payload(&state, item.as_ref()).await)
+    Json(overlay_payload(&state, &display, item.as_ref()).await)
 }
 
 /// The layers handed to `__ov.apply()`, on the display and in the preview.
@@ -712,22 +757,31 @@ pub async fn read_overlay(State(state): State<AppState>) -> impl IntoResponse {
 /// The global overlay comes first and the item's second, which is also the order
 /// they stack in when both want the same corner -- and the reason the global one
 /// decides that box's style.
-pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> serde_json::Value {
+pub async fn overlay_payload(
+    state: &AppState,
+    display: &crate::models::Display,
+    item: Option<&ItemOverlay>,
+) -> serde_json::Value {
     // One acquisition for all three: the cast switch decides whether a cast QR is
     // drawn at all, and taking the lock more than once in a single build invites a
     // reader to wonder whether the parts can disagree.
-    let (overlay, cast_enabled, locale) = {
+    let (overlay, cast_enabled, cast_qr_target, locale) = {
         let settings = state.settings.read().await;
         (
             settings.overlay.clone(),
             settings.cast_enabled,
+            settings.cast_qr_target,
             settings.locale.clone(),
         )
     };
     // `is_active` rather than "a sender is connected": during the grace period
     // after a sender's socket drops the cast page is still on screen, and an
     // overlay blinking back for those five seconds would look like a fault.
-    let casting = state.cast.lock().await.is_active();
+    // This screen's session, not the controller's: `hide_during_cast` and the
+    // cast QR are about what is on *this* panel, so a cast on the screen next
+    // door must not blank the notice here or drop the code that would let
+    // somebody cast to this one.
+    let casting = display.cast.lock().await.is_active();
     let mut layers: Vec<serde_json::Value> = Vec::new();
 
     if casting && overlay.hide_during_cast {
@@ -763,7 +817,10 @@ pub async fn overlay_payload(state: &AppState, item: Option<&ItemOverlay>) -> se
                 // share a screen that refuses every sender is worse than silence.
                 // Same while one is running: the slot is taken, so whoever scans
                 // it would be turned away.
-                "cast" if cast_enabled && !casting => crate::cast::sender_url(state),
+                "cast" if cast_enabled && !casting => match cast_qr_target {
+                    CastQrTarget::Screen => crate::cast::sender_url(state, Some(display)),
+                    CastQrTarget::Chooser => crate::cast::sender_url(state, None),
+                },
                 "cast" => String::new(),
                 _ => overlay.qr_text.clone(),
             };
@@ -918,6 +975,7 @@ struct SettingsResponse {
     guest_pages_enabled: bool,
     cast_auth: &'static str,
     cast_code: String,
+    cast_qr_target: &'static str,
     /// Whether the operator UI currently demands credentials.
     auth_enabled: bool,
     auth_user: Option<String>,
@@ -936,6 +994,7 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
         guest_pages_enabled: settings.guest_pages_enabled,
         cast_auth: cast_auth_key(settings.cast_auth),
         cast_code: settings.cast_code.clone(),
+        cast_qr_target: cast_qr_target_key(settings.cast_qr_target),
         auth_enabled: settings.auth_user.is_some(),
         auth_user: settings.auth_user.clone(),
         overlay: settings.overlay.clone(),
@@ -951,6 +1010,7 @@ pub struct UpdateRequest {
     guest_pages_enabled: Option<bool>,
     cast_auth: Option<String>,
     cast_code: Option<String>,
+    cast_qr_target: Option<String>,
     auth_enabled: Option<bool>,
     auth_user: Option<String>,
     auth_password: Option<String>,
@@ -1043,6 +1103,16 @@ pub async fn update_settings(
                 return locked("--locale");
             }
             next.locale = locale;
+        }
+    }
+
+    if let Some(target) = payload.cast_qr_target {
+        match parse_cast_qr_target(&target) {
+            // No lock: unlike --disable-cast, --cast-auth and --cast-code, this
+            // one has no CLI flag. It is a UX choice, not a capability, so
+            // nothing on the command line ever pins it.
+            Some(parsed) => next.cast_qr_target = parsed,
+            None => return bad("Unbekanntes Ziel für den QR-Code.".to_string()),
         }
     }
 
@@ -1142,7 +1212,11 @@ pub async fn update_settings(
     // would only apply to the next person.
     if cast_turned_off {
         tracing::info!("Cast: disabled by the operator, ending any running session");
-        crate::cast::end_session(&state, "disabled").await;
+        // Every screen: the switch is the venue's, so a session on any panel
+        // has to stop. With one display this is exactly what it was.
+        for display in state.displays.iter() {
+            crate::cast::end_session(&state, display, "disabled").await;
+        }
     }
 
     read_settings(State(state)).await.into_response()

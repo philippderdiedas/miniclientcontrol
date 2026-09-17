@@ -361,12 +361,26 @@ use crate::models::AppState;
 /// route is absent from `is_cast_public_path`, so the operator's credentials (or
 /// loopback) decide instead -- and the operator can turn the room down whether or
 /// not anybody is casting.
+///
+/// **Deliberately unscoped**, unlike `/api/cast/audio`: it always singles out
+/// `state.primary()`'s browser, never whichever screen a cast happens to be
+/// running on. On a single-display deployment -- the only kind the admin page's
+/// audio card has a control for today -- that is the only screen there is, so
+/// this is invisible. On a deployment with several screens, a cast running on a
+/// *later* screen has its own browser's stream go unrecognised here: the
+/// operator's device switch on this route will not drag it along, only
+/// `/api/cast/audio` (scoped to the caster's own screen) does that. Giving this
+/// route the same `?screen=` would either `409` an admin page that does not
+/// send one yet, or duplicate `/api/cast/audio`'s own resolution for no reader
+/// of it -- both a bigger change than this route asked for, so it stays
+/// unscoped until the admin page grows a per-screen audio picker.
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/audio", get(read).post(control))
 }
 
 pub async fn read(State(state): State<AppState>) -> Response {
-    let pids = crate::cast::cast_process_ids(&state).await;
+    // Unscoped, like the route -- see the doc comment on `routes` above.
+    let pids = crate::cast::cast_process_ids(&state.primary()).await;
     Json(state.audio.state(&pids).await).into_response()
 }
 
@@ -374,5 +388,6 @@ pub async fn control(
     State(state): State<AppState>,
     Json(command): Json<AudioCommand>,
 ) -> Response {
-    crate::cast::apply_audio(&state, command).await
+    // Unscoped, like the route -- see the doc comment on `routes` above.
+    crate::cast::apply_audio(&state, &state.primary(), command).await
 }

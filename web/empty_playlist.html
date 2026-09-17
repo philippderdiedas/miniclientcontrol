@@ -80,9 +80,20 @@
     // `/api/cast/state` rather than `/api/cast/info`: this page is only ever
     // rendered by the display browser over loopback, and it is the loopback
     // endpoint that also carries the standing code.
+    //
+    // `?screen=` names which display this is -- set by `empty_playlist_url`,
+    // the only place that navigates here, so it is always this screen's own
+    // name. Without it, a deployment with more than one declared display would
+    // have no default to resolve against and every idle screen would get a 409
+    // instead of its own code.
+    const screen = new URLSearchParams(location.search).get('screen');
+    const stateUrl = screen
+      ? `/api/cast/state?screen=${encodeURIComponent(screen)}`
+      : '/api/cast/state';
+
     async function showCast() {
       try {
-        const res = await fetch('/api/cast/state');
+        const res = await fetch(stateUrl);
         if (!res.ok) return;
         const cast = await res.json();
         if (!cast.enabled || cast.hard_disabled) {
@@ -91,8 +102,13 @@
         }
 
         document.getElementById('url').textContent = cast.sender_url;
+        // `?screen=` so the picture resolves `cast_qr_target` for *this* screen,
+        // exactly like the state fetch above -- without it the SVG would fall
+        // back to the bare chooser address regardless of the setting.
         // Cache-busted so the QR follows a changed address without a reload loop.
-        document.getElementById('qr').src = '/api/cast/qr.svg?v=' + encodeURIComponent(cast.sender_url);
+        const qrParams = new URLSearchParams({ v: cast.sender_url });
+        if (screen) qrParams.set('screen', screen);
+        document.getElementById('qr').src = '/api/cast/qr.svg?' + qrParams.toString();
 
         const codeBox = document.getElementById('code');
         codeBox.replaceChildren();

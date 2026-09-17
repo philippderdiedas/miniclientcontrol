@@ -299,7 +299,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // This branch re-runs every 5s while the playlist stays empty. Only
                 // navigate if we are not already on the placeholder, otherwise the
                 // idle screen reloads itself every 5 seconds.
-                let empty_url = empty_playlist_url(state.args.port);
+                let empty_url = empty_playlist_url(state.args.port, &display_name);
                 let already_showing = match page.url().await {
                     Ok(Some(current)) => current == empty_url,
                     _ => false,
@@ -327,7 +327,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
 
                 // The idle screen is a page like any other. It is also the one
                 // most likely to be up when somebody sets a notice.
-                if let Err(e) = apply_overlay(&state, &page, None).await {
+                if let Err(e) = apply_overlay(&state, &display, &page, None).await {
                     debug!("Failed to apply overlay on the idle page: {}", e);
                 }
 
@@ -483,7 +483,9 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // item duration old, so an overlay edited while the previous item
                 // was up would otherwise appear one full rotation late.
                 let item_overlay = crate::db::load_item_overlay(&state.pool, item.id).await;
-                if let Err(e) = apply_overlay(&state, &active_page, item_overlay.as_ref()).await {
+                if let Err(e) =
+                    apply_overlay(&state, &display, &active_page, item_overlay.as_ref()).await
+                {
                     error!("Failed to apply overlay: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -530,7 +532,8 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                             let fresh =
                                 crate::db::load_item_overlay(&state.pool, item.id).await;
                             if let Err(e) =
-                                apply_overlay(&state, &active_page, fresh.as_ref()).await
+                                apply_overlay(&state, &display, &active_page, fresh.as_ref())
+                                    .await
                             {
                                 error!("Failed to re-apply overlay: {}", e);
                                 if is_connection_lost(e.as_ref()) {
@@ -690,7 +693,7 @@ async fn run_override_loop(
         if !uses_internal_viewer {
             start_scrolling(page, &override_item.scroll_config).await?;
         }
-        if let Err(e) = apply_overlay(state, page, None).await {
+        if let Err(e) = apply_overlay(state, display, page, None).await {
             error!("Failed to apply overlay on the override page: {}", e);
         }
 
@@ -705,7 +708,7 @@ async fn run_override_loop(
                 _ = display.override_signal.notified() => {},
                 _ = display.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
-                    if let Err(e) = apply_overlay(state, page, None).await {
+                    if let Err(e) = apply_overlay(state, display, page, None).await {
                         error!("Failed to re-apply overlay: {}", e);
                     }
                     continue;
@@ -880,8 +883,12 @@ fn no_content_url(port: u16) -> String {
     format!("http://127.0.0.1:{}/no_content.svg", port)
 }
 
-fn empty_playlist_url(port: u16) -> String {
-    format!("http://127.0.0.1:{}/empty_playlist.html", port)
+fn empty_playlist_url(port: u16, display: &str) -> String {
+    format!(
+        "http://127.0.0.1:{}/empty_playlist.html?screen={}",
+        port,
+        encode(display)
+    )
 }
 
 /// Whether the item on screen is still one this display should be showing.
@@ -1432,10 +1439,14 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
 /// the operator's preview cannot render different things.
 async fn apply_overlay(
     state: &AppState,
+    // The screen this page belongs to. Passed rather than resolved: the cast
+    // session `overlay_payload` consults is that display's own, so resolving
+    // here would let a cast on one panel hide the notice on another.
+    display: &Display,
     page: &Page,
     item: Option<&crate::settings::ItemOverlay>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = crate::settings::overlay_payload(state, item).await;
+    let payload = crate::settings::overlay_payload(state, display, item).await;
 
     let _ = page.evaluate(overlay_runtime_script()).await;
     let has_api: bool = page

@@ -288,7 +288,11 @@ async def settings_flow():
         check("a cast QR alone counts as content, so it is not refused as empty",
               status == 200 and body["overlay"]["qr_source"] == "cast", (status, body))
 
-        sender_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        # /api/cast/state, not /api/cast/info: the latter is the guest chooser's
+        # bare URL regardless of `cast_qr_target`, while the overlay QR follows
+        # the same per-screen setting `/api/cast/state` does -- comparing against
+        # it is what actually pins the two drawers to agreeing with each other.
+        sender_url = http("GET", "/api/cast/state")[1]["sender_url"]
         auto_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
         check("and it renders a code", len(auto_rows) >= 21, len(auto_rows))
         check("with nothing stored in qr_text", body["overlay"]["qr_text"] == "",
@@ -302,6 +306,47 @@ async def settings_flow():
               (sender_url, len(auto_rows), len(typed_rows)))
         print(f"        guest address the display would show: {sender_url}")
         put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
+
+        print("\n[41e] cast_qr_target: chooser -- the overlay QR must follow, "
+              "same as /api/cast/state already does")
+        # /api/cast/info's sender_url is unaffected by cast_qr_target -- it is
+        # always the bare chooser address (see the comment at [41c]) -- so it
+        # is the reference for what "chooser" ought to produce here too.
+        status, _ = http("PUT", "/api/settings", {"cast_qr_target": "chooser"})
+        check("chooser is accepted", status == 200, status)
+
+        chooser_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        check("the bare chooser address carries no ?screen= scoping",
+              "screen=" not in chooser_url, chooser_url)
+        # This server declares one screen, so `sender_url` above never carried
+        # `?screen=` either -- suppressed on purpose (`cast::sender_url`),
+        # because it would be pure noise on the one address there is to type.
+        # The two addresses genuinely differing is a multi-screen property,
+        # covered by `test_castscreens.py`'s [91]; here they must agree.
+        check("and it is the same address as the 'screen' target above, since "
+              "there is only the one screen to be either of them",
+              chooser_url == sender_url, (chooser_url, sender_url))
+
+        chooser_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("the overlay QR still renders a code under 'chooser'",
+              len(chooser_rows) >= 21, len(chooser_rows))
+
+        # Same proof as [41c]: typing the address by hand must reproduce the
+        # identical matrix, module for module -- and on this one-screen server
+        # it is the *same* matrix as [41c]'s, not a different one: see the
+        # comment above on why the two addresses agree here.
+        put({"enabled": True, "qr_source": "text", "qr_text": chooser_url, "text": ""})
+        chooser_typed_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
+        check("and under 'chooser' it is the bare guest address, module for module",
+              chooser_rows == chooser_typed_rows,
+              (chooser_url, len(chooser_rows), len(chooser_typed_rows)))
+        check("which is the same code as the address typed in [41c], since this "
+              "server has only the one screen for either setting to point at",
+              chooser_rows == typed_rows, (len(chooser_rows), len(typed_rows)))
+        print(f"        bare chooser address the display would show: {chooser_url}")
+
+        put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
+        http("PUT", "/api/settings", {"cast_qr_target": "screen"})
 
         status, _ = http("PUT", "/api/settings", {"cast_enabled": False})
         no_qr = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules")

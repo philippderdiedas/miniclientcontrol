@@ -15,13 +15,19 @@ itself, which it does when the peer connection fails. That is a network or
 capacity problem, not a click.
 
 ```
-Cast: display pinned to the cast page      a cast took the screen
-Cast: display can show frames up to Npx    the display announced its ceiling
-Cast: display offers Npx, capped to Mpx    --cast-max-edge overrode it
-Cast: sender did not return, ending session the grace period expired
-Cast: display released, playlist resumes   the screen went back to the playlist
-Cast: pairing code expired unused          nobody used the code in time
+Cast: display pinned to the cast page                   a cast took the screen
+Cast: guest page pinned to <url>                        a guest put up a web page instead
+Cast: display can show frames up to Npx                 the display announced its ceiling
+Cast: display offers Npx, capped to Mpx                 --cast-max-edge overrode it
+Cast: sender did not return, ending session on 'foyer'  the grace period expired
+Cast: display released, playlist resumes                the screen went back to the playlist
+Cast: pairing code on 'foyer' expired unused            nobody used the code in time
 ```
+
+**Most cast lines do not say which screen they are about.** Every declared screen
+has its own session, but only the two watchdog lines above name one. With two
+screens casting at once, interleave the log with `/api/cast/state?screen=<name>`
+per screen rather than trying to read the sessions apart from the log alone.
 
 ## Symptoms
 
@@ -47,9 +53,8 @@ That is the intended reaction to a command line it cannot honour, and the messag
 names the reason: `--chromium-class`, `--chromium-user-data-dir` and a non-default
 `--cdp-url` are derived from the display's name and position and are refused
 rather than silently ignored, as is a `--class` smuggled through
-`--chromium-arg`, a duplicate name or port, a name outside `[A-Za-z0-9_-]`, a
-non-numeric port after the colon, and a `--cast-display` naming a screen that is
-not declared. See
+`--chromium-arg`, a duplicate name or port, a name outside `[A-Za-z0-9_-]`, and a
+non-numeric port after the colon. See
 [deployment.md](deployment.md#flags-that-are-refused-rather-than-ignored).
 
 **A playlist URL shows Chromium's privacy warning.**
@@ -69,7 +74,33 @@ from HTTP to HTTPS, but only on the HTTP port.
 **A guest is told someone else is casting, and nobody is.**
 A reservation is held for the claim window. It expires on its own, is released
 when the tab closes, and the address that holds it may re-claim. If the message
-persists for a different address, check `/api/cast/state` for `reserved`.
+persists for a different address, check `/api/cast/state?screen=<name>` for
+`reserved` — and check the right screen: reservations are per screen, and
+`busy` in `/api/cast/info` is reported relative to the asking address, so the
+guest holding one sees it as free while everyone else sees it as taken.
+
+**A guest scans a panel and gets the screen chooser instead of that screen.**
+Check **QR-Code auf dem Schirm führt zu** in the admin page's cast section: if
+that is set to *Auswahl aller Schirme*, the chooser is what it is supposed to do,
+for the QR *picture* and the overlay's cast QR alike — both read the same
+setting, so they cannot disagree. Either way the guest is one tap from the right
+screen; the list marks each one `frei` or `belegt`.
+
+**A cast lands on the wrong screen.**
+The guest was bound to that screen, so look at what bound them. A QR printed or
+photographed before a screen was renamed carries the old `?screen=`, and a name
+this deployment no longer declares falls back to the chooser rather than to a
+guess. The guest page shows its screen in the header — *„Sie senden an: …"* —
+before anything is shared, which is the fastest place to see what it resolved to.
+
+**A guest's audio control answers that another screen has the sound.**
+There is one speaker pair, so the room audio has one owning screen at a time and
+the first cast to touch it holds it. A guest cannot take it from another guest.
+The operator can turn the room up or down regardless, from the admin page's own
+audio panel: that route is not subject to the ownership check and does not move
+the ownership either. Ownership is released on that cast's teardown and re-checked
+against the owning screen's session on every read, so it does not survive a
+session that has ended.
 
 **Casting works, then stops after a minute or two.**
 Look at whether the resolution stayed constant while the framerate fell. That is

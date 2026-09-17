@@ -2,7 +2,7 @@
 import asyncio, json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsclient
-from test_cast import Server, http, ws, claim, check, failures, HTTP
+from test_cast import Server, http, ws, claim, check, failures, HTTP, is_cast_display
 
 async def main():
     print("\n[7] pairing mode: the code only exists on the display")
@@ -17,7 +17,7 @@ async def main():
         dr, dw = await ws("display")
         await wsclient.recv_json(dr)
 
-        status, body = http("POST", "/api/cast/pair")
+        status, body = http("POST", "/api/cast/pair", {})
         check("pair returns a TTL but never the code",
               status == 200 and "expires_in" in body and "code" not in body, body)
 
@@ -37,7 +37,7 @@ async def main():
 
         await asyncio.sleep(0.4)
         check("pairing pins the display so the code is visible",
-              http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
+              is_cast_display(http("GET", "/api/override")[1]["url"]))
 
         status, body = claim("ZZZZ")
         check("wrong pairing code refused", status == 403, (status, body))
@@ -64,7 +64,7 @@ async def main():
     print("\n[9] a pairing code nobody uses releases the display")
     with Server(cast_auth="pairing"):
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
-        http("POST", "/api/cast/pair")
+        http("POST", "/api/cast/pair", {})
         await asyncio.sleep(0.4)
         check("display pinned while the code is up",
               http("GET", "/api/override")[1]["active"] is True)

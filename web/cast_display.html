@@ -98,6 +98,18 @@
     let socket = null;
     let peer = null;
 
+    // This page is only ever navigated to by our own controller, via
+    // `cast_display_url`, which is the sole place `?screen=` is set -- so this
+    // is always this display's own name, never a guest's guess.
+    //
+    // Named `screenName`, not `screen`: this script also reads the browser's
+    // own global `screen` (`screen.width`/`screen.height` in `frameLimit()`
+    // below), and a `const screen` here would shadow it for the whole script,
+    // silently turning the GPU/panel measurement into a `TypeError` that
+    // `try`/`catch` swallows -- found only because it also zeroed the
+    // `display_limits` round trip `test_browser.py` asserts on.
+    const screenName = new URLSearchParams(location.search).get('screen');
+
     function setHint(text) { hint.textContent = text || ''; }
 
     function showCode(code) {
@@ -134,13 +146,22 @@
 
     // The sender's URL is not knowable from this page: it is served over loopback,
     // and the sender needs the LAN address of the HTTPS listener.
-    fetch('/api/cast/state')
+    const stateUrl = screenName
+      ? `/api/cast/state?screen=${encodeURIComponent(screenName)}`
+      : '/api/cast/state';
+    fetch(stateUrl)
       .then((res) => (res.ok ? res.json() : null))
       .then((state) => {
         if (state && state.sender_url) {
           document.getElementById('senderUrl').textContent = state.sender_url;
-          document.getElementById('qr').src =
-            '/api/cast/qr.svg?v=' + encodeURIComponent(state.sender_url);
+          // `?screen=` so the picture resolves `cast_qr_target` for *this*
+          // screen, exactly like the state fetch above -- without it the SVG
+          // would fall back to the bare chooser address regardless of the
+          // setting. Cache-busted so the QR follows a changed address without
+          // a reload loop.
+          const qrParams = new URLSearchParams({ v: state.sender_url });
+          if (screenName) qrParams.set('screen', screenName);
+          document.getElementById('qr').src = '/api/cast/qr.svg?' + qrParams.toString();
         }
       })
       .catch(() => { /* the placeholder dash stays */ });
@@ -202,6 +223,7 @@
 
     function connect() {
       socket = Cast.openSocket('display', null, {
+        screen: screenName,
         welcome: (frame) => {
           window.__iceServers = frame.ice_servers;
           // Announced on every connect rather than once: the controller may have

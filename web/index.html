@@ -76,6 +76,12 @@
     footer a:hover { background: #f0f0f0; color: #222; }
     .warn { color: #8a5a00; background: #fff5e0; border-radius: 6px; padding: .6rem .8rem; margin-top: .8rem; }
     .err { color: #a11; }
+    .screenbar { margin: 0 0 .8rem; }
+    .screenbar .switcher { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-top: .3rem; }
+    .screenbar select { font: inherit; padding: .35rem; }
+    .chooserlist { display: flex; flex-direction: column; gap: .5rem; margin: .6rem 0 1rem; }
+    .chooserlist button { display: flex; justify-content: space-between; align-items: center; width: 100%; text-align: left; }
+    .chooserlist button .state { color: #666; font-size: .85rem; }
     [hidden] { display: none !important; }
   </style>
   <script src="/cast.js"></script>
@@ -86,6 +92,22 @@
   <p class="muted">Überträgt an das Display in diesem Raum.</p>
 
   <div class="card" id="setup">
+    <div class="screenbar" id="screenBar" hidden>
+      <p class="status" id="screenLabel"></p>
+      <div class="switcher" id="switcherRow" hidden>
+        <label for="screenSelect">Bildschirm wechseln:</label>
+        <select id="screenSelect"></select>
+      </div>
+      <p class="muted" id="switcherNote" hidden>Erst die Übertragung beenden, um zu wechseln.</p>
+    </div>
+
+    <div id="chooserBlock" hidden>
+      <p class="warn" id="chooserGoneNote" hidden>Diesen Bildschirm gibt es nicht mehr.</p>
+      <p>Bildschirm wählen:</p>
+      <div class="chooserlist" id="chooserList"></div>
+    </div>
+
+    <div id="boundBlock" hidden>
     <div id="pairingBlock" hidden>
       <p>Erst einen Code anfordern — er erscheint dann auf dem Display.</p>
       <button id="requestCode">Code anfordern</button>
@@ -140,7 +162,11 @@
       <p class="muted" id="liveStats"></p>
       <button id="stopShare">Übertragung beenden</button>
     </div>
+    </div>
 
+    <!-- Outside `boundBlock` on purpose: a status line (a bootstrap error, a
+         secure-context refusal) has to be visible before any screen has
+         resolved, not only once one has. -->
     <p class="status" id="status"></p>
     <hr id="audioRule" hidden />
     <div id="audioPanel" hidden></div>
@@ -240,6 +266,174 @@
       codeInputs[0].focus();
     }
 
+    // --- screen binding -----------------------------------------------------
+    //
+    // Three entry states over one document: bound (a valid ?screen=), chooser
+    // (none given, several screens declared) and gone (a ?screen= naming a
+    // screen that is no longer declared). With exactly one declared screen
+    // there is no chooser -- the single screen resolves, the same rule the
+    // server's own `display::resolve` follows for an omitted name.
+    //
+    // Held as `boundScreen`, never `screen`: this exact shadowing of the
+    // browser's own global already broke `cast_display.html`'s panel
+    // measurement once, silently.
+    const requestedScreen = new URLSearchParams(location.search).get('screen');
+    let screens = [];        // the latest /api/cast/info screens list
+    let boundScreen = null;  // the screen every claim/pair call reads
+    let screenGone = false;  // a ?screen= that named a screen not currently declared
+
+    // What renderScreenUi's rebuild depends on -- not `busy`'s effect on
+    // labels, `max_edge` (unused here) or anything live-session-related,
+    // which change through their own explicit renderScreenUi() calls, not the
+    // poll. Used to skip rebuilding the chooser/switcher on a poll tick where
+    // nothing actually changed (see the `setInterval` below).
+    function screensKey(list) {
+      return JSON.stringify(list.map((s) => [s.name, s.label, s.busy]));
+    }
+
+    function labelFor(name) {
+      const found = screens.find((s) => s.name === name);
+      return found ? found.label : name;
+    }
+
+    // Decided once, from the first /api/cast/info response. Later polls only
+    // refresh `screens` and the chooser/switcher UI; switching screens after
+    // that goes through `selectScreen`, never back through here.
+    function resolveInitialBinding() {
+      if (screens.length === 1) {
+        boundScreen = screens[0].name;
+        return;
+      }
+      if (requestedScreen && screens.some((s) => s.name === requestedScreen)) {
+        boundScreen = requestedScreen;
+        return;
+      }
+      screenGone = !!requestedScreen;
+      boundScreen = null;
+    }
+
+    // Set the moment a chooser button is pressed and held until release
+    // anywhere on the page, so a poll landing between pointerdown and
+    // pointerup cannot swap the button out from under the guest's finger.
+    let chooserPressed = false;
+    window.addEventListener('pointerup', () => { chooserPressed = false; });
+    window.addEventListener('pointercancel', () => { chooserPressed = false; });
+
+    function renderChooserList() {
+      if (chooserPressed) return;
+      const list = el('chooserList');
+      list.replaceChildren();
+      for (const s of screens) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.disabled = s.busy;
+        const name = document.createElement('span');
+        name.textContent = s.label;
+        const state = document.createElement('span');
+        state.className = 'state';
+        state.textContent = s.busy ? 'belegt' : 'frei';
+        item.append(name, state);
+        item.addEventListener('pointerdown', () => { chooserPressed = true; });
+        item.addEventListener('click', () => selectScreen(s.name));
+        list.append(item);
+      }
+    }
+
+    // A stream is the obvious case, but a guest page pins the display and
+    // holds a ticket exactly the same way -- switching under either one means
+    // tearing down a live session on the screen it is currently on.
+    function isSessionLive() {
+      return !!stream || !el('pageLiveBlock').hidden;
+    }
+
+    function renderSwitcher() {
+      const select = el('screenSelect');
+      // A native popup open on a phone must not be rebuilt underneath the
+      // guest -- skip the option rebuild while it has focus; `disabled` and
+      // the note below still update, since those don't touch the open list.
+      // The `blur` listener below re-renders once focus leaves, so a busy
+      // flip that landed while the picker was open is not lost -- without
+      // it, a poll finding nothing changed *since* the skipped attempt would
+      // never call back in here again.
+      if (document.activeElement !== select) {
+        select.replaceChildren();
+        for (const s of screens) {
+          const opt = document.createElement('option');
+          opt.value = s.name;
+          // `busy` is already relative to this address (see cast_info), so
+          // the screen we are bound to never reads busy to us.
+          const busyToUs = s.busy && s.name !== boundScreen;
+          opt.disabled = busyToUs;
+          opt.textContent = `${s.label} (${busyToUs ? 'belegt' : 'frei'})`;
+          select.append(opt);
+        }
+        select.value = boundScreen;
+      }
+      const live = isSessionLive();
+      select.disabled = live;
+      el('switcherNote').hidden = !live;
+    }
+
+    // Re-renders everything the screens list drives: the header, the
+    // switcher and the chooser. Called after the initial resolution and after
+    // every later poll.
+    function renderScreenUi() {
+      if (!screens.length) {
+        // Casting itself is switched off (`cast_info` omits the list then).
+        // Guest pages still work through the server's own default
+        // resolution, so show the normal panel with no chooser and no header
+        // rather than a chooser with nothing in it.
+        el('boundBlock').hidden = false;
+        el('chooserBlock').hidden = true;
+        el('screenBar').hidden = true;
+        return;
+      }
+      const bound = boundScreen !== null;
+      el('boundBlock').hidden = !bound;
+      el('chooserBlock').hidden = bound;
+      el('chooserGoneNote').hidden = !(screenGone && !bound);
+      renderChooserList();
+
+      const multi = screens.length > 1;
+      el('screenBar').hidden = !bound || !multi;
+      if (bound && multi) {
+        el('screenLabel').textContent = `Sie senden an: ${labelFor(boundScreen)}`;
+        el('switcherRow').hidden = false;
+        renderSwitcher();
+      }
+    }
+
+    // Picking a screen from the chooser, or from the switcher while nothing is
+    // streaming -- the switcher is disabled the moment a sender is live, since
+    // a live switch would mean tearing down one RTCPeerConnection and
+    // negotiating another while the first screen's override unwinds.
+    async function selectScreen(name) {
+      if (name === boundScreen || isSessionLive()) return;
+      if (ticket) releaseReservation();
+      else { dropReservation(); stopCountdown(); }
+      // Force a remount against the new screen's endpoint. Only reachable
+      // once isSessionLive() is false, so nothing is playing here today --
+      // but AudioPanel.mount reuses the same root node, so drop it the same
+      // way stopAudio() does rather than just discarding the reference.
+      if (audio) { audio.stop(); audio = null; }
+      boundScreen = name;
+      screenGone = false;
+      const url = new URL(location.href);
+      url.searchParams.set('screen', name);
+      history.replaceState(null, '', url);
+      setStatus('');
+      setCodeStatus('', null);
+      clearCode();
+      setShareEnabled(authMode === 'none');
+      if (authMode === 'code') setCodeStatus('Code eingeben, um die Sitzung zu reservieren.', null);
+      renderScreenUi();
+    }
+
+    el('screenSelect').addEventListener('change', () => selectScreen(el('screenSelect').value));
+    // Catches up on whatever the poll skipped while this had focus -- see the
+    // comment in renderSwitcher.
+    el('screenSelect').addEventListener('blur', () => renderSwitcher());
+
     // --- reservation ------------------------------------------------------
 
     // Share buttons stay locked until the session is actually ours, so nobody
@@ -287,6 +481,7 @@
         // moment a sender connects, and a page must not flash the cast page on
         // its way to the guest's address.
         if (mode) payload.mode = mode;
+        if (boundScreen) payload.display = boundScreen;
         const res = await fetch('/api/cast/claim', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -309,10 +504,18 @@
 
     function releaseReservation() {
       if (!ticket) return;
+      const target = boundScreen;
       dropReservation();
       stopCountdown();
-      // keepalive so the release still goes out while the tab is closing
-      fetch('/api/cast/claim', { method: 'DELETE', keepalive: true }).catch(() => {});
+      // keepalive so the release still goes out while the tab is closing.
+      // A body is required on every path now that `release_session` takes
+      // `Json<ReleaseRequest>` outright rather than tolerating an absent one.
+      fetch('/api/cast/claim', {
+        method: 'DELETE',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(target ? { display: target } : {}),
+      }).catch(() => {});
     }
 
     // Someone who opens the page and wanders off should not hold the slot for
@@ -372,6 +575,9 @@
       el('codeBlock').hidden = live || authMode === 'none';
       el('pairingBlock').hidden = live || authMode !== 'pairing';
       if (live) stopCountdown();
+      // Keeps the switcher's disabled state in sync with `stream` the moment
+      // streaming starts or stops, rather than waiting up to one poll cycle.
+      renderScreenUi();
     }
 
     function teardown(message, isError) {
@@ -560,6 +766,7 @@
           // The page block says what is happening now; a second line below it
           // would only repeat itself.
           setStatus('');
+          renderScreenUi(); // disables the switcher now that a page is live
         },
         error: (frame) => {
           // A refused address keeps the slot, so the guest can correct a typo
@@ -631,20 +838,34 @@
     // Shared with the admin page (web/audio.js). Only reachable while this device
     // is the connected sender; the server enforces that, and a 403 simply leaves
     // the panel hidden.
-    const audio = AudioPanel.mount({
-      root: el('audioPanel'),
-      endpoint: '/api/cast/audio',
-      heading: 'Ton im Raum',
-      castLabel: 'Deine Übertragung',
-    });
+    //
+    // Mounted lazily rather than at load: the endpoint carries `?screen=`,
+    // which is not known until the screen this page is bound to has resolved.
+    // `selectScreen` drops the mounted panel on a switch, so the next mount
+    // picks up the new screen's endpoint.
+    let audio = null;
+
+    function ensureAudioPanel() {
+      if (!audio) {
+        audio = AudioPanel.mount({
+          root: el('audioPanel'),
+          endpoint: boundScreen
+            ? `/api/cast/audio?screen=${encodeURIComponent(boundScreen)}`
+            : '/api/cast/audio',
+          heading: 'Ton im Raum',
+          castLabel: 'Deine Übertragung',
+        });
+      }
+      return audio;
+    }
 
     function startAudio() {
       el('audioRule').hidden = false;
-      audio.start();
+      ensureAudioPanel().start();
     }
 
     function stopAudio() {
-      audio.stop();
+      if (audio) audio.stop();
       el('audioRule').hidden = true;
     }
 
@@ -661,7 +882,11 @@
       setStatus('');
       setCodeStatus('Code wird auf dem Display angezeigt…', null);
       try {
-        const res = await fetch('/api/cast/pair', { method: 'POST' });
+        const res = await fetch('/api/cast/pair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(boundScreen ? { display: boundScreen } : {}),
+        });
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setCodeStatus(body.error || 'Code konnte nicht angefordert werden.', 'bad');
@@ -755,6 +980,7 @@
       el('shareBlock').hidden = false;
       setStatus('');
       dropReservation();
+      renderScreenUi(); // re-enables the switcher now that nothing is live
     };
 
     // A guest who wanders off should not hold the screen; the server's grace
@@ -796,7 +1022,53 @@
           setCodeStatus('Code eingeben, um die Sitzung zu reservieren.', null);
           codeInputs[0].focus();
         }
-        if (info.busy) setStatus('Es überträgt gerade jemand anderes.', true);
+
+        // The screen list exists whenever *either* guest-facing capability is
+        // reachable -- casting or the guest-page feature -- not only while
+        // casting itself (`enabled`) is on; see `cast::api::cast_info`. Without
+        // it there is nothing to bind against, so the page falls back to the
+        // server's own default resolution (`display::resolve(None)`), exactly
+        // as it did before per-screen casting existed.
+        screens = info.screens || [];
+        if (screens.length) {
+          resolveInitialBinding();
+          const bound = screens.find((s) => s.name === boundScreen);
+          if (bound && bound.busy) setStatus('Es überträgt gerade jemand anderes.', true);
+        }
+        renderScreenUi();
+
+        // Keeps the chooser's and the switcher's frei/belegt state live. Only
+        // `screens` and the UI it drives are refreshed here -- re-running the
+        // auth-mode setup above on every tick would silently re-disable the
+        // share buttons out from under a guest who already entered a code.
+        //
+        // Re-rendering is skipped when nothing changed -- see `screensKey` --
+        // rather than throttling the poll itself: `busy` changing promptly is
+        // the point, an unconditional rebuild every tick is not. Do not
+        // "fix" this by re-rendering only what's different; comparing the
+        // whole signature is the cheap version of the same guard
+        // `playlist.html` uses for the same reason (CLAUDE.md's "a page that
+        // polls must not re-render what it polls into").
+        setInterval(() => {
+          fetch('/api/cast/info')
+            .then((res) => res.json())
+            .then((polled) => {
+              const next = polled.screens || [];
+              if (screensKey(next) === screensKey(screens)) return;
+              screens = next;
+              // Deliberately no "your screen just went busy" notice here,
+              // unlike the initial-load check above: the guest only learns
+              // it when they tap share and get the server's own refusal
+              // ("Es überträgt bereits jemand."). That message is
+              // authoritative and arrives right when it matters; announcing
+              // it earlier from a poll would mean inventing status text here
+              // that could clobber whatever #status already shows (a code
+              // prompt, a warning) for a state that resolves itself the
+              // moment the other guest is done.
+              renderScreenUi();
+            })
+            .catch(() => {});
+        }, 3000);
       })
       .catch(() => setStatus('Controller nicht erreichbar.', true));
   </script>

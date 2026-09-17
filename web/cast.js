@@ -12,14 +12,23 @@
 
   // --- signaling socket -----------------------------------------------------
 
-  // handlers: {welcome, peer, signal, error, closed}
+  // handlers: {welcome, peer, signal, error, closed, screen}
   //
   // `ticket` comes from POST /api/cast/claim. The socket carries no code: the
   // sender is authorised once, at claim time, before the screen picker opens.
+  //
+  // `handlers.screen` names which display this connection is for -- only ever
+  // set by the display role (cast_display.html knows its own name from its own
+  // URL). A sender never sends it: its ticket already names the screen it was
+  // issued for, and the server reads `?screen=` only for the display role --
+  // a sender's ticket decides its screen instead, so the parameter is simply
+  // never consulted for it, not refused. This is the one place the socket URL
+  // is built, for both roles, so a screen only has to be added here once.
   function openSocket(role, ticket, handlers) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${proto}//${location.host}/api/cast/ws?role=${encodeURIComponent(role)}`;
     if (ticket) url += `&ticket=${encodeURIComponent(ticket)}`;
+    if (handlers && handlers.screen) url += `&screen=${encodeURIComponent(handlers.screen)}`;
 
     const ws = new WebSocket(url);
     let closedByUs = false;

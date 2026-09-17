@@ -2,7 +2,7 @@
 import asyncio, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import wsclient
-from test_cast import Server, http, ws, claim, check, failures
+from test_cast import Server, http, ws, claim, check, failures, is_cast_display
 
 def settings():
     return http("GET", "/api/settings")[1]
@@ -73,7 +73,7 @@ async def main():
         dr, dw = await ws("display"); await wsclient.recv_json(dr)
         sr, sw = await ws("sender"); await wsclient.recv_json(sr)
         await asyncio.sleep(0.4)
-        check("cast running", http("GET", "/api/override")[1]["url"].endswith("cast_display.html"))
+        check("cast running", is_cast_display(http("GET", "/api/override")[1]["url"]))
 
         status, _ = put({"cast_enabled": False})
         check("settings update accepted", status == 200, status)
@@ -159,6 +159,42 @@ async def main():
         # could be edited while the flag is set.
         status, _ = put({"guest_pages_enabled": False, "cast_code": "ABCD"})
         check("an unchanged value does not trip the lock", status == 200, status)
+
+    print("\n[16e] the QR-code target")
+    with Server():
+        st = settings()
+        check("default is the guest's own screen", st["cast_qr_target"] == "screen", st)
+        check("nothing locks it -- there is no flag for it",
+              "cast_qr_target" not in st["locks"], st["locks"])
+
+        status, body = put({"cast_qr_target": "bogus"})
+        check("an unknown target is rejected", status == 400 and "error" in body, (status, body))
+        check("and the stored value is untouched", settings()["cast_qr_target"] == "screen")
+
+        status, body = put({"cast_qr_target": "chooser"})
+        check("chooser is accepted and reads back",
+              status == 200 and body["cast_qr_target"] == "chooser", (status, body))
+
+    with Server(fresh=False):
+        check("it survived the restart", settings()["cast_qr_target"] == "chooser")
+        put({"cast_qr_target": "screen"})
+
+    print("\n[16f] the setting steers which URL a screen's own state carries")
+    # Deliberately the *second* declared display, not "foyer" (`displays[0]`,
+    # i.e. `primary()`): a case exercising only the primary screen would still
+    # pass with `display::resolve` replaced by `state.primary()`, which is
+    # exactly the substitution this branch has shipped unnoticed five times
+    # before (see CLAUDE.md). "werkstatt" fails that substitution.
+    with Server(display="foyer:9931,werkstatt:9932"):
+        put({"cast_qr_target": "screen"})
+        status, st = http("GET", "/api/cast/state?screen=werkstatt")
+        check("under 'screen', the state for one display names it",
+              status == 200 and "?screen=werkstatt" in st["sender_url"], st)
+
+        put({"cast_qr_target": "chooser"})
+        status, st = http("GET", "/api/cast/state?screen=werkstatt")
+        check("under 'chooser', the same display gets the bare chooser URL",
+              status == 200 and "screen=" not in st["sender_url"], st)
 
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))

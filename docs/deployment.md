@@ -76,15 +76,14 @@ RestartSec=10
 
 Drop the two `--display` flags for a single-screen device: with no `--display` at
 all the controller drives one implicit screen exactly as it always did (see
-[Declaring the screens](#declaring-the-screens-a-deployment-drives)). Both flags
+[Declaring the screens](#declaring-the-screens-a-deployment-drives)). This flag
 can come from the environment instead, which is the form to reach for when the
 unit is generated: `--display` reads **`DISPLAYS`** — note the plural, so the
 X11 `DISPLAY` above is not mistaken for a screen declaration — and takes a
-comma-separated list, and `--cast-display` reads `CAST_DISPLAY`.
+comma-separated list.
 
 ```ini
 Environment=DISPLAYS=foyer,werkstatt
-Environment=CAST_DISPLAY=foyer
 ```
 
 Started from the session, typically by the window manager:
@@ -192,12 +191,18 @@ Alongside any `--display`, these are startup errors:
   placement failure a named display exists to avoid. Without any `--display` it is
   still accepted, because there is no second window for it to collide with and
   refusing would break a command line that works today.
-- `--cast-display` naming a screen that is not declared — and this one applies
-  **with or without `--display`**, since the implicit screen is called `default`
-  and `--cast-display foyer` names nothing there either. Checked at startup rather
-  than at use, because `AppState::cast_display()` falls back to the primary
-  display rather than panicking: the mistake would otherwise surface hours later
-  as a guest scanning a QR code and the picture appearing on the wrong panel.
+
+- `--cast-display`, on a unit file left over from before per-display casting.
+  It picked which panel a cast pinned to and is gone now that casting lives on
+  a session per `Display` — nothing reads it any more, so validating it at
+  startup would itself have been the stale check that let a deployment cast to
+  the wrong screen and boot happily anyway. Removing the flag outright is what
+  turns that into a startup error instead: a unit file's `ExecStart=... --cast-display
+  foyer` now refuses to boot at all, rather than being silently accepted and
+  ignored. `Environment=CAST_DISPLAY=…` in the same file is harmless — an
+  environment variable clap does not declare is simply never read, which is
+  why only the flag, not the env var, needs a line here. Rename it (or drop
+  it) before restarting the service; naming the screen is now `--display`.
 
 Sharing one profile directory between two Chromiums is the reason the profile is
 derived per display at all. A second Chromium started on a profile that is already
@@ -282,8 +287,9 @@ not to matter — it is a cost that was accepted, because the separation charged
 than it paid: the same PDF uploaded twice into two asset directories, two ports to
 keep straight, two admin pages to choose between before any edit, and no prospect
 of ever sending a guest to a particular screen, since each controller only knew
-about its own. (That last one is not collected yet — casting still lands on one
-configured screen; see [casting.md](casting.md#which-screen-a-cast-lands-on).)
+about its own. That last one is now collected: one controller holds every screen's
+cast session, so a guest picks the panel they are standing in front of — see
+[casting.md](casting.md#which-screen-a-cast-lands-on).
 
 If it does bite, **the answer is a supervisor that restarts the process, not a
 second controller.** `Restart=always` in the unit file (see [Service
@@ -350,10 +356,12 @@ gets the short address.
 
 ## Runtime settings versus flags
 
-`cast_enabled`, `cast_auth`, `cast_code`, the locale, the overlay and the operator
-credentials live in the database and are edited from the admin UI. A flag actually passed on
+`cast_enabled`, `cast_auth`, `cast_code`, `cast_qr_target`, the locale, the
+overlay and the operator credentials live in the database and are edited from the
+admin UI. A flag actually passed on
 the command line **pins** that setting: the API answers `409` naming the flag and
-the UI renders the control as locked.
+the UI renders the control as locked. `cast_qr_target` has no flag at all, so it
+is the one in that list that is always editable.
 
 Besides deferring to whoever wrote the unit file, that is the recovery path — an
 operator who enables authentication and forgets the password can always get back

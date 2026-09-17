@@ -48,16 +48,6 @@ pub struct Args {
     #[arg(long = "display", env = "DISPLAYS", value_delimiter = ',')]
     pub display: Vec<String>,
 
-    /// Which declared display a cast pins. Defaults to the first declared.
-    ///
-    /// One session for the whole controller, on one screen: a cast per display
-    /// is its own piece of work, because `cast.rs` carries the session state
-    /// machine and one session is all a venue with a single guest needs. The
-    /// name is checked against the declared displays at startup, so a typo is a
-    /// refusal to boot rather than a cast landing on the wrong panel.
-    #[arg(long, env = "CAST_DISPLAY")]
-    pub cast_display: Option<String>,
-
     /// Basic auth username (set together with basic_auth_password)
     #[arg(long, env)]
     pub basic_auth_user: Option<String>,
@@ -355,6 +345,10 @@ pub struct Display {
     /// An `Arc` rather than a bare `Mutex` because `chromium::supervise` is handed the
     /// slot itself and outlives no particular borrow of the `Display`.
     pub browser_pid: crate::chromium::PidSlot,
+    /// This screen's cast session. One per display: two guests casting to two
+    /// screens share no state, no timers and no reservation. `attempts` is the
+    /// deliberate exception and stays on `AppState` -- see `CastSession`.
+    pub cast: crate::cast::SharedCastSession,
     pub skip_signal: Notify,
     pub playlist_signal: Notify,
     pub override_signal: Notify,
@@ -372,6 +366,7 @@ impl Display {
             pending_jump: Mutex::new(None),
             override_item: Mutex::new(None),
             browser_pid: Default::default(),
+            cast: Default::default(),
             skip_signal: Notify::new(),
             playlist_signal: Notify::new(),
             override_signal: Notify::new(),
@@ -409,9 +404,21 @@ pub struct AppState {
     pub auth_cache: Arc<Mutex<Option<String>>>,
     /// How the venue's audio is controlled, decided once at startup.
     pub audio: Arc<crate::audio::Backend>,
-    /// Screen-cast session. A running cast owns the `override_item` of the
-    /// display `cast_display()` names; see `cast.rs`.
-    pub cast: crate::cast::SharedCastSession,
+    /// Which screen's cast currently owns the room audio, if any.
+    ///
+    /// The venue has one speaker pair, so audio is one resource however many
+    /// screens are casting. Claimed by the first cast to turn sound on and
+    /// released on that cast's teardown. Validated against that display's
+    /// `is_active()` on every read, so a cast that dies without a clean teardown
+    /// frees the audio by itself rather than leaving the room mute until a
+    /// restart.
+    pub audio_owner: Arc<Mutex<Option<String>>>,
+    /// Failed pairing-code attempts per source address, controller-wide.
+    ///
+    /// Deliberately not per display: five tries is five tries for the venue, not
+    /// five per screen. `tests/cast/test_pairing.py` case [8] is what pins this.
+    pub cast_attempts:
+        Arc<Mutex<std::collections::HashMap<std::net::IpAddr, crate::cast::Attempts>>>,
     /// Outbound webhooks. `fire` is synchronous and infallible, which is what
     /// lets the control loop call it.
     pub webhooks: Arc<crate::webhook::Dispatcher>,
@@ -435,23 +442,6 @@ impl AppState {
     /// implicit `default` display, so the list is never empty.
     pub fn primary(&self) -> Arc<Display> {
         self.displays[0].clone()
-    }
-
-    /// The display a cast pins. `--cast-display` when given, else the first
-    /// declared.
-    ///
-    /// Every site in `cast.rs` that needs a screen resolves it through here, so
-    /// the pinned override, the webhook events and the audio subtree all name
-    /// the same one. The lookup cannot miss in practice -- `display::configure`
-    /// refuses an undeclared name at startup -- and falling back to the primary
-    /// display rather than panicking keeps a mistake here from taking the
-    /// signage down.
-    pub fn cast_display(&self) -> Arc<Display> {
-        self.args
-            .cast_display
-            .as_deref()
-            .and_then(|name| self.display(name))
-            .unwrap_or_else(|| self.primary())
     }
 
     /// Tell every display that the playlist content changed.

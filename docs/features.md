@@ -86,8 +86,9 @@ The old unscoped paths still work while one screen is declared, and answer `409`
 naming the declared screens once several are — an existing script gets told it
 has become ambiguous rather than having a coin flipped for it.
 
-Casting is the exception that is not per screen yet: one session for the whole
-controller, landing on the display `--cast-display` names. See
+Casting is per screen as well: every declared screen has its own session, a guest
+says which one they mean by scanning the panel in front of them, and two guests
+can cast to two screens at once. See
 [casting.md](casting.md#which-screen-a-cast-lands-on).
 
 ## Assets
@@ -139,7 +140,9 @@ The QR code either encodes a fixed string or **the screen-share address**,
 resolved at the moment it is drawn. That indirection matters: the address is not
 stable — `--public-url` decides its shape, an occupied TLS port moves it, and a
 DHCP lease changes it. A copied-out URL would go quietly wrong on a screen nobody
-is checking.
+is checking. With several screens declared, one operator setting decides whether
+that address names the panel the badge is on or opens the chooser — one decision
+for the venue, so two panels cannot advertise differently.
 
 Sizes are in `vmin`, so one setting reads the same on a 1080p panel and a
 portrait 4K one.
@@ -186,11 +189,21 @@ A guest opens the device's address, optionally enters a code, and shares a scree
 or a camera. The display switches to it, and returns to the playlist when the
 guest stops, closes the laptop, or walks away. See [casting.md](casting.md).
 
+With more than one screen, the guest also says **which** one. Scanning the QR on
+the panel in front of them is that answer and costs no taps; a typed address gets
+a list of the screens instead, each marked free or busy, and a bound guest can
+still switch to another screen before sharing anything. Two screens can be cast to
+at once, and the operator stops either one from the admin page without touching
+the other.
+
 While a cast is running, the guest can also control the **room's audio** —
 per-stream and per-output volume, mute, and output device — because the person
 presenting is the person who needs it. That permission starts and ends with the
 cast, and is bound to the address actually casting rather than to the LAN at
-large: turning the speakers up is a physical act in a shared room.
+large: turning the speakers up is a physical act in a shared room. There is one
+speaker pair however many screens there are, so the first cast to touch it holds
+it, and a second screen's guest is told which screen has the sound rather than
+finding their control does nothing.
 
 The operator has the same panel on the admin page, through a door of their own,
 and theirs works whether or not anybody is casting. Both end in the same code, so

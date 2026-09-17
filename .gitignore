@@ -8,6 +8,9 @@ tests/cast/*.db
 tests/cast/cert.pem*
 tests/cast/assets/
 tests/cast/*-profile/
+# test_overlay.py names its profile `overlay-display`, which the pattern above
+# does not match; a killed run leaves it behind otherwise.
+tests/cast/overlay-display/
 # A controller's log, kept by test_display.py's one case that asserts nothing
 # was logged. Scratch, and a SIGKILLed run does not get to remove it.
 tests/cast/*-stderr.log

@@ -272,13 +272,14 @@ async fn main() -> Result<()> {
         pool: pool.clone(),
         args: Arc::new(args.clone()),
         displays: Arc::new(displays),
-        cast: Arc::new(Mutex::new(Default::default())),
+        cast_attempts: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
         managed_cert: managed_cert_active,
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
         locks,
         auth_cache: Arc::new(Mutex::new(None)),
         audio: Arc::new(audio::Backend::detect().await),
+        audio_owner: Arc::new(Mutex::new(None)),
         webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
     };
 
@@ -405,7 +406,7 @@ async fn main() -> Result<()> {
                 // Must go through the same resolution the API and the QR code
                 // use, or the first thing an operator reads on startup disagrees
                 // with the address guests are actually given.
-                let base = cast::sender_url(&state);
+                let base = cast::sender_url(&state, None);
                 tracing::info!("Guests: {base}  |  Operator: {base}admin.html");
                 let server = axum_server::from_tcp_rustls(listener, config)?;
                 tokio::spawn(async move {

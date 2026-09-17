@@ -118,7 +118,6 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --database-path <path>       (default: miniclient.db)
 --cdp-url <url>              (default: http://127.0.0.1:9222)
 --display <name[:port]>      (repeatable; one per screen this deployment drives)
---cast-display <name>        (which declared screen a cast pins; default: the first)
 --basic-auth-user <string>   (optional, must be set with password)
 --basic-auth-password <string> (optional, must be set with user)
 --disable-cast               (default: false)
@@ -201,8 +200,10 @@ declaration.
 
 - `GET /api/settings` — current settings plus which ones the command line pinned
 - `PUT /api/settings` — `{ cast_enabled?, guest_pages_enabled?, cast_auth?,
-  cast_code?, auth_enabled?, auth_user?, auth_password?, overlay?, locale? }`;
-  a pinned setting answers `409`
+  cast_code?, cast_qr_target?, auth_enabled?, auth_user?, auth_password?,
+  overlay?, locale? }`; a pinned setting answers `409`. `cast_qr_target` is
+  `screen` or `chooser` and decides whether a panel's QR code names that panel or
+  opens the screen chooser
 - `GET /api/overlay` — the layers the display runtime wants: the global overlay
   plus the one belonging to the item on screen, with asset ids already resolved
 
@@ -210,8 +211,11 @@ declaration.
 
 - `GET /api/audio` — operator: output devices and playing streams
 - `POST /api/audio` — operator: set a volume, mute, or the output device
-- `GET`/`POST /api/cast/audio` — the same, for the guest who is currently casting;
-  guarded by the connected sender's address instead of by credentials
+- `GET`/`POST /api/cast/audio?screen=` — the same, for the guest currently casting
+  to that screen; guarded by the connected sender's address instead of by
+  credentials. The room has one owner at a time: the first cast to change
+  something holds it, a second screen's guest is told which screen has it, and the
+  operator's route above is not subject to that
 
 ### Displays
 
@@ -245,19 +249,39 @@ coin flip a script cannot see.
 
 ### Casting
 
-- `GET /api/cast/ws?role=sender|display[&code=]` — WebSocket signaling relay
-- `GET /api/cast/info` — public: `{ enabled, page_enabled, auth, busy, sender_url }`
-- `GET /api/cast/qr.svg` — public: QR code for the guest URL
-- `GET /api/cast/state` — operator: who is casting and since when, plus
-  `showing`: `null`, `"cast"`, or `{ "page": "<url, credentials stripped>" }`
-- `DELETE /api/cast/session` — operator: end the current cast
-- `POST /api/cast/pair` — request a pairing code (pairing mode only); the code is
-  shown on the display and never returned in the response
+Every screen has its own cast session, so most of these say which screen they
+mean. The guest-facing ones take it as a **body field or a query parameter**, never
+as a path segment — that is what keeps the two exemption lists literal string
+matches. Only the operator's stop is path-scoped. An omitted screen resolves while
+exactly one display is declared and answers `409` once several are, the same rule
+the playback routes follow.
+
+- `GET /api/cast/ws?role=sender|display` — WebSocket signaling relay. A sender is
+  identified by its `ticket`, which already names the screen it was minted for; the
+  display peer passes `?screen=`
+- `GET /api/cast/info` — public:
+  `{ enabled, page_enabled, auth, sender_url, screens: [{ name, label, busy,
+  max_edge }] }`. `busy` is relative to the asking address. `screens` is omitted
+  entirely when neither casting nor guest pages is reachable
+- `GET /api/cast/qr.svg?screen=` — public: QR code for the guest URL. Same screen
+  resolution as `/api/cast/state`, and follows `cast_qr_target` the same way: the
+  address named or the bare chooser address, matching what is printed beside it
+- `GET /api/cast/state?screen=` — operator and loopback: who is casting on that
+  screen and since when, plus `showing`: `null`, `"cast"`, or
+  `{ "page": "<url, credentials stripped>" }`, and the `sender_url` that screen
+  should advertise
+- `DELETE /api/displays/{name}/cast/session` — operator: end the cast on one
+  screen, leaving any other screen's alone
+- `POST /api/cast/pair` — request a pairing code (pairing mode only), for the
+  screen named by `display`; the code is shown on that display and never returned
+  in the response
 - `POST /api/cast/claim` — guest: check the code and reserve the session before
   sharing; returns a ticket the WebSocket needs. Takes
-  `{ mode: "cast" | "page" }`, defaulting to `cast` — the mode is settled here
-  because the display is pinned as soon as the socket connects
-- `DELETE /api/cast/claim` — give the reservation back
+  `{ code?, mode: "cast" | "page", display? }` — the mode defaults to `cast` and
+  is settled here because the display is pinned as soon as the socket connects
+- `DELETE /api/cast/claim` — give the reservation back; takes `{ display? }`
+- `GET`/`POST /api/cast/audio?screen=` — the room audio, for the guest casting to
+  that screen (see [Room audio](#room-audio) above)
 
 `GET /api/cast/state` also carries a live pairing code and its remaining seconds
 while one exists, so the admin page can show what the display is showing.
@@ -289,6 +313,12 @@ moment it is typed and the session is reserved right then — before the browser
 screen picker opens, so nobody chooses a window only to be told the code was
 wrong, and two guests cannot both get that far. Stopping the share —
 or closing the laptop — hands the screen back to the playlist automatically.
+
+With more than one screen declared, the guest also says which one. A QR scanned
+off a panel opens the page already bound to that panel (`?screen=<name>`); a typed
+address opens a chooser instead, listing each screen as `frei` or `belegt`, and a
+bound guest can still switch before sharing anything. See
+[docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
 
 The cast page is the site root on purpose, so the address a guest has to type is
 as short as possible. The operator UI sits at `/admin.html`, linked from a
@@ -365,13 +395,10 @@ to muted playback, since nobody is there to click.
 
 Notes and limitations:
 
-- Only one sender at a time; a second one is told the display is busy.
-- **One cast session for the whole controller, on one screen.** With several
-  displays declared, `--cast-display <name>` picks which one a cast pins; without
-  it, the first declared. Per-display casting is not built yet, so the QR code and
-  the invitation on the idle screen are still global — a second panel standing
-  idle advertises a cast that will appear on the cast display instead. See
-  [docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
+- Only one sender at a time **per screen**; a second one on the same screen is
+  told it is busy, and a second one on a different screen is not refused at all.
+- Neither a queue nor a takeover for a busy screen, and no moving a live cast from
+  one screen to another: stop, then pick another.
 - Screen sharing needs a desktop browser. Mobile browsers have no
   `getDisplayMedia`, though camera sharing works.
 - Screen *audio* is only shared reliably by Chrome, and only when the user ticks
@@ -394,10 +421,12 @@ miniclientcontrol --display foyer --display werkstatt
 ```
 
 That is the whole configuration. One HTTP port, one database, one asset library
-and one admin page; each screen gets its own Chromium, its own control loop and
-its own assigned playlist. Assign the playlists on `/displays.html`.
+and one admin page; each screen gets its own Chromium, its own control loop, its
+own assigned playlist and its own cast session. Assign the playlists on
+`/displays.html`.
 
-`/admin.html` then reports one line per screen, and `/playlist.html` grows a
+`/admin.html` then reports one line per screen — including who is casting to it
+and a button that stops only that one — and `/playlist.html` grows a
 screen picker beside its playlist picker: the status bar, the override and **Play
 now** act on the selected screen, while the item list below belongs to the
 selected playlist. With one screen declared the picker is not shown and neither
@@ -489,7 +518,7 @@ PDFs are rendered through the internal viewer (`/pdf_viewer.html`) and support b
 - `src/playlists.rs` — playlists as objects (`/api/playlists`)
 - `src/models.rs` — CLI args, DTOs, app state
 - `src/web.rs` — embedded static file serving
-- `src/cast.rs` — cast signaling relay and session lifecycle
+- `src/cast/` — cast signaling relay and session lifecycle, one session per screen
 - `src/tls.rs` — self-signed certificate + HTTPS listener for the sender page
 - `web/` — frontend pages and JS helpers
 - `assets/` — uploaded files (runtime)
