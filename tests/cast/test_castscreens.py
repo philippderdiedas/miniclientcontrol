@@ -472,10 +472,12 @@ def case_87():
         werkstatt_state = state_of("werkstatt")
         check("foyer's state carries its own live code",
               bool((foyer_state.get("pairing") or {}).get("code")), foyer_state)
-        check("werkstatt's state carries its own, different code",
-              bool((werkstatt_state.get("pairing") or {}).get("code"))
-              and werkstatt_state["pairing"]["code"] != foyer_state["pairing"]["code"],
-              werkstatt_state)
+        # Not also asserting the two codes differ: that is a 1-in-32^4
+        # probabilistic property of code minting, not of the idle page this
+        # case is about, and [85] already owns it (with the non-uniqueness
+        # documented there).
+        check("werkstatt's state carries its own live code",
+              bool((werkstatt_state.get("pairing") or {}).get("code")), werkstatt_state)
 
         again = state_of("foyer")
         check("polling again -- as an idle page would -- still shows foyer's own "

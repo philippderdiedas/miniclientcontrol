@@ -100,38 +100,17 @@ async def main():
         check("access ends with the cast", status == 403, (status, body))
         dw.close()
 
-    print("\n[32] the room has one speaker pair, whichever screen claims it first")
-    with Server(display="foyer:9931,werkstatt:9932"):
-        sr1, sw1 = await ws("sender", display="foyer")
-        await wsclient.recv_json(sr1)
-        await asyncio.sleep(0.4)
-        sr2, sw2 = await ws("sender", display="werkstatt")
-        await wsclient.recv_json(sr2)
-        await asyncio.sleep(0.4)
-
-        status, body = http("POST", "/api/cast/audio?screen=foyer",
-                             {"target": "sink", "action": "mute", "value": False})
-        check("foyer's own caster may turn the room's audio on",
-              status != 409, (status, body))
-
-        status, body = http("POST", "/api/cast/audio?screen=werkstatt",
-                             {"target": "sink", "action": "mute", "value": False})
-        check("a guest may not take audio from another guest's cast",
-              status == 409 and "foyer" in body.get("error", ""), (status, body))
-
-        status, body = http("GET", "/api/cast/audio?screen=werkstatt")
-        check("reading its own panel is unaffected by not owning the room audio",
-              status == 200, (status, body))
-
-        sw1.close()
-        await asyncio.sleep(6.5)  # SENDER_GRACE plus margin
-
-        status, body = http("POST", "/api/cast/audio?screen=werkstatt",
-                             {"target": "sink", "action": "mute", "value": False})
-        check("foyer's cast ending frees the room for the next screen",
-              status != 409, (status, body))
-
-        sw2.close()
+    # [32] "the room has one speaker pair, whichever screen claims it first"
+    # used to live here, racing two screens' senders for the room audio with a
+    # bare `status != 409` and a fixed `sleep(6.5)` margin. Both are weaker
+    # than `test_castscreens.py`'s [84], which covers the identical claim /
+    # 409-naming / teardown-release sequence: it reads `/api/audio`'s
+    # `available` flag once up front so it can assert the actual expected
+    # status either way instead of a check that cannot fail regardless of the
+    # backend (`status != 409` is also true of an unrelated 502), and it polls
+    # for the release instead of sleeping past the grace period. Removed
+    # rather than fixed in place, to avoid keeping two copies of the same
+    # scenario that could drift.
 
 asyncio.run(main())
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
