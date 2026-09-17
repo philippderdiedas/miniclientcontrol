@@ -180,14 +180,19 @@ async def main():
         put({"cast_qr_target": "screen"})
 
     print("\n[16f] the setting steers which URL a screen's own state carries")
+    # Deliberately the *second* declared display, not "foyer" (`displays[0]`,
+    # i.e. `primary()`): a case exercising only the primary screen would still
+    # pass with `display::resolve` replaced by `state.primary()`, which is
+    # exactly the substitution this branch has shipped unnoticed five times
+    # before (see CLAUDE.md). "werkstatt" fails that substitution.
     with Server(display="foyer:9931,werkstatt:9932"):
         put({"cast_qr_target": "screen"})
-        status, st = http("GET", "/api/cast/state?screen=foyer")
+        status, st = http("GET", "/api/cast/state?screen=werkstatt")
         check("under 'screen', the state for one display names it",
-              status == 200 and "?screen=foyer" in st["sender_url"], st)
+              status == 200 and "?screen=werkstatt" in st["sender_url"], st)
 
         put({"cast_qr_target": "chooser"})
-        status, st = http("GET", "/api/cast/state?screen=foyer")
+        status, st = http("GET", "/api/cast/state?screen=werkstatt")
         check("under 'chooser', the same display gets the bare chooser URL",
               status == 200 and "screen=" not in st["sender_url"], st)
 
