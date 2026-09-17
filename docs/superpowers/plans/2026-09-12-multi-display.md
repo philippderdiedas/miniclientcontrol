@@ -1952,7 +1952,7 @@ In `src/models.rs`:
 
 `activate_display` and `deactivate_display` currently reach for the global override. Give them `state.cast_display()` and use that display's `override_item` and `override_signal`. This is a parameter change, not a redesign: a cast is still an override, it just now says whose.
 
-Every rule in [CLAUDE.md](../../../CLAUDE.md#casting-srccastrs-srctlsrs) still holds — the still-ours check on teardown, `cast_announced` gating `cast.ended`, and the grace periods.
+Every rule in [CLAUDE.md](../../../CLAUDE.md#casting-srccast-srctlsrs) still holds — the still-ours check on teardown, `cast_announced` gating `cast.ended`, and the grace periods.
 
 - [ ] **Step 4: Run the cast suites**
 

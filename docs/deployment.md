@@ -275,8 +275,9 @@ not to matter — it is a cost that was accepted, because the separation charged
 than it paid: the same PDF uploaded twice into two asset directories, two ports to
 keep straight, two admin pages to choose between before any edit, and no prospect
 of ever sending a guest to a particular screen, since each controller only knew
-about its own. (That last one is not collected yet — casting still lands on one
-configured screen; see [casting.md](casting.md#which-screen-a-cast-lands-on).)
+about its own. That last one is now collected: one controller holds every screen's
+cast session, so a guest picks the panel they are standing in front of — see
+[casting.md](casting.md#which-screen-a-cast-lands-on).
 
 If it does bite, **the answer is a supervisor that restarts the process, not a
 second controller.** `Restart=always` in the unit file (see [Service
@@ -343,10 +344,12 @@ gets the short address.
 
 ## Runtime settings versus flags
 
-`cast_enabled`, `cast_auth`, `cast_code`, the locale, the overlay and the operator
-credentials live in the database and are edited from the admin UI. A flag actually passed on
+`cast_enabled`, `cast_auth`, `cast_code`, `cast_qr_target`, the locale, the
+overlay and the operator credentials live in the database and are edited from the
+admin UI. A flag actually passed on
 the command line **pins** that setting: the API answers `409` naming the flag and
-the UI renders the control as locked.
+the UI renders the control as locked. `cast_qr_target` has no flag at all, so it
+is the one in that list that is always editable.
 
 Besides deferring to whoever wrote the unit file, that is the recovery path — an
 operator who enables authentication and forgets the password can always get back

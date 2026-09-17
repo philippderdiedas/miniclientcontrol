@@ -1,6 +1,6 @@
 # A guest casts to a screen they choose
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-16
 
 ## What and why

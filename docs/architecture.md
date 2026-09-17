@@ -10,7 +10,7 @@ src/handlers.rs  assets, playlist items, playback control, override
 src/display.rs   the declared screens: derivation, registration, /api/displays
 src/playlists.rs playlists as objects: /api/playlists and the delete guard
 src/browser.rs   the CDP control loop -- all playback logic lives here, one per display
-src/cast.rs      cast signaling relay and session lifecycle
+src/cast/        cast signaling relay and the per-screen session lifecycle
 src/settings.rs  runtime settings, operator credentials, overlay config, /api/settings
 src/chromium.rs  finds, launches and supervises the display browser
 src/tls.rs       self-signed certificate, HTTPS listener, public-address resolution
@@ -119,6 +119,13 @@ has three kinds of client, and they need different treatment:
 | **Display browser** | `/uploads/*`, `/pdf_viewer.html`, the pdf.js files, `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`, `/api/cast/state` | exempt, **loopback only** |
 | **Cast guest** | `/`, `/index.html`, `/cast.html`, `/cast.js`, `/audio.js`, `/cast_display.html`, `/api/cast/{ws,claim,pair,info,qr.svg,audio}` | exempt, **from any address** |
 
+Both lists are literal string matches, and that is what decides the shape of every
+cast route. With a cast session per screen the requests have to say which screen
+they mean, and on anything in either list the screen therefore travels as a body
+field or a query parameter — a path segment would turn both predicates into
+pattern matching. The one path-scoped cast route,
+`DELETE /api/displays/{name}/cast/session`, is in neither list.
+
 The display browser is driven over CDP and cannot present credentials, so
 requiring them there blanks the signage. The guest is somebody's laptop on the
 LAN, so its exemption cannot be address-scoped — and gating it behind operator
@@ -131,8 +138,10 @@ the guest list and nobody can cast.
 
 Room audio is the case where the same feature sits on both sides of that line.
 `/api/cast/audio` is on the guest list and checks the connected sender's address
-instead of credentials; `/api/audio` is not on it, so the operator credentials
-decide, and it works with no cast running. Two routes rather than one widened
+for the screen it names; `/api/audio` is not on it, so the operator credentials
+decide, and it works with no cast running. The audio itself is one resource with
+one owning screen at a time, which the guest route claims and the operator route
+is exempt from. Two routes rather than one widened
 check: the guest route is exempt from authentication, so admitting "somebody else"
 there would admit the whole LAN. They share their implementation, so the two
 cannot behave differently.
@@ -162,10 +171,12 @@ taken and logged, and `AppState::cast_tls_port` is the port actually bound.
 
 ## A cast is an override
 
-Starting a cast pins the cast display's override to the cast page; ending one puts
-back whatever was there before. The cast display is the first one declared —
-casting is one session for the controller, not one per screen. `browser.rs`
-needed no changes for this, because two things there already do the right thing:
+Starting a cast pins that screen's override to the cast page; ending one puts back
+whatever was there before. There is **one session per declared screen**, held on
+`Display` rather than on `AppState`, so two guests can cast to two screens without
+sharing a reservation, a timer or a deadline — see
+[casting.md](casting.md#which-screen-a-cast-lands-on). `browser.rs` needed no
+changes for this, because two things there already do the right thing:
 
 - the per-item `select!` watches the override signal, so a cast interrupts the
   current item instead of waiting out its duration;
@@ -175,7 +186,9 @@ needed no changes for this, because two things there already do the right thing:
 
 On teardown the previous override is restored **only if the one on screen is still
 ours**. An operator who set a different override during the cast made a newer
-decision, and silently reverting it would look like the UI ignoring them.
+decision, and silently reverting it would look like the UI ignoring them. Both
+guards matter more with a session per screen than they did with one, because two
+override loops now poke independently.
 
 ## Outbound webhooks
 

@@ -52,8 +52,10 @@ status code, because the only client that ever asks is our own Chromium.
 
 ## Session rules
 
-- **Exactly one sender and one display.** A second guest is refused at claim time,
-  with a reason.
+- **Exactly one sender and one display, per screen.** A second guest on the same
+  screen is refused at claim time, with a reason; a second guest on a different
+  screen is not refused at all. See
+  [Which screen a cast lands on](#which-screen-a-cast-lands-on).
 - **Ping every 15 s, drop after 45 s of silence.** A laptop whose lid closes stops
   answering without ever sending a TCP FIN, so the socket looks healthy until
   something probes it. This is what keeps a dead cast from freezing the signage.
@@ -67,31 +69,160 @@ resumes where it left off.
 ## Which screen a cast lands on
 
 A controller can drive several screens (see
-[deployment.md](deployment.md#declaring-the-screens-a-deployment-drives)), but
-casting is **one session for the whole controller, on one screen** — not one
-session per screen. A cast pins to the first one declared.
+[deployment.md](deployment.md#declaring-the-screens-a-deployment-drives)), and
+**every declared screen has its own cast session**. Two guests can cast to two
+screens at once and never learn about each other: the sender, the reservation,
+the pairing code, the override and every timer belong to one screen's session,
+and two guests must not share a deadline.
 
-Everything a cast touches follows that one display: the override that pins
-`cast_display.html`, the restore on teardown, and the `override.set` webhook,
-which names that screen.
+That is not the cheap version. Keeping one session and letting the guest choose
+where it lands would have been a much smaller change, and it was rejected on what
+a venue actually looks like. The screens are in different rooms. A guest in the
+Foyer told *"someone is already casting"* because of something happening in the
+Werkstatt has been refused for a reason they cannot see, by somebody who is not in
+the room.
 
-What does **not** follow it yet, and is worth knowing before a venue declares a
-second screen:
+One thing deliberately stays controller-wide: the **per-address counter behind the
+code lockout**. Per screen it would multiply by the number of screens and hand an
+attacker N tries at a four-character code instead of one.
 
-- **The guest URL and the QR code are global.** There is one sender address, one
-  `/api/cast/qr.svg`, and neither says which screen it reaches.
-- **The idle screen invites a cast on every display.** `empty_playlist.html` is
-  the same page everywhere and shows the cast address, the QR code and — in code
-  mode — the standing code whenever casting is enabled. A second panel standing
-  idle therefore advertises a cast that will appear somewhere else.
-- **`hide_during_cast` and the cast-sourced QR drop are global too**, because
-  they follow `CastSession::is_active()`, which is one session's state and not
-  one screen's.
+`is_active()` is per screen with everything else, which is what makes
+`hide_during_cast` and the cast-sourced QR drop per screen for free — a cast in
+the Werkstatt no longer blanks the Foyer's overlay. Guest pages follow the same
+way: one screen can hold a guest's web page while another streams video.
 
-Per-display casting — a session per screen, a QR that names its own screen — is
-its own piece of work. `cast.rs` carries the session state machine, and one
-session is what a venue with one guest at a time actually needs; the honest
-position until then is that a second screen is a playlist screen.
+### The guest says which screen, by scanning it
+
+Each panel's QR encodes its own name — `https://<device>/?screen=foyer` — so
+scanning the panel in front of you *is* the choice, and it costs no taps. The
+guest page names the screen it is bound to, *„Sie senden an: Foyer"*, before
+anything is shared, so a wrong scan is visible up front rather than discovered
+afterwards by looking at a panel that did not change.
+
+Three entry states, one document, so there is one piece of guest UI to keep
+correct:
+
+- **Bound** — a `?screen=` naming a declared screen. Straight to the share
+  buttons.
+- **Chooser** — no `?screen=` at all: the list of screens, each marked `frei` or
+  `belegt`, busy ones not selectable. This is what a typed address gets, and what
+  a chooser QR gets.
+- **Gone** — a `?screen=` naming a screen this deployment no longer declares, from
+  a QR printed for a panel since removed. It falls back to the chooser with
+  *„Diesen Bildschirm gibt es nicht mehr."*. The guest is holding a phone, not
+  reading a status code.
+
+With exactly one screen declared there is no chooser at all. An omitted screen
+resolves while one display is declared and is refused once several are —
+`display::resolve`, the same rule the playback routes follow — so a single-screen
+venue never meets a list with one entry in it, and a guest who types the bare
+address on a two-screen controller does.
+
+A bound guest can still **switch**, from a list of labels beside that header. This
+is a deliberate loosening: a guest can take a screen they cannot see. It was
+chosen anyway, because the alternative failure — someone scans the wrong panel, or
+wants the screen in the next room, and has no way forward — is the more common one
+in a fab lab, where the people are known and the screens are not a scarce resource
+being fought over.
+
+**Switching mid-session is not offered.** Once a sender is streaming, or a guest
+page is up, the switcher is disabled with a note: stop, then pick another screen.
+A live switch means tearing down one `RTCPeerConnection` and negotiating another
+while the first screen's override unwinds — two sessions in flight for one guest,
+to serve a case the guest was shown before they shared anything.
+
+### Which QR a screen draws is one setting for the venue
+
+**QR-Code auf dem Schirm führt zu → diesem Schirm / Auswahl aller Schirme**, in
+the cast section of `admin.html`. One decision for the deployment, because that is
+what it is: the overlay's cast QR and the address a screen prints while idle both
+read it, so the two cannot disagree. With a single display declared it changes
+nothing and the page says so rather than offering a dead control.
+
+Not put on each display's card in `displays.html`: two screens could then
+advertise differently, which a guest sees and no operator page summarises. Not
+folded into the overlay's `qr_source` either — the idle page draws its own
+invitation without consulting the overlay configuration, so the rule would have to
+be known in two places and would drift.
+
+**One gap, as of this writing:** `/api/cast/qr.svg` takes no screen and always
+encodes the chooser address. The overlay's QR is built by
+`settings::overlay_payload` and follows the setting; the address printed on the
+idle and standby screens follows it too, but the picture drawn next to that
+address does not. On a single-screen deployment the two addresses are identical
+and nothing shows; on several, a guest scanning an idle panel lands on the chooser
+and has one tap to make.
+
+### What the chooser can be told, and by whom
+
+`/api/cast/info` carries `screens: [{name, label, busy, max_edge}]`, and it is
+exempt from authentication regardless of address — it has to be, the guest is by
+definition not loopback. So **any guest on the LAN can read the screen labels and
+watch when each is in use.** That is the price of the chooser and it is paid
+knowingly: the alternative is a guest picking a screen that cannot work and being
+refused after choosing, or a busy screen vanishing from the list entirely, which
+makes a venue with someone casting look like a venue with fewer screens. Labels
+are operator-chosen, so a deployment that minds can name its screens `A` and `B`.
+
+The list is withheld when **neither** casting nor guest pages is reachable: a
+switched-off feature should not enumerate the venue. The two switches are
+independent, so a venue running guest pages with casting off still gets the list —
+a page-mode claim binds against it the same way.
+
+`busy` is relative to the asking address, exactly like the claim endpoint: a guest
+already holding a screen's reservation must not be told it is busy. `max_edge`
+rides along because a sender constrains its capture *before* it has a socket —
+that is the whole reason a display's announced limit outlives its session — and
+with one session per screen there is no single limit left to report.
+
+### The screen travels as a parameter, never as a path segment
+
+...on anything a guest reaches. `cast::is_cast_public_path` and `is_display_path`
+are literal string matches, and
+[architecture.md](architecture.md#three-audiences-for-http) treats keeping them
+that way as load-bearing; scoping the cast routes under
+`/api/displays/{name}/cast/…` would turn both predicates into pattern matching. So:
+
+| Route | Audience | Names the screen by |
+|---|---|---|
+| `GET /api/cast/info` | public, any address | it answers for all of them |
+| `POST /api/cast/claim` | public | `display` in the body |
+| `DELETE /api/cast/claim` | public | `display` in the body |
+| `POST /api/cast/pair` | public | `display` in the body |
+| `GET /api/cast/ws` | public | the ticket; the display peer passes `?screen=` |
+| `GET`/`POST /api/cast/audio` | the connected sender | `?screen=` |
+| `GET /api/cast/state` | loopback + operator | `?screen=` |
+| `DELETE /api/displays/{name}/cast/session` | operator only | path segment |
+
+The operator's stop is the one path-scoped cast route, and it may be shaped that
+way precisely because it is in neither exemption list.
+
+**A sender never names its screen on the socket.** Its ticket already does: the
+socket finds whichever session holds a live reservation for that exact ticket, and
+a ticket held by no session is refused before any session is touched. Trusting a
+query string instead would let a sender claim a screen its reservation was never
+issued for.
+
+### What the operator sees
+
+`/admin.html` reports a cast line per screen — who is casting, since when, what is
+showing — and a *Beenden* button that ends that screen's session and leaves the
+others running. The switches above it stay global: `cast_enabled`, the
+authentication mode and guest pages are the venue's, not one panel's, and turning
+`cast_enabled` off ends **every** session rather than one.
+
+`displays.html` does not change. It answers which playlist a screen plays; casting
+is a different axis, and a second home for it there is one more page an operator
+has to hold in their head.
+
+### Not built
+
+- **Any queue or takeover for a busy screen.** A busy screen is busy; the guest
+  picks another or waits.
+- **Per-screen cast switches.** A venue that wants casting on one screen only is a
+  real request, but it is not this one.
+- **Per-screen audio sinks.** One device, one sink — see
+  [Venue audio](#venue-audio).
 
 ## Authentication
 
@@ -188,8 +319,9 @@ WebRTC costs it a great deal, so a display too weak to receive a cast can still
 be given a page — and a venue that wants the reverse can have that too.
 
 Everything else is the cast's: the same code, the slot claimed before anything
-happens, one guest at a time, and the operator's stop button. The guest holds a
-socket for as long as the page is up, and letting go hands the screen back after
+happens, one guest at a time on a screen, the guest's choice of which screen, and
+the operator's stop button. The guest holds a socket for as long as the page is
+up, and letting go hands the screen back after
 a grace period — thirty seconds here rather than the cast's five, because a phone
 whose tab was set aside is the expected case and not a fault. The keepalive
 itself survives backgrounding: it is a protocol-level ping the browser answers
@@ -204,9 +336,10 @@ does not end up in the journal or on the operator's screen, and
 `http://google.com@evil.test` is shown as the `evil.test` it is rather than as
 the Google it pretends to be.
 
-A page a guest puts up counts as a cast wherever that matters: the overlay
-respects `hide_during_cast`, and a cast-sourced QR code disappears, because the
-slot is taken and whoever scanned it would be turned away.
+A page a guest puts up counts as a cast wherever that matters: on that screen the
+overlay respects `hide_during_cast`, and a cast-sourced QR code disappears,
+because the slot is taken and whoever scanned it would be turned away. Only on
+that screen — a page in the Foyer says nothing about the Werkstatt.
 
 **Note what a guest can see this way.** With operator authentication switched
 off, a guest can point the kiosk at its own admin page and read the cast code off
@@ -333,3 +466,35 @@ Control goes through `pactl`, which is a client of the PulseAudio *protocol*;
 PipeWire implements it too, so one code path covers both. The PipeWire-native
 tools would be strictly narrower. A machine with no sound server at all reports
 the panel as unavailable rather than failing.
+
+### One room, one owner
+
+The venue has one speaker pair, and with a cast session per screen there can be
+two guests holding two screens. Two of them unmuting at once is two videos talking
+over each other, with nothing on either phone explaining why. So the audio stays a
+single resource with an owner: the first cast that touches it claims it, and the
+second caster's control answers *„Ton läuft gerade auf ‚Foyer'"* rather than
+silently doing nothing.
+
+**A guest cannot take the audio from another guest.** That is a stranger silencing
+someone mid-presentation. **The operator is not bound by it**: `/api/audio` needs
+no cast running at all and never goes through the ownership check, so whoever runs
+the venue can always turn the room down. It does not move the ownership either —
+the screen that holds it keeps it until its session ends.
+
+The owner is released on that cast's teardown, and validated against the owning
+screen's `is_active()` on every read — so a claim left behind by a screen that was
+undeclared from the configuration, or by a guest whose socket dropped before it had
+put anything on the display, frees itself instead of leaving the room mute until a
+restart. It is *not* a cure for a crashed browser: a process that dies never
+touches the session, so the session still reads active.
+
+Not chosen: an operator setting pinning the audio to one screen. It is
+deterministic, and it means a cast on any other screen can never have sound even
+when nothing else is running.
+
+One rough edge: `/api/audio` is unscoped and singles out the **first declared**
+screen's browser as "the cast's own stream". Volume, mute and the output device
+all apply to the room either way, but the stream-dragging above is the operator's
+blind spot — switching the output device while the cast is on a later screen does
+not carry that cast's audio across with it.

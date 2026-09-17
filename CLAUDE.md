@@ -26,20 +26,35 @@ unrebuilt change looks exactly like a change that did not work.
 
 `cargo build` is the gate for the Rust side. There is no linting config.
 
+**`pub(super)` on an item declared in a directory module's `mod.rs` one level
+below the crate root reaches the whole crate.** `cast`'s parent *is* the crate
+root, and `pub(super)` extends to every descendant of it. Private is what confines
+an item to the directory, because private already reaches descendant submodules —
+so `src/cast/mod.rs` keeps `CastSession`'s fields private and gives up nothing the
+single file had. The one direction `pub(super)` is right is a child exposing to
+its parent, which is what `src/cast/api.rs` and `src/webhook/api.rs` use it for.
+
 **Stop any locally running instance before the Python suite.** `test_port.py`
 needs the default `3443` free to test the fallback, and
-`test_browser.py`/`test_overlay.py`/`test_webhook.py`/`test_display.py` launch
-their own Chrome on `9222`+`9223`/`9232`/`9242`/`9242`+`9243`. A dev instance
-holding those makes them fail in a way that reads exactly like a code regression —
-they pass again the moment it is stopped. `test_display.py` and `test_webhook.py`
-share `9242`, so they must not run concurrently.
+`test_browser.py`/`test_overlay.py`/`test_webhook.py`/`test_display.py`/`test_castscreens.py`
+launch their own Chrome on `9222`+`9223`/`9232`/`9242`/`9242`+`9243`/`9242`+`9243`.
+A dev instance holding those makes them fail in a way that reads exactly like a
+code regression — they pass again the moment it is stopped. `test_display.py`,
+`test_webhook.py` and `test_castscreens.py` all use `9242`, so no two of the three
+may run concurrently.
 A stray Chrome on `9222` is worse than none for `test_webhook.py`: the loop
 attaches to it and injects `display.connected` and `playback.playlist_empty`
 deliveries into receivers that are counting.
 
 `tests/cast/` is stdlib-only Python, wired into no CI. Run it by hand after
-touching `cast.rs`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/`,
+touching `cast/`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/`,
 `display.rs`, `playlists.rs` or the route table.
+
+**A test about a specific screen must name a non-primary one.** `primary()` is
+`displays[0]`, so a case that exercises the first declared screen passes
+identically with the real resolution replaced by `state.primary()` — it asserts
+nothing about resolving a screen. Four cases shipped that way on the per-display
+casting branch, each caught in review and not by the suite.
 
 When testing casting locally, share a single *window* rather than the whole
 screen, or the display shows an infinite mirror.
@@ -68,6 +83,11 @@ the rules that break it:
   operator landing page and `/cast.html` 301s to `/`. Moving a page between the
   two sets means moving it between `is_cast_public_path` and authenticated
   routing.
+- **Both lists are literal `matches!` strings, which is why the screen a cast
+  request is about travels as a body field or a query parameter.** A
+  `/api/displays/{name}/cast/…` shape would turn both predicates into pattern
+  matching. Path-scope a cast route only when it is in neither list — as
+  `DELETE /api/displays/{name}/cast/session` is.
 
 Room audio is the case that sits on both sides at once: `/api/cast/audio` is on
 the cast list and checks `caster_only`; `/api/audio` is not, so basic auth
@@ -123,11 +143,6 @@ different reason: Chromium is last-wins for a repeated switch, so it would
 collapse every display onto one `app_id`. All of this is **below** the no-display
 early return on purpose: with one implicit screen there is nothing to collide
 with, and refusing there would turn a working command line into a refusal to boot.
-
-**An unknown `--cast-display` fails at startup**, not at use.
-`AppState::cast_display()` falls back to the primary rather than panicking, so
-without the check the mistake surfaces hours later as a guest scanning a QR code
-and the picture landing on the wrong panel.
 
 **An unscoped legacy API path refuses with `409` once several displays exist**
 (`display::resolve` with `None`), naming the declared screens. It still resolves
@@ -365,21 +380,14 @@ An enabled overlay with nothing in it is a `400`. Out-of-range numbers are
 **clamped rather than rejected** and an unknown corner falls back — the
 alternative is an error message on a screen nobody is standing in front of.
 
-## Casting (`src/cast.rs`, `src/tls.rs`)
+## Casting (`src/cast/`, `src/tls.rs`)
 
 The subsystem in full: [docs/casting.md](docs/casting.md). The controller relays
 opaque `{sdp}` / `{ice}` blobs and **never parses WebRTC payloads** — not parsing
 them means it cannot break them.
 
-**A cast is an override.** Starting one pins the *cast display's* `override_item`
-to `http://127.0.0.1:<port>/cast_display.html`. Which screen that is comes from
-`AppState::cast_display()` — `--cast-display` when given, else `primary()` — and
-**every part of a cast resolves through it**, not through `primary()`: activation,
-teardown, the `override.set` emit and `cast.started`. Casting is still one session
-for the whole controller, not one per screen, and the guest URL, the QR code, the
-idle screen's invitation and `is_active()` stay global with it — what that leaves
-a second screen with is spelled out in
-[docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on).
+**A cast is an override.** Starting one pins that screen's `override_item` to
+`http://127.0.0.1:<port>/cast_display.html?screen=<name>`.
 `browser.rs` needed no changes for this, because two things there already do the
 right thing and both are load-bearing:
 
@@ -392,6 +400,56 @@ right thing and both are load-bearing:
 On teardown the previous override is restored **only if the one on screen is still
 ours**. An operator who set a different override during the cast made a newer
 decision.
+
+### Casting across screens
+
+One session per declared screen, living on `Display`. What a guest sees and why:
+[docs/casting.md](docs/casting.md#which-screen-a-cast-lands-on). The rules:
+
+- **`display::resolve` is the only resolver, and every handler calls it once.**
+  Resolve at the top, pass the `Arc<Display>` down, and never resolve again
+  further in: one request reading one session and writing another is invisible
+  until two screens are busy at the same time.
+- **`attempts` deliberately stays on `AppState`.** Per screen the code lockout
+  multiplies by the number of screens and hands an attacker N tries at a
+  four-character code instead of one. Everything that describes *one guest's*
+  session moved; that counter describes an address.
+- **Splitting a guarded resource per display is exactly when a read-then-write
+  over what stays shared becomes a race.** It happened twice here. The lockout
+  check was separated from its increment — measured at 87 of 200 concurrent wrong
+  codes evaluated against a bound of 5 — and `claim_audio` read the owner in one
+  acquisition and wrote it in a second, so two screens could both win. Both were
+  invisible to sequential tests, which passed on either side of the fix. The test
+  that catches this shape is N concurrent callers asserting a bound, on a
+  multi-worker runtime.
+- **A sender's screen comes from its ticket, never from a query string.** The
+  socket finds whichever session holds a live reservation for that exact ticket
+  — with `codes_match`, not `==`, because this scan runs *before* the
+  constant-time comparison and would otherwise leak the ticket a character at a
+  time. A ticket held by no session is refused before any session is touched:
+  falling back to the primary would answer with *its* busy state, which says
+  nothing about this ticket. Only the display role, which is loopback-only,
+  passes `?screen=`.
+- **One room, one owner.** `AppState::audio_owner` is claimed by the first cast
+  to change something and released on teardown **only if this screen is still the
+  recorded owner** — otherwise an unrelated teardown erases somebody else's
+  claim. A guest may never take it from a guest; `/api/audio` is the operator's
+  door and never goes through `claim_audio`. It is a leaf lock: nothing else is
+  held while it is held, which is what keeps it out of the
+  settings → cast_attempts → cast → override_item order.
+- **The owner is validated against `is_active()` on read**, and the reachable
+  trigger is *not* "a cast that died" — every such path already clears it. It is
+  a screen undeclared from the config, or a page-mode guest who claimed the audio
+  the moment its socket registered and disconnected before `activate_display`
+  ever ran, leaving `holding_override` false so `deactivate_display` no-ops.
+- **`cast_enabled` off ends every session**, looping the displays;
+  `DELETE /api/displays/{name}/cast/session` ends one. The switches
+  (`cast_enabled`, the auth mode, guest pages) are the venue's and stay global.
+- **`cast_qr_target` is read in two places and must stay that way**:
+  `settings::overlay_payload` for the overlay QR, `cast_state` for the address a
+  screen prints while idle. A third reader is how the panel and the badge start
+  disagreeing. `cast::url::cast_qr` (`/api/cast/qr.svg`) reads neither and always
+  encodes the chooser URL — a gap, not a decision, so do not codify it.
 
 ### The managed certificate (`src/managed_cert.rs`)
 
@@ -515,7 +573,9 @@ decoded and zero dropped. Three rules:
 - **The last known limit outlives the session** (`CastSession::display_limits` is
   not cleared on teardown). It is a property of the hardware, and the sender
   captures before its socket exists, so on a first-ever cast the limit can only
-  arrive after the picker has already handed over a stream.
+  arrive after the picker has already handed over a stream. Same reason it is in
+  `/api/cast/info`'s `screens[].max_edge`: with a session per screen there is no
+  single limit left to report, and the guest chooses before any socket exists.
 - **The panel edge is in there too**, not just the texture limit.
 
 Why the receiver falls behind rather than failing, and the codec lever left
@@ -549,9 +609,9 @@ The rules:
 **The envelope names the screen**: `display` sits beside `device`, which is why
 `fire` takes the display name as its first argument and every emit site has to
 pass the screen the event is about — `browser.rs` its own loop's display,
-`cast.rs` the cast display. It is in the envelope rather than in one event's
-`data` because all ten events are about a particular screen, and it is additive,
-so a target configured before several displays existed keeps working.
+`cast/` the screen whose session it resolved. It is in the envelope rather than
+in one event's `data` because all ten events are about a particular screen, and it
+is additive, so a target configured before several displays existed keeps working.
 `api::catalogue()`'s `envelope` array carries it, so the admin page's chips offer
 it without being told.
 
@@ -687,7 +747,9 @@ also the recovery path for a forgotten operator password — see
 
 `--disable-cast` is the deployment-level kill switch and additionally decides
 whether the HTTPS listener binds at all, so it cannot be undone without a restart.
-`cast_enabled` is the operator-level one, and turning it off ends a running cast.
+`cast_enabled` is the operator-level one, and turning it off ends a running cast
+on **every** screen, looping the displays — the switch is the venue's, not one
+panel's.
 
 **`AppState::auth_cache` must be cleared whenever the credentials change**, or the
 old password keeps working. It remembers the last `Authorization` header that
