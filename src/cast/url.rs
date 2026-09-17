@@ -18,6 +18,15 @@ use crate::models::{AppState, Display};
 /// to decide, and must keep agreeing -- otherwise the address a screen prints,
 /// the picture beside it and the overlay's own QR could each send a guest
 /// somewhere different.
+///
+/// The parameter is suppressed on a single-display deployment even when a
+/// caller passes `Some`: `display::unscoped_is_ambiguous` is what
+/// `display::resolve` itself uses to decide whether a bare, unscoped request
+/// is fine, and with only one declared screen it always is, so there is no
+/// picker for the parameter to skip -- it would be pure noise on the one line
+/// a guest has to type. Suppressing it here, in the single place every caller
+/// already goes through, is what keeps an existing one-screen venue's address
+/// unchanged across an upgrade to this feature.
 pub fn sender_url(state: &AppState, display: Option<&Display>) -> String {
     let base = if state.managed_cert {
         crate::tls::managed_base_url(state.cast_tls_port)
@@ -27,6 +36,7 @@ pub fn sender_url(state: &AppState, display: Option<&Display>) -> String {
     let base = base.unwrap_or_else(|| {
         crate::tls::public_base_url(&state.args.public_url, state.cast_tls_port)
     });
+    let display = display.filter(|_| crate::display::unscoped_is_ambiguous(state.displays.len()));
     match display {
         Some(display) => format!("{base}?screen={}", urlencoding::encode(&display.name)),
         None => base,
@@ -49,12 +59,21 @@ pub struct ScreenQuery {
 /// client-side library would have to be vendored, and an SVG the display can
 /// scale is a few hundred bytes.
 ///
+/// Checked before `display::resolve`, same order and same reason as
+/// `claim_session`: resolving first would let a guest enumerate every
+/// declared screen off the `404`/`409` body while neither guest-facing
+/// capability is reachable, which is exactly what `cast_info` withholds
+/// `screens` to avoid.
+///
 /// Resolved exactly like `cast_state`: `display::resolve` first, then
 /// `cast_qr_target` decides whether the picture names this screen or hands
 /// over the bare chooser address. Reading anywhere but that setting would make
 /// this a second source of truth -- the address a panel prints and the
 /// picture beside it must never disagree.
 pub async fn cast_qr(State(state): State<AppState>, Query(query): Query<ScreenQuery>) -> Response {
+    if !super::any_guest_capability(&state).await {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
     let display = match crate::display::resolve(&state, query.screen.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,

@@ -318,23 +318,31 @@ async def settings_flow():
         chooser_url = http("GET", "/api/cast/info")[1]["sender_url"]
         check("the bare chooser address carries no ?screen= scoping",
               "screen=" not in chooser_url, chooser_url)
-        check("and it differs from the screen-scoped address used above",
-              chooser_url != sender_url, (chooser_url, sender_url))
+        # This server declares one screen, so `sender_url` above never carried
+        # `?screen=` either -- suppressed on purpose (`cast::sender_url`),
+        # because it would be pure noise on the one address there is to type.
+        # The two addresses genuinely differing is a multi-screen property,
+        # covered by `test_castscreens.py`'s [91]; here they must agree.
+        check("and it is the same address as the 'screen' target above, since "
+              "there is only the one screen to be either of them",
+              chooser_url == sender_url, (chooser_url, sender_url))
 
         chooser_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
         check("the overlay QR still renders a code under 'chooser'",
               len(chooser_rows) >= 21, len(chooser_rows))
 
         # Same proof as [41c]: typing the address by hand must reproduce the
-        # identical matrix, module for module -- and it must be the *bare*
-        # address's matrix, not the screen-scoped one from above.
+        # identical matrix, module for module -- and on this one-screen server
+        # it is the *same* matrix as [41c]'s, not a different one: see the
+        # comment above on why the two addresses agree here.
         put({"enabled": True, "qr_source": "text", "qr_text": chooser_url, "text": ""})
         chooser_typed_rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
         check("and under 'chooser' it is the bare guest address, module for module",
               chooser_rows == chooser_typed_rows,
               (chooser_url, len(chooser_rows), len(chooser_typed_rows)))
-        check("which is a different code than the screen-scoped address typed in [41c]",
-              chooser_rows != typed_rows, (len(chooser_rows), len(typed_rows)))
+        check("which is the same code as the address typed in [41c], since this "
+              "server has only the one screen for either setting to point at",
+              chooser_rows == typed_rows, (len(chooser_rows), len(typed_rows)))
         print(f"        bare chooser address the display would show: {chooser_url}")
 
         put({"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""})
