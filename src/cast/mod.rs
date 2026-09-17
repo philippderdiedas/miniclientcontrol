@@ -352,6 +352,32 @@ pub fn is_cast_public_path(path: &str) -> bool {
     )
 }
 
+/// Whether a guest can reach *any* guest-facing capability right now --
+/// casting or a guest page.
+///
+/// `--disable-cast` takes the whole cast TLS listener down (`main` binds it
+/// only when the flag is absent), and a guest only ever reaches a
+/// guest-public route over that listener, so it forces this off
+/// unconditionally the same way `cast_info` already does. Casting and guest
+/// pages are otherwise independent switches, and either alone is enough.
+///
+/// Every guest-public route that resolves a display and could otherwise
+/// enumerate every declared name in the process (`display::resolve`'s `409`,
+/// or the `404` a wrong name gets) must check the switch it depends on
+/// *before* resolving, the same order `claim_session` already uses --
+/// resolving first and refusing second still hands the venue's screen names
+/// to a feature that is switched off. `/api/cast/qr.svg` and `/api/cast/audio`
+/// use this shared predicate, since either capability can put a sender behind
+/// them; `/api/cast/pair` is cast-only (there is no page-mode pairing), so it
+/// checks `cast_enabled` directly instead.
+async fn any_guest_capability(state: &AppState) -> bool {
+    if state.args.disable_cast {
+        return false;
+    }
+    let settings = state.settings.read().await;
+    settings.cast_enabled || settings.guest_pages_enabled
+}
+
 fn generate_code() -> String {
     let mut rng = rand::rng();
     (0..CODE_LEN)

@@ -271,12 +271,11 @@ pub async fn cast_info(
     // `--disable-cast` is the deployment-level kill switch; `cast_enabled` is
     // the operator's. Either one hides the screen list.
     let enabled = cast_enabled && !state.args.disable_cast;
-    // Withheld only when neither guest-facing capability is reachable.
-    // `--disable-cast` takes the whole cast TLS listener down (main.rs binds
-    // it only when the flag is absent), and a guest only ever reaches this
-    // route over that listener, so it forces both off here the same way it
-    // already forces `enabled` off above.
-    let any_guest_capability = !state.args.disable_cast && (cast_enabled || page_enabled);
+    // Withheld only when neither guest-facing capability is reachable. Shared
+    // with every other guest-public route that resolves a display, so this
+    // and `display::resolve`'s enumeration cannot drift apart -- see
+    // `any_guest_capability`'s own doc comment.
+    let any_guest_capability = super::any_guest_capability(&state).await;
 
     if !any_guest_capability {
         return Json(json!({
@@ -506,7 +505,23 @@ pub async fn start_pairing(
     if state.args.disable_cast {
         return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
     }
-    if state.settings.read().await.cast_auth != CastAuth::Pairing {
+    // `cast_enabled` is the operator's own switch, checked before
+    // `display::resolve` for the same reason `claim_session` checks its
+    // switches first: resolving first would let a guest enumerate every
+    // declared screen off the `404`/`409` body while casting is off. This is
+    // cast-only, not `any_guest_capability` -- there is no page-mode pairing.
+    let (cast_enabled, cast_auth) = {
+        let settings = state.settings.read().await;
+        (settings.cast_enabled, settings.cast_auth)
+    };
+    if !cast_enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Übertragung ist derzeit deaktiviert."})),
+        )
+            .into_response();
+    }
+    if cast_auth != CastAuth::Pairing {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "Pairing ist nicht aktiv."})),

@@ -168,6 +168,13 @@ pub async fn read_audio(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<AudioQuery>,
 ) -> Response {
+    // Checked before `display::resolve`, same order and same reason as
+    // `claim_session`: resolving first would let a guest enumerate every
+    // declared screen off the `404`/`409` body while neither guest-facing
+    // capability is reachable.
+    if !super::any_guest_capability(&state).await {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
     let display = match crate::display::resolve(&state, query.screen.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,
@@ -218,6 +225,10 @@ pub async fn control_audio(
     Query(query): Query<AudioQuery>,
     Json(command): Json<crate::audio::AudioCommand>,
 ) -> Response {
+    // Same check, same order, as `read_audio` above.
+    if !super::any_guest_capability(&state).await {
+        return (StatusCode::NOT_FOUND, "casting is disabled").into_response();
+    }
     let display = match crate::display::resolve(&state, query.screen.as_deref()) {
         Ok(display) => display,
         Err(response) => return response,
