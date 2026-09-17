@@ -387,8 +387,12 @@ mod tests {
         const N: usize = 32;
         // Measured against the pre-fix code: 50 rounds only caught the bug
         // about half the time, since the window between `owning_display`'s
-        // two lock acquisitions is narrow. 300 pushes that well past even
-        // odds while still running in well under a second.
+        // two lock acquisitions is narrow -- roughly 1.4% per round. 300
+        // rounds raises that to about 98.5% (odds of a re-introduced
+        // regression slipping through, about 1 run in 65) while still
+        // running in well under a second; the fixed code cannot false-fail
+        // at any round count, so this is a detection/runtime trade-off, not
+        // a correctness one.
         const ROUNDS: usize = 300;
 
         let names: Vec<String> = (0..N).map(|i| format!("screen{i}")).collect();

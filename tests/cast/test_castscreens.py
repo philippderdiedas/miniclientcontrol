@@ -123,6 +123,15 @@ def overlay_dark_cells(text):
     """
     http("PUT", "/api/settings",
          {"overlay": {"enabled": True, "qr_source": "text", "qr_text": text, "text": ""}})
+    return overlay_qr_cells()
+
+
+def overlay_qr_cells():
+    """The set of dark-module coordinates `/api/overlay` draws for whatever
+    overlay configuration is currently stored, without touching it -- unlike
+    `overlay_dark_cells` above, which exists to compute an *expected* matrix
+    from typed text and so overwrites `qr_source` to get it. This one reads
+    back what a `qr_source: "cast"` overlay actually renders."""
     rows = (http("GET", "/api/overlay")[1]["layers"][0] or {}).get("qr_modules") or []
     return frozenset((col, row) for row, line in enumerate(rows)
                       for col, ch in enumerate(line) if ch == "1")
@@ -616,8 +625,54 @@ def case_91():
               (len(chooser_expected), len(foyer_expected), len(werkstatt_expected)))
 
 
+def case_92():
+    print("\n[92] the overlay's own cast QR follows cast_qr_target too, not "
+          "just /api/cast/qr.svg's -- settings.rs's overlay_payload must take "
+          "the same branch /api/cast/state does")
+    # Two screens, so 'screen' and 'chooser' genuinely produce different
+    # addresses -- test_overlay.py's implicit one-screen Server() cannot tell
+    # the two branches apart at all (b66e395 made them coincide there on
+    # purpose), which is why [41c]/[41e] no longer catch a drawer that ignores
+    # the setting. `/api/overlay` always answers for the primary display
+    # (foyer), so that is the screen whose address is the reference here.
+    with Alone():
+        http("PUT", "/api/settings", {"cast_qr_target": "screen"})
+        http("PUT", "/api/settings",
+             {"overlay": {"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""}})
+
+        foyer_url = state_of("foyer")["sender_url"]
+        check("foyer's own address carries its own ?screen=",
+              "screen=foyer" in foyer_url, foyer_url)
+        screen_expected = overlay_dark_cells(foyer_url)  # clobbers qr_source
+
+        http("PUT", "/api/settings",
+             {"overlay": {"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""}})
+        screen_served = overlay_qr_cells()
+        check("under 'screen', the overlay's own QR encodes foyer's own "
+              "address, module for module -- not always the bare chooser one",
+              len(screen_served) > 0 and screen_served == screen_expected,
+              (len(screen_served), len(screen_expected)))
+
+        http("PUT", "/api/settings", {"cast_qr_target": "chooser"})
+        chooser_url = http("GET", "/api/cast/info")[1]["sender_url"]
+        check("the chooser address carries no ?screen= scoping",
+              "screen=" not in chooser_url, chooser_url)
+        chooser_expected = overlay_dark_cells(chooser_url)  # clobbers qr_source
+
+        http("PUT", "/api/settings",
+             {"overlay": {"enabled": True, "qr_source": "cast", "qr_text": "", "text": ""}})
+        chooser_served = overlay_qr_cells()
+        check("under 'chooser', the overlay's own QR switches to the bare "
+              "chooser address -- the setting decides, not a branch that "
+              "always resolves the same way",
+              chooser_served == chooser_expected and chooser_served != screen_served,
+              (len(chooser_served), len(chooser_expected), len(screen_served)))
+
+        http("PUT", "/api/settings", {"cast_qr_target": "screen"})
+
+
 CASES = [case_80, case_81, case_82, case_83, case_84, case_85, case_86, case_87,
-         case_88, case_89, case_90, case_91]
+         case_88, case_89, case_90, case_91, case_92]
 
 # The only two cases that touch a real browser. `python3 test_castscreens.py 85`
 # (say) has no use for two Chromes it will never attach to, and starting them
