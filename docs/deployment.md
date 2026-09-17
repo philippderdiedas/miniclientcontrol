@@ -192,6 +192,18 @@ Alongside any `--display`, these are startup errors:
   still accepted, because there is no second window for it to collide with and
   refusing would break a command line that works today.
 
+- `--cast-display`, on a unit file left over from before per-display casting.
+  It picked which panel a cast pinned to and is gone now that casting lives on
+  a session per `Display` — nothing reads it any more, so validating it at
+  startup would itself have been the stale check that let a deployment cast to
+  the wrong screen and boot happily anyway. Removing the flag outright is what
+  turns that into a startup error instead: a unit file's `ExecStart=... --cast-display
+  foyer` now refuses to boot at all, rather than being silently accepted and
+  ignored. `Environment=CAST_DISPLAY=…` in the same file is harmless — an
+  environment variable clap does not declare is simply never read, which is
+  why only the flag, not the env var, needs a line here. Rename it (or drop
+  it) before restarting the service; naming the screen is now `--display`.
+
 Sharing one profile directory between two Chromiums is the reason the profile is
 derived per display at all. A second Chromium started on a profile that is already
 in use hands its URL to the running instance and exits, taking its debugging port
