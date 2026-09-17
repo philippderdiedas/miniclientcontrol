@@ -248,9 +248,13 @@ pub async fn cast_state(
 ///
 /// Exempt from authentication regardless of address
 /// (`cast::is_cast_public_path`): the guest is by definition not loopback, so
-/// the screen list below is readable by anyone on the LAN. That is why a
-/// disabled feature reports `enabled: false` and carries no `screens` key at
-/// all -- a switched-off feature must not enumerate the venue.
+/// the screen list below is readable by anyone on the LAN. That is why the
+/// screen list is withheld whenever *no* guest-facing capability is on -- a
+/// switched-off feature must not enumerate the venue. Casting and guest pages
+/// are independent switches, though: `screens` is what a page-mode claim binds
+/// against too, so it stays present with casting off and pages on, and is
+/// withheld only when both are off (`enabled: false` and `page_enabled: false`
+/// then follow from the switches themselves, not from a separate check here).
 pub async fn cast_info(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -267,10 +271,16 @@ pub async fn cast_info(
     // `--disable-cast` is the deployment-level kill switch; `cast_enabled` is
     // the operator's. Either one hides the screen list.
     let enabled = cast_enabled && !state.args.disable_cast;
+    // Withheld only when neither guest-facing capability is reachable.
+    // `--disable-cast` takes the whole cast TLS listener down (main.rs binds
+    // it only when the flag is absent), and a guest only ever reaches this
+    // route over that listener, so it forces both off here the same way it
+    // already forces `enabled` off above.
+    let any_guest_capability = !state.args.disable_cast && (cast_enabled || page_enabled);
 
-    if !enabled {
+    if !any_guest_capability {
         return Json(json!({
-            "enabled": false,
+            "enabled": enabled,
             "page_enabled": page_enabled,
             "auth": auth,
             "sender_url": sender_url,

@@ -102,7 +102,7 @@
     </div>
 
     <div id="chooserBlock" hidden>
-      <p class="warn" id="chooserGoneNote" hidden>„Diesen Bildschirm gibt es nicht mehr.“</p>
+      <p class="warn" id="chooserGoneNote" hidden>Diesen Bildschirm gibt es nicht mehr.</p>
       <p>Bildschirm wählen:</p>
       <div class="chooserlist" id="chooserList"></div>
     </div>
@@ -282,7 +282,16 @@
     let boundScreen = null;  // the screen every claim/pair call reads
     let screenGone = false;  // a ?screen= that named a screen not currently declared
 
-    function screenLabel(name) {
+    // What renderScreenUi's rebuild depends on -- not `busy`'s effect on
+    // labels, `max_edge` (unused here) or anything live-session-related,
+    // which change through their own explicit renderScreenUi() calls, not the
+    // poll. Used to skip rebuilding the chooser/switcher on a poll tick where
+    // nothing actually changed (see the `setInterval` below).
+    function screensKey(list) {
+      return JSON.stringify(list.map((s) => [s.name, s.label, s.busy]));
+    }
+
+    function labelFor(name) {
       const found = screens.find((s) => s.name === name);
       return found ? found.label : name;
     }
@@ -303,7 +312,15 @@
       boundScreen = null;
     }
 
+    // Set the moment a chooser button is pressed and held until release
+    // anywhere on the page, so a poll landing between pointerdown and
+    // pointerup cannot swap the button out from under the guest's finger.
+    let chooserPressed = false;
+    window.addEventListener('pointerup', () => { chooserPressed = false; });
+    window.addEventListener('pointercancel', () => { chooserPressed = false; });
+
     function renderChooserList() {
+      if (chooserPressed) return;
       const list = el('chooserList');
       list.replaceChildren();
       for (const s of screens) {
@@ -316,6 +333,7 @@
         state.className = 'state';
         state.textContent = s.busy ? 'belegt' : 'frei';
         item.append(name, state);
+        item.addEventListener('pointerdown', () => { chooserPressed = true; });
         item.addEventListener('click', () => selectScreen(s.name));
         list.append(item);
       }
@@ -330,18 +348,27 @@
 
     function renderSwitcher() {
       const select = el('screenSelect');
-      select.replaceChildren();
-      for (const s of screens) {
-        const opt = document.createElement('option');
-        opt.value = s.name;
-        // `busy` is already relative to this address (see cast_info), so the
-        // screen we are bound to never reads busy to us.
-        const busyToUs = s.busy && s.name !== boundScreen;
-        opt.disabled = busyToUs;
-        opt.textContent = `${s.label} (${busyToUs ? 'belegt' : 'frei'})`;
-        select.append(opt);
+      // A native popup open on a phone must not be rebuilt underneath the
+      // guest -- skip the option rebuild while it has focus; `disabled` and
+      // the note below still update, since those don't touch the open list.
+      // The `blur` listener below re-renders once focus leaves, so a busy
+      // flip that landed while the picker was open is not lost -- without
+      // it, a poll finding nothing changed *since* the skipped attempt would
+      // never call back in here again.
+      if (document.activeElement !== select) {
+        select.replaceChildren();
+        for (const s of screens) {
+          const opt = document.createElement('option');
+          opt.value = s.name;
+          // `busy` is already relative to this address (see cast_info), so
+          // the screen we are bound to never reads busy to us.
+          const busyToUs = s.busy && s.name !== boundScreen;
+          opt.disabled = busyToUs;
+          opt.textContent = `${s.label} (${busyToUs ? 'belegt' : 'frei'})`;
+          select.append(opt);
+        }
+        select.value = boundScreen;
       }
-      select.value = boundScreen;
       const live = isSessionLive();
       select.disabled = live;
       el('switcherNote').hidden = !live;
@@ -370,7 +397,7 @@
       const multi = screens.length > 1;
       el('screenBar').hidden = !bound || !multi;
       if (bound && multi) {
-        el('screenLabel').textContent = `Sie senden an: ${screenLabel(boundScreen)}`;
+        el('screenLabel').textContent = `Sie senden an: ${labelFor(boundScreen)}`;
         el('switcherRow').hidden = false;
         renderSwitcher();
       }
@@ -384,7 +411,11 @@
       if (name === boundScreen || isSessionLive()) return;
       if (ticket) releaseReservation();
       else { dropReservation(); stopCountdown(); }
-      audio = null; // force a remount against the new screen's endpoint
+      // Force a remount against the new screen's endpoint. Only reachable
+      // once isSessionLive() is false, so nothing is playing here today --
+      // but AudioPanel.mount reuses the same root node, so drop it the same
+      // way stopAudio() does rather than just discarding the reference.
+      if (audio) { audio.stop(); audio = null; }
       boundScreen = name;
       screenGone = false;
       const url = new URL(location.href);
@@ -399,6 +430,9 @@
     }
 
     el('screenSelect').addEventListener('change', () => selectScreen(el('screenSelect').value));
+    // Catches up on whatever the poll skipped while this had focus -- see the
+    // comment in renderSwitcher.
+    el('screenSelect').addEventListener('blur', () => renderSwitcher());
 
     // --- reservation ------------------------------------------------------
 
@@ -1006,11 +1040,30 @@
         // `screens` and the UI it drives are refreshed here -- re-running the
         // auth-mode setup above on every tick would silently re-disable the
         // share buttons out from under a guest who already entered a code.
+        //
+        // Re-rendering is skipped when nothing changed -- see `screensKey` --
+        // rather than throttling the poll itself: `busy` changing promptly is
+        // the point, an unconditional rebuild every tick is not. Do not
+        // "fix" this by re-rendering only what's different; comparing the
+        // whole signature is the cheap version of the same guard
+        // `playlist.html` uses for the same reason (CLAUDE.md's "a page that
+        // polls must not re-render what it polls into").
         setInterval(() => {
           fetch('/api/cast/info')
             .then((res) => res.json())
             .then((polled) => {
-              screens = polled.screens || [];
+              const next = polled.screens || [];
+              if (screensKey(next) === screensKey(screens)) return;
+              screens = next;
+              // Deliberately no "your screen just went busy" notice here,
+              // unlike the initial-load check above: the guest only learns
+              // it when they tap share and get the server's own refusal
+              // ("Es überträgt bereits jemand."). That message is
+              // authoritative and arrives right when it matters; announcing
+              // it earlier from a poll would mean inventing status text here
+              // that could clobber whatever #status already shows (a code
+              // prompt, a warning) for a state that resolves itself the
+              // moment the other guest is done.
               renderScreenUi();
             })
             .catch(() => {});
