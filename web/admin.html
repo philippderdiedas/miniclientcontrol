@@ -53,6 +53,12 @@
        paragraphs with a blank line between each. */
     #status p { margin: .25rem 0; }
     #status .screen { color: #0b6b3a; }
+    /* One block per screen inside the cast card, same reasoning: a border
+       between them once there is more than one to tell apart. */
+    .castscreen { margin-bottom: .8rem; }
+    .castscreen:last-child { margin-bottom: 0; }
+    .castscreen p { margin: .25rem 0; }
+    .castscreen .screen { color: #0b6b3a; }
   </style>
 </head>
 <body>
@@ -71,16 +77,13 @@
   </div>
 
   <div class="card" id="castCard" hidden>
-    <p class="status" id="castStatus">Übertragung: –</p>
-    <p class="muted" id="castHint"></p>
-    <!-- A pairing code is created on request and lives 30 seconds, so this line
-         only exists while one does. Without it the person helping a guest by
-         phone is the one who cannot see the code on the display. -->
-    <p id="castPairing" hidden>
-      Code auf dem Display: <strong id="castPairingCode"></strong>
-      <span class="muted" id="castPairingLeft"></span>
-    </p>
-    <button id="castStop" hidden>Übertragung beenden</button>
+    <!-- Built and updated in web/admin.html's script: one block per declared
+         screen, each with its own status, hint, pairing line and Beenden
+         button. Built once per set of declared screens and updated in place
+         afterwards, never torn down on a poll -- a Beenden click landing
+         between a poll and its handler is the bug Task 10 fixed on the guest
+         page. -->
+    <div id="castScreens"></div>
 
     <hr />
     <p class="muted" id="castHardOff" hidden>
@@ -428,57 +431,137 @@
       }
     }
 
+    // Per-screen cast blocks: built once for the current set of declared
+    // screens, then only updated in place. Map<name, {statusText, hint,
+    // pairing, pairingCode, pairingLeft, stop}>.
+    let castScreenNodes = new Map();
+    let castScreenNames = null;
+
+    async function stopCast(display, hint, stop) {
+      stop.disabled = true;
+      try {
+        const res = await fetch(
+          `/api/displays/${encodeURIComponent(display.name)}/cast/session`,
+          { method: 'DELETE' },
+        );
+        if (!res.ok) {
+          const problem = await res.json().catch(() => ({}));
+          hint.textContent = problem.error || 'Beenden fehlgeschlagen.';
+        }
+      } catch (_) {
+        hint.textContent = 'Controller nicht erreichbar.';
+      }
+      stop.disabled = false;
+      refreshCast();
+    }
+
+    // With one declared screen the line carries no screen name, same
+    // convention as screenLine()'s single-screen case above.
+    function buildCastScreens(displays) {
+      const host = document.getElementById('castScreens');
+      host.replaceChildren();
+      const nodes = new Map();
+      const single = displays.length === 1;
+      for (const display of displays) {
+        const statusText = el('span');
+        const status = el('p', { class: 'status' },
+          single ? null : el('span', { class: 'screen', text: `${display.label || display.name}: ` }),
+          statusText);
+        const hint = el('p', { class: 'muted' });
+        const pairingCode = el('strong');
+        const pairingLeft = el('span', { class: 'muted' });
+        // A pairing code is created on request and lives 30 seconds, so this
+        // line only exists while one does. Without it the person helping a
+        // guest by phone is the one who cannot see the code on the display.
+        const pairing = el('p', { hidden: true },
+          document.createTextNode('Code auf dem Display: '), pairingCode,
+          document.createTextNode(' '), pairingLeft);
+        const stop = el('button', { hidden: true, text: 'Übertragung beenden' });
+        stop.addEventListener('click', () => stopCast(display, hint, stop));
+        host.append(el('div', { class: 'castscreen' }, status, hint, pairing, stop));
+        nodes.set(display.name, { statusText, hint, pairing, pairingCode, pairingLeft, stop });
+      }
+      castScreenNodes = nodes;
+    }
+
     // The cast card polls separately: it is the one thing on this page an
-    // operator may need to act on while a meeting is running.
+    // operator may need to act on while a meeting is running. Scoped per
+    // screen throughout -- the unscoped `/api/cast/state` answers `409` the
+    // moment a second display is declared, and that must not read as "nobody
+    // is casting" any more than it may for screenLine() above.
     async function refreshCast() {
       const card = document.getElementById('castCard');
-      const status = document.getElementById('castStatus');
-      const hint = document.getElementById('castHint');
-      const stop = document.getElementById('castStop');
       try {
-        const res = await fetch('/api/cast/state');
-        if (!res.ok) { card.hidden = true; return; }
-        const cast = await res.json();
+        const dpRes = await fetch('/api/displays');
+        if (!dpRes.ok) { card.hidden = true; return; }
+        const displays = (await dpRes.json()).filter((d) => d.declared);
+        if (!displays.length) { card.hidden = true; return; }
+
+        // Rebuilt only when the declared screens themselves change, never on
+        // an ordinary poll -- see the comment on buildCastScreens().
+        const names = displays.map((d) => d.name).join(',');
+        if (names !== castScreenNames) {
+          buildCastScreens(displays);
+          castScreenNames = names;
+        }
+
+        await Promise.all(displays.map(async (display) => {
+          const nodes = castScreenNodes.get(display.name);
+          if (!nodes) return;
+          let cast = null;
+          try {
+            const res = await fetch(`/api/cast/state?screen=${encodeURIComponent(display.name)}`);
+            if (res.ok) cast = await res.json();
+          } catch (_) { /* cast stays null, reported as "Status unbekannt" below */ }
+
+          if (!cast) {
+            nodes.statusText.textContent = 'Status unbekannt';
+            nodes.hint.textContent = '';
+            nodes.pairing.hidden = true;
+            nodes.stop.hidden = true;
+            return;
+          }
+
+          document.getElementById('castHardOff').hidden = !cast.hard_disabled;
+
+          nodes.pairing.hidden = !cast.pairing;
+          if (cast.pairing) {
+            nodes.pairingCode.textContent = cast.pairing.code;
+            nodes.pairingLeft.textContent = `— noch ${cast.pairing.expires_in} s`;
+          }
+
+          if (!cast.enabled || cast.hard_disabled) {
+            nodes.statusText.textContent = cast.hard_disabled
+              ? 'Übertragung: per Startparameter abgeschaltet'
+              : 'Übertragung: deaktiviert';
+            nodes.hint.textContent = '';
+            nodes.stop.hidden = true;
+            return;
+          }
+          if (!cast.active) {
+            nodes.statusText.textContent = 'Übertragung: bereit';
+            nodes.hint.textContent = `Sender-Seite: ${cast.sender_url} (Zugang: ${cast.auth})`;
+            nodes.stop.hidden = true;
+            return;
+          }
+          const since = cast.started_at
+            ? new Date(cast.started_at).toLocaleTimeString(uiLocale || undefined)
+            : '?';
+          const page = cast.showing && cast.showing.page;
+          if (page) {
+            // textContent throughout: a guest supplied this address.
+            nodes.statusText.textContent = `▶ Gast zeigt eine Webseite seit ${since}`;
+            nodes.hint.textContent = `Auf dem Bildschirm: ${page}`;
+          } else {
+            nodes.statusText.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
+            nodes.hint.textContent = cast.display_connected
+              ? 'Display ist verbunden. Playlist pausiert.'
+              : 'Warte auf das Display…';
+          }
+          nodes.stop.hidden = false;
+        }));
+
         card.hidden = false;
-        document.getElementById('castHardOff').hidden = !cast.hard_disabled;
-
-        const pairingRow = document.getElementById('castPairing');
-        pairingRow.hidden = !cast.pairing;
-        if (cast.pairing) {
-          document.getElementById('castPairingCode').textContent = cast.pairing.code;
-          document.getElementById('castPairingLeft').textContent =
-            `— noch ${cast.pairing.expires_in} s`;
-        }
-
-        if (!cast.enabled || cast.hard_disabled) {
-          status.textContent = cast.hard_disabled
-            ? 'Übertragung: per Startparameter abgeschaltet'
-            : 'Übertragung: deaktiviert';
-          hint.textContent = '';
-          stop.hidden = true;
-          return;
-        }
-        if (!cast.active) {
-          status.textContent = 'Übertragung: bereit';
-          hint.textContent = `Sender-Seite: ${cast.sender_url} (Zugang: ${cast.auth})`;
-          stop.hidden = true;
-          return;
-        }
-        const since = cast.started_at
-          ? new Date(cast.started_at).toLocaleTimeString(uiLocale || undefined)
-          : '?';
-        const page = cast.showing && cast.showing.page;
-        if (page) {
-          // textContent throughout: a guest supplied this address.
-          status.textContent = `▶ Gast zeigt eine Webseite seit ${since}`;
-          hint.textContent = `Auf dem Bildschirm: ${page}`;
-        } else {
-          status.textContent = `▶ Übertragung aktiv von ${cast.sender || 'unbekannt'} seit ${since}`;
-          hint.textContent = cast.display_connected
-            ? 'Display ist verbunden. Playlist pausiert.'
-            : 'Warte auf das Display…';
-        }
-        stop.hidden = false;
       } catch (_) {
         card.hidden = true;
       }
