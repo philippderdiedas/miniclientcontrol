@@ -53,7 +53,7 @@ touching `cast/`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/`,
 **A test about a specific screen must name a non-primary one.** `primary()` is
 `displays[0]`, so a case that exercises the first declared screen passes
 identically with the real resolution replaced by `state.primary()` — it asserts
-nothing about resolving a screen. Four cases shipped that way on the per-display
+nothing about resolving a screen. Five cases shipped that way on the per-display
 casting branch, each caught in review and not by the suite.
 
 When testing casting locally, share a single *window* rather than the whole

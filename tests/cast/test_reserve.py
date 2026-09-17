@@ -82,8 +82,8 @@ async def main():
     print("\n[18b] busy is judged per screen, not once for the whole venue")
     # [18] already proved a holder is not "busy" to itself, but on a single
     # default display that would pass identically even if `busy` were computed
-    # once for the venue and just repeated into every entry -- the mechanical
-    # patch that followed Task 4 did exactly that, indexing "screens"[0] and
+    # once for the venue and just repeated into every entry -- a mechanical,
+    # per-screen-unaware patch could do exactly that, indexing "screens"[0] and
     # never noticing the array could hold more than one truth. Two declared
     # screens, only one of them reserved, is what actually tells them apart:
     # the reserved screen has to flip with the asking address while the

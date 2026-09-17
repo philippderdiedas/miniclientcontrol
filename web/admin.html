@@ -80,9 +80,10 @@
     <!-- Built and updated in web/admin.html's script: one block per declared
          screen, each with its own status, hint, pairing line and Beenden
          button. Built once per set of declared screens and updated in place
-         afterwards, never torn down on a poll -- a Beenden click landing
-         between a poll and its handler is the bug Task 10 fixed on the guest
-         page. -->
+         afterwards, never torn down on a poll -- a re-render here would drop
+         a Beenden click landing between a poll and its handler, the same
+         shape of bug this project has already fixed once on the guest
+         page: "A page that polls must not re-render what it polls into." -->
     <div id="castScreens"></div>
 
     <hr />
