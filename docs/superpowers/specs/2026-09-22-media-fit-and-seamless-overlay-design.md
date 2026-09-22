@@ -86,7 +86,9 @@ The page is a black-by-default body with one element in it:
 
 No control bar is the whole point, and `--autoplay-policy=no-user-gesture-required`
 is already in `chromium::BASE_FLAGS`, so the video starts on its own and keeps
-its sound. A video that is on a `keep_loaded` tab plays in the background exactly
+its sound. A browser started outside the controller may lack the flag, so the
+page tries unmuted first and falls back to muted only on `NotAllowedError` — a
+silent video beats a black screen. A video that is on a `keep_loaded` tab plays in the background exactly
 as the media document does today.
 
 ### The five fit values
@@ -128,8 +130,9 @@ ALTER TABLE playlist_items ADD COLUMN fit_background TEXT DEFAULT '#000000';
 ```
 
 Both are read as `COALESCE(p.fit_mode, 'contain')` and
-`COALESCE(p.fit_background, '#000000')` in `browser.rs`'s two playlist queries and
-in `handlers.rs`'s. These are `TEXT`, not JSON, so a `NULL` decodes into a
+`COALESCE(p.fit_background, '#000000')` in the loop's playlist query in
+`browser.rs` and in `get_playlist` in `handlers.rs` — the only two queries that
+decode a `PlaylistItemWithAsset`. These are `TEXT`, not JSON, so a `NULL` decodes into a
 `String` field as a failure of the whole query exactly as the JSON columns do —
 and both call sites swallow that error into an empty playlist, which blanks the
 screen. The `COALESCE` is not defensive decoration; it is the rule that column
@@ -145,20 +148,33 @@ anyway, so it is done where the value is used.
 yields `Contain` for anything it does not recognise.
 
 **Validation lives in the handlers**, not in the viewer: `fit_background` must
-match `#rrggbb` or the write is a `400` with `{ "error": … }`. Unlike the values
+pass `settings::is_hex_colour` — `#rgb`, `#rrggbb` or `#rrggbbaa`, the same check
+the overlay's colours use, so the two colour fields on one card accept the same
+thing — or the write is a `400` with `{ "error": … }`, checked before anything
+else in the request is written. Unlike the values
 that reach the browser, this one is typed by an operator who is looking at the
 page and can be told. (The viewer *also* falls back to black, because a row
 written by an older binary or edited by hand must not paint an undefined colour.)
 
 `POST /api/playlist` and `PUT /api/playlist/{id}` accept both fields as optional.
+`fit_mode` arrives as a string and goes through `FitMode::from_value`, not
+through serde's enum decoding: an unknown name must fall back, and a serde
+failure would refuse the whole request instead.
 Neither is clearable — there is always a fit and always a background — so plain
 `Option<T>` is right and `double_option` is not.
 
-`OverrideItem` gains the same two fields as `Option`, defaulted in
-`set_override_of` the way `scroll_config` already is
-(`payload.fit_mode.unwrap_or_default()`). Without them an asset override would
-reach the viewer with no fit at all; with them the JSON stays backward compatible
-for every caller that does not send them.
+`OverrideItem` gains the same two fields — not as `Option`, but defaulted
+(`#[serde(default)]`) — filled in `set_override_of` from the request the way
+`scroll_config` already is. Without them an asset override would reach the viewer
+with no fit at all; with them the JSON stays backward compatible for every caller
+that does not send them. Defaulted rather than optional because
+`run_override_loop` compares two overrides to decide whether to re-navigate, and
+`None` and `Some(Contain)` would draw the same thing while comparing unequal —
+the cast override, which never has an asset, gets the defaults.
+
+**`/media_viewer.html` joins `is_display_path`.** The display browser presents no
+credentials, so a page it loads that is missing from that list works on a device
+without basic auth and is a `401` on every screen the moment it is switched on.
 
 ## UI
 
@@ -183,12 +199,9 @@ configured — is a legitimate "fit to width" and says nothing.
 
 ## Overlay without a gap
 
-`web/overlay.js` gains one thing, at the end of the IIFE, right after
-`globalThis.__ov` is assigned:
-
-```js
-if (globalThis.__ovSeed) globalThis.__ov.apply(globalThis.__ovSeed);
-```
+`web/overlay.js` gains a seed step at the end of the IIFE, right after
+`globalThis.__ov` is assigned: if `globalThis.__ovSeed` is set, apply it —
+unless the controller has already applied a payload of its own in this document.
 
 This is the same mechanism as `__ovSuspend`, for the same reason: a value the
 page can carry *before* the runtime runs, because the runtime's own injection is
@@ -202,26 +215,42 @@ keeps it attached as the parser builds the page underneath it.
 which can be before the parser has produced `<html>` — and `appendChild` on a
 null root throws, while `MutationObserver.observe(null)` throws too, which would
 take the whole runtime down before `__ov` is usable. So the seed is applied
-immediately when `document.documentElement` is there and otherwise deferred to
-the first `readystatechange`. `__ov.apply` called by the controller later is
+immediately when `document.documentElement` is there and otherwise the moment it
+appears, via a `MutationObserver` on the `document` node itself (which always
+exists) — not on `readystatechange`, which fires only once parsing is done and
+can come after the first paint. `__ov.apply` called by the controller later is
 unaffected; by then there is always a document.
+
+**The seed applies in the top frame only.** The registered script runs in every
+frame, iframes included, and a seed honoured there would draw a second badge in
+the middle of every dashboard that embeds something. `window.top === window` is
+the guard; it does not throw across origins.
+
+`__ov.state()` gains two read-outs, both for the tests: `seeds`, how many seeded
+registrations ran in this document (a leaked registration shows up as more than
+one), and `seededAt`, when the seed was applied in milliseconds since the
+document started, or `null`.
 
 `browser.rs` changes in three ways.
 
-**The registered script carries the payload.** `register_overlay_runtime_script`
-becomes `seed_overlay_runtime(page, payload)`, registering
-`globalThis.__ovSeed = <json>;` followed by `overlay_runtime_script()` via
-`Page.addScriptToEvaluateOnNewDocument`.
+**The registered script carries the payload.** `seed_overlay_runtime(page, seed,
+payload)` registers `globalThis.__ovSeeds++; globalThis.__ovSeed = <json>;`
+followed by `overlay_runtime_script()` via `Page.addScriptToEvaluateOnNewDocument`.
 
 **The previous registration is removed first.** The add returns a
 `ScriptIdentifier`; it is kept per page and passed to
 `Page.removeScriptToEvaluateOnNewDocument` before the next add. Skipping this is
 not merely untidy: a registration per item change accumulates in the target for
 as long as the controller runs, and every one of them executes on every
-navigation. The identifiers live in a `HashMap<TargetId, ScriptIdentifier>` held
-by the loop, so the dynamic page, the idle page and each `keep_loaded` tab each
-carry their own; a tab closed by `reconcile_keep_loaded_tabs` drops its entry with
-the tab.
+navigation. The identifier lives in an `OverlaySeed` held by the loop per CDP
+connection — a registration belongs to the session that made it, so a reconnect
+starts from nothing — together with the payload it carries, so re-seeding an
+unchanged payload is skipped and calling it on every pass costs nothing.
+
+**Only the control page is seeded.** The playlist, the idle screen and every
+override all run on that one page. `keep_loaded` tabs keep the bare runtime
+registration: they are brought to front rather than navigated, so their document
+and the badge in it persist between showings and there is no gap to close.
 
 **`apply_overlay` splits into three.** Building the payload
 (`settings::overlay_payload`, unchanged and still the only place that builds one),
@@ -243,43 +272,52 @@ pages the behaviour is exactly what it is today, blink included. That is the
 honest limit of this fix and it is not worth hiding.
 
 `overlay_signal` handlers — the per-item `select!`, the idle-screen wait and
-`run_override_loop` — rebuild the payload, re-seed and re-apply, so the seed for
-the *next* navigation is never a stale copy of an edited overlay. All three must
-do it, for the reason they all already handle the signal.
+`run_override_loop` — rebuild the payload, re-seed and re-apply, so the seed is
+never a stale copy of an edited overlay. That matters beyond the loop's own next
+navigation: a page that navigates itself (a dashboard on a meta refresh) comes
+back with whatever is registered, and the controller never re-applies to it. All
+three must do it, for the reason they all already handle the signal.
 
-The idle page, the override page and newly created `keep_loaded` tabs are seeded
-at creation with the payload that applies to them, instead of registering the
-bare runtime.
+The idle page and the override page are seeded right before their navigation,
+exactly like a playlist item.
 
 ## Testing
 
 **Rust, `#[cfg(test)]`:**
 
 - `FitMode` parses its five names, and anything else yields `Contain`.
-- `playlist_target_url` routes `image/png` and `video/mp4` to
+- `asset_target_url` — the routing half of `playlist_target_url`, split out so
+  it needs no `AppState` — sends `image/png` and `video/mp4` to
   `media_viewer.html` with the fit and background in the query, `application/pdf`
-  to `pdf_viewer.html`, and an unknown mimetype to `/uploads/`.
-- The `#rrggbb` check accepts `#00ff00` and rejects `red`, `#0f0`, `#00ff0`,
-  `rgb(0,0,0)` and a string with a `;` in it.
+  to `pdf_viewer.html`, and anything else to `/uploads/`; and the media viewer is
+  not mistaken for the PDF viewer by `is_internal_pdf_viewer_url`.
+- `is_display_path("/media_viewer.html")`.
+- A pre-fit database gets `contain` and `#000000` on its existing rows.
 
 **Python, `tests/cast/`:**
 
-- `test_overlay.py`: navigate a display to a second page and query
-  `__ov.state()` **without** waiting out the readiness waits — `attached` must
-  already be true. This is the regression; against today's code it fails.
-- `test_overlay.py`: the seed survives a document whose root element is not
-  there yet — a page whose response is slow to produce any markup still ends up
-  with `__ov.state().installed` true and the badge attached, rather than a
-  runtime that threw on the way in.
-- `test_overlay.py`: a second seeding must not leave two registered scripts —
-  after several item changes, `__ov.state().boxes` stays at the expected count
-  and the badge is not duplicated.
-- `test_browser.py` (the suite that already drives a real browser): a video item
-  yields `document.querySelector('video').controls === false`, and an image item
-  with `fit=cover` yields `getComputedStyle(img).objectFit === 'cover'`.
+- `test_overlay.py` `[48]`: two items taking turns every two seconds; every
+  document observed must report a `seededAt` under 500 ms — the controller's own
+  apply cannot come before the 700 ms drain plus the readiness wait, so only the
+  seed can pass this. Every registration runs at document creation, before
+  `<html>`, so the same case covers the missing-root path, and it asserts
+  `installed` to prove nothing threw. It also asserts `seeds == 1`: several item
+  changes must not leave several registrations. This is the regression; against
+  today's code it fails.
+- `test_overlay.py` `[48b]`: a page with a `srcdoc` iframe has one badge on top
+  and none inside the iframe.
+- `test_media.py` (new — own Chrome on CDP 9252, controller on 3051): the API
+  round trip, fallback and refusal (`[100]`–`[102]`); then in a real browser an
+  image item with `cover` on green is drawn by the media viewer with
+  `objectFit: cover` and a green body and no overflow, the same item switched to
+  `scroll` makes the document taller than the screen, and a video override is a
+  `<video>` without controls, looping and autoplaying, with the override's own
+  fit (`[103]`–`[105]`).
 
-**A test about a specific screen names a non-primary one**, per the standing rule
-— the overlay cases run against a second declared display, not `displays[0]`.
+These run against the single implicit display. The standing rule that a test
+about a specific screen names a non-primary one is about *resolving* a screen,
+and nothing here resolves one differently than before: the payload still comes
+from `overlay_payload` with the display the loop was given.
 
 ## Not in scope
 
