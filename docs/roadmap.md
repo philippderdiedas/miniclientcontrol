@@ -30,8 +30,10 @@ playlist is the same schedule typed N times. It also fits the model that exists:
 "a display points at a playlist" becomes "a display points at a playlist, per
 time slot".
 
-Still open: how overlapping slots resolve (first match or most specific), and
-whether a slot change interrupts the item on screen or waits for it to end.
+Also decided: list order is priority and the UI warns on an overlap, a window
+boundary switches immediately (as a manual reassignment does), and windows are
+structured rather than cron. Designed in
+[the dayparting spec](superpowers/specs/2026-09-23-dayparting-design.md).
 
 ### Video length from the file
 
