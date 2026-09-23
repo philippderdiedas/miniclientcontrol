@@ -126,8 +126,10 @@ nothing to count, and re-checked when the scroll mode or the source changes.
   duration, asset duration and neither.
 - Python with a real Chrome: a scrolling page with `count: 2` advances after the
   second bottom and not the first; a video with `count: 2` after the second end;
-  a paged PDF after its last page; a page that blocks the runtime by CSP
-  advances after the stall timeout (run with a short one); a page that fits the
+  a paged PDF after its last page; a page whose runtime is gone (the test
+  deletes `__advance`; the re-evaluation after navigation gets past a CSP, so a
+  CSP is not a reliable way to provoke this) advances after the stall timeout,
+  run with a short one; a page that fits the
   screen respects `MIN_PASS`; `duration` in a `PUT` is a `422`.
 
 ## Not in this
