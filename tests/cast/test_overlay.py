@@ -916,13 +916,23 @@ async def browser_flow():
                 raw = await live.eval("""(() => JSON.stringify({
                     href: location.href,
                     origin: performance.timeOrigin,
+                    root: !!document.documentElement,
                     st: globalThis.__ov ? globalThis.__ov.state() : null,
                 }))()""")
                 row = json.loads(raw)
             except Exception:
                 await asyncio.sleep(0.05)
                 continue  # the document went away under the evaluate
-            if "seed-" in row["href"] and row["origin"] not in seen and row["st"]:
+            # Only once the document has its root element. The seed waits for
+            # `<html>` on purpose -- appending to a null root throws -- so a probe
+            # that lands in the first milliseconds, while the parser has produced
+            # nothing yet, reads `seededAt: null` for a badge that is up a few
+            # milliseconds later. That was measured: a document seen at 12 ms
+            # with no root and no seed read `seededAt: 12` at 23 ms, and this
+            # case failed on it now and then. The first *rooted* look is the
+            # earliest moment the contract speaks about.
+            if ("seed-" in row["href"] and row["origin"] not in seen
+                    and row["st"] and row["root"]):
                 seen[row["origin"]] = row["st"]
             await asyncio.sleep(0.05)
 
