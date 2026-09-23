@@ -11,6 +11,29 @@ and leaves this file when it ships.
 
 ## Next
 
+### An item advances when its content ends
+
+Besides a fixed time, an item may move on when its content is done: a video has
+ended, a page is scrolled to the bottom, a PDF shows its last page. One mode
+"end of content" whose meaning follows the content, not a list of trigger
+types, and always with the duration as an upper bound, so a page that never
+reports an end cannot hold the screen. In progress.
+
+### Who may cast
+
+Now that there are accounts, casting can ask *who*, not only *whether in the
+room*. Per mode (cast a screen, show a page): off, anyone, or signed-in accounts
+only — a page puts an arbitrary URL on the screen, so it is the likelier one to
+restrict. The presence check (`cast_auth`: none, code, pairing) stays
+independent: a signed-in account in the next room should still not take over the
+foyer. Webhooks and the log can then name who cast.
+
+Still open: any role, or a minimal casting-only role; how the guest page signs
+in (the login page, then back). Technically the cast routes are exempt from auth
+on purpose, so the middleware must *recognise* a session there without
+*requiring* one — that is where a hole is easy to build. Pairs with OpenID
+Connect below.
+
 ### Single sign-on with OpenID Connect
 
 Signing in through the venue's identity provider instead of a local password, on
