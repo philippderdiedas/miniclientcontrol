@@ -1074,6 +1074,8 @@ async fn set_override_of(
         local_path,
         mimetype,
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
+        fit_mode: crate::models::FitMode::default(),
+        fit_background: crate::models::DEFAULT_FIT_BACKGROUND.to_string(),
     };
 
     {

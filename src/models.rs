@@ -229,6 +229,55 @@ impl Default for ScrollMode {
     }
 }
 
+/// How an image or video asset sits on the screen. Stored per playlist item by
+/// name; `web/media_viewer.html` is what turns it into a layout.
+///
+/// Four of these are CSS `object-fit`. `Scroll` is not: it draws the image at
+/// full width and natural height and lets the document scroll, which is what
+/// gives the scroll runtime something to move.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FitMode {
+    #[default]
+    Contain,
+    Cover,
+    Fill,
+    None,
+    Scroll,
+}
+
+impl FitMode {
+    /// Total on purpose. The value ends up on a screen nobody is standing in
+    /// front of, so an unknown one falls back rather than failing -- the same
+    /// rule the overlay applies to an unknown corner.
+    pub fn from_value(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "cover" => Self::Cover,
+            "fill" => Self::Fill,
+            "none" => Self::None,
+            "scroll" => Self::Scroll,
+            _ => Self::Contain,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contain => "contain",
+            Self::Cover => "cover",
+            Self::Fill => "fill",
+            Self::None => "none",
+            Self::Scroll => "scroll",
+        }
+    }
+}
+
+/// What fills the bars around a contained asset when its item names nothing.
+pub const DEFAULT_FIT_BACKGROUND: &str = "#000000";
+
+fn default_fit_background() -> String {
+    DEFAULT_FIT_BACKGROUND.to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OverrideItem {
     pub asset_id: Option<i64>,
@@ -236,6 +285,14 @@ pub struct OverrideItem {
     pub local_path: Option<String>,
     pub mimetype: Option<String>,
     pub scroll_config: ScrollMode,
+    /// How an image or video override sits on the screen. Defaulted rather than
+    /// optional, so two overrides compare equal exactly when they would draw the
+    /// same thing -- `run_override_loop` relies on that comparison to not
+    /// re-navigate a live cast.
+    #[serde(default)]
+    pub fit_mode: FitMode,
+    #[serde(default = "default_fit_background")]
+    pub fit_background: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -305,6 +362,16 @@ pub struct PlaylistItemWithAsset {
     /// whole item duration out of date.
     #[sqlx(default)]
     pub overlay_config: sqlx::types::Json<Option<crate::settings::ItemOverlay>>,
+
+    /// `FitMode` by name. A `String` rather than the enum, which would need a
+    /// `sqlx::Type` impl to decode; parsed with `FitMode::from_value` where it is
+    /// used, and that parse is total anyway.
+    #[sqlx(default)]
+    pub fit_mode: String,
+
+    /// What fills the bars around a contained asset.
+    #[sqlx(default)]
+    pub fit_background: String,
 
     // Asset fields
     pub local_path: Option<String>,
@@ -482,5 +549,22 @@ mod tests {
         assert_eq!(display.name, "foyer");
         assert!(display.current_item_id.try_lock().unwrap().is_none());
         assert!(display.override_item.try_lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn fit_mode_parses_its_five_names_and_falls_back_on_anything_else() {
+        use super::FitMode;
+        assert_eq!(FitMode::from_value("contain"), FitMode::Contain);
+        assert_eq!(FitMode::from_value("cover"), FitMode::Cover);
+        assert_eq!(FitMode::from_value("fill"), FitMode::Fill);
+        assert_eq!(FitMode::from_value("none"), FitMode::None);
+        assert_eq!(FitMode::from_value("scroll"), FitMode::Scroll);
+        assert_eq!(FitMode::from_value(" COVER "), FitMode::Cover);
+        for junk in ["", "stretch", "object-fit: cover", "Scroll;"] {
+            assert_eq!(FitMode::from_value(junk), FitMode::Contain, "{junk:?}");
+        }
+        for mode in [FitMode::Contain, FitMode::Cover, FitMode::Fill, FitMode::None, FitMode::Scroll] {
+            assert_eq!(FitMode::from_value(mode.as_str()), mode);
+        }
     }
 }

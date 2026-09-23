@@ -101,6 +101,34 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             .await;
     }
 
+    // How an image or video asset sits on the screen, and what fills the bars
+    // around it. Both carry a default so the rows an older binary wrote get one
+    // too -- and every read COALESCEs anyway, because a NULL in a String field
+    // fails the whole playlist query and blanks the screen.
+    let has_fit_mode: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='fit_mode'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+
+    if !has_fit_mode {
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN fit_mode TEXT DEFAULT 'contain'")
+            .execute(pool)
+            .await;
+    }
+
+    let has_fit_background: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='fit_background'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+
+    if !has_fit_background {
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN fit_background TEXT DEFAULT '#000000'")
+            .execute(pool)
+            .await;
+    }
+
     // 7. Runtime settings the operator can change without a restart.
     // Key/value rather than columns: these are a handful of unrelated scalars,
     // and adding one should not need another ALTER TABLE probe.
@@ -449,6 +477,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(name, "Foyer");
+    }
+
+    #[tokio::test]
+    async fn an_item_from_before_fit_existed_gets_the_defaults() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:?cache=shared").await.unwrap();
+        // The shape a device had before the fit columns.
+        sqlx::query(
+            "CREATE TABLE playlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER, url TEXT,
+                play_order INTEGER NOT NULL, duration INTEGER, is_enabled BOOLEAN DEFAULT 1,
+                start_date TEXT, end_date TEXT, keep_loaded BOOLEAN DEFAULT 0,
+                scroll_config TEXT DEFAULT '{\"type\":\"None\",\"options\":null}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO playlist_items (url, play_order) VALUES ('https://a.test', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        let (fit, background): (String, String) =
+            sqlx::query_as("SELECT fit_mode, fit_background FROM playlist_items")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(fit, "contain");
+        assert_eq!(background, "#000000");
     }
 
     #[tokio::test]

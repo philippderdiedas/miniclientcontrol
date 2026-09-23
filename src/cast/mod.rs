@@ -446,6 +446,8 @@ async fn activate_display(
             local_path: None,
             mimetype: None,
             scroll_config: scroll,
+            fit_mode: crate::models::FitMode::default(),
+            fit_background: crate::models::DEFAULT_FIT_BACKGROUND.to_string(),
         });
     }
     session.showing = showing.clone();
