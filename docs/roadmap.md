@@ -11,18 +11,6 @@ and leaves this file when it ships.
 
 ## Next
 
-### Video length from the file
-
-An upload gets a default duration of 10 s, whatever it is. A video should get its
-real length as the asset duration, read when it is uploaded (`ffprobe`, or the
-browser's `loadedmetadata` in the admin page, which needs no new dependency on the
-device).
-
-Decided: the browser measures at upload, the add form prefills an item's duration
-from it, and the video starts together with the item's clock — which makes "end
-with the video" fall out of "duration = length". Designed in
-[the video-length spec](superpowers/specs/2026-09-23-video-length-design.md).
-
 ### Asset preview on hover
 
 Hovering an asset's name or id in the admin pages shows the picture in a hint box:

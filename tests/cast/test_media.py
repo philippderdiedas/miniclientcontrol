@@ -15,6 +15,8 @@ SP = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(SP, "..", "..", "target", "debug", "miniclientcontrol")
 CHROME = "/usr/bin/google-chrome-stable"
 HTTP, TLS, CDP = 3051, 3494, 9252
+# The operator pages' own browser, case [111].
+ADMIN_CDP = 9253
 
 # One transparent pixel. Enough for every case here: `scroll` draws it at full
 # width, so a 1x1 image becomes 1280x1280 on a 1280x720 window and the document
@@ -70,6 +72,33 @@ def upload(name, data, mimetype, port=None):
         json.load(res)
     rows = http("GET", "/api/assets", port=port)[1]
     return next(row["id"] for row in rows if row["filename"] == name)
+
+
+def upload_parts(parts, port=None):
+    """One multipart POST to /api/assets with parts in the order given:
+    ("duration", "37.8") for a text field, ("file", name, data, mimetype) for a
+    file. Returns {filename: asset} for the files in it."""
+    port = port or 3021
+    boundary = "----mcc" + uuid.uuid4().hex
+    body = b""
+    for part in parts:
+        if part[0] == "duration":
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"duration\"\r\n\r\n"
+                     f"{part[1]}\r\n").encode()
+        else:
+            _, name, data, mimetype = part
+            body += (f"--{boundary}\r\n"
+                     f"Content-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
+                     f"Content-Type: {mimetype}\r\n\r\n").encode() + data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/assets", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        json.load(res)
+    names = {p[1] for p in parts if p[0] == "file"}
+    return {row["filename"]: row for row in http("GET", "/api/assets", port=port)[1]
+            if row["filename"] in names}
 
 
 def a_playlist(port=None):
@@ -158,6 +187,27 @@ def api_flow():
         check("a move carrying a fit edit is refused like any other combined edit",
               status == 400, status)
 
+        print("\n[110] an upload carries the length measured in the browser")
+        stored = upload_parts([
+            ("duration", "37.8"), ("file", "clip-a.mp4", b"a", "video/mp4"),
+            ("duration", "5"), ("file", "clip-b.mp4", b"b", "video/mp4"),
+            ("file", "clip-c.mp4", b"c", "video/mp4"),
+            ("duration", ""), ("file", "poster-d.png", PNG, "image/png"),
+            ("duration", "abc"), ("file", "clip-e.mp4", b"e", "video/mp4"),
+        ])
+        check("a length is rounded down", stored["clip-a.mp4"]["duration"] == 37, stored["clip-a.mp4"])
+        check("a second field applies to the file after it",
+              stored["clip-b.mp4"]["duration"] == 5, stored["clip-b.mp4"])
+        check("and keeps applying until the next field",
+              stored["clip-c.mp4"]["duration"] == 5, stored["clip-c.mp4"])
+        check("an empty field resets to the default", stored["poster-d.png"]["duration"] == 10,
+              stored["poster-d.png"])
+        check("nonsense is the default, and the upload still succeeds",
+              stored["clip-e.mp4"]["duration"] == 10, stored["clip-e.mp4"])
+        stored = upload_parts([("file", "clip-f.mp4", b"f", "video/mp4")])
+        check("no field at all is the default", stored["clip-f.mp4"]["duration"] == 10,
+              stored["clip-f.mp4"])
+
 
 def spawn(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -212,6 +262,43 @@ PDF = """(() => {
     background: getComputedStyle(document.body).backgroundColor,
     scrollHeight: root.scrollHeight,
   });
+})()"""
+
+
+RECORD = """(async () => {
+  // A real, playable WebM of about three seconds, recorded in this page from an
+  // animated canvas -- no fixture file and no ffmpeg. MediaRecorder writes no
+  // duration into the header, which is exactly the case the page must handle.
+  const canvas = document.createElement('canvas');
+  canvas.width = 160; canvas.height = 90;
+  const ctx = canvas.getContext('2d');
+  // Frames requested by hand rather than at a frame rate: a tab that is not in
+  // front has its timers and paints throttled, and a stream that waits for
+  // paints records nothing (a 524-byte file with a header and no frames).
+  const stream = canvas.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  let frame = 0;
+  const paint = setInterval(() => {
+    ctx.fillStyle = `hsl(${(frame++ * 12) % 360}, 80%, 50%)`;
+    ctx.fillRect(0, 0, 160, 90);
+    track.requestFrame();
+  }, 40);
+  const recorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+  const chunks = [];
+  recorder.ondataavailable = (e) => chunks.push(e.data);
+  const stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+  recorder.start(200);
+  await new Promise((resolve) => setTimeout(resolve, 3200));
+  recorder.stop();
+  await stopped;
+  clearInterval(paint);
+  const file = new File(chunks, 'recorded.webm', { type: 'video/webm' });
+  const input = document.getElementById('fileInput');
+  const transfer = new DataTransfer();
+  transfer.items.add(file);
+  input.files = transfer.files;
+  document.getElementById('uploadBtn').click();
+  return file.size;
 })()"""
 
 
@@ -323,7 +410,10 @@ async def browser_flow():
         clip = await on_media(page, lambda m: m["tag"] == "video")
         check("it is a <video> on our page", clip and clip["tag"] == "video", clip)
         check("without controls", clip and clip["controls"] is False, clip)
-        check("looping and autoplaying", clip and clip["loop"] and clip["autoplay"], clip)
+        # Looping, but not `autoplay`: the video waits for the controller to
+        # start it with the item's clock (case [112]).
+        check("looping, and held for the controller rather than autoplaying",
+              clip and clip["loop"] and not clip["autoplay"], clip)
         check("and the override's own fit", clip and clip["objectFit"] == "fill", clip)
 
         print("\n[106] a PDF with `contain` is one screen per page")
@@ -381,6 +471,89 @@ async def browser_flow():
         check("nor its token", "s3cr3t-t0ken" not in written,
               [line[:200] for line in written.splitlines() if "s3cr3t" in line][:3])
 
+    print("\n[111] the upload page measures a video and the length is stored")
+    # A browser of its own for the operator's pages, not a second tab in the
+    # display's: the control loop brings its page to the front on every item, and
+    # Chrome defers loading media in a tab that is not in front -- the measuring
+    # timed out there and every upload got the default. An operator uploading is
+    # looking at the page, which is what this browser models.
+    shutil.rmtree(f"{SP}/media-admin", ignore_errors=True)
+    spawn([CHROME, "--headless=new", f"--remote-debugging-port={ADMIN_CDP}",
+           f"--user-data-dir={SP}/media-admin", "--no-first-run", "--no-sandbox",
+           "--disable-gpu", "about:blank"])
+    check("admin chrome up", wait_for(lambda: cdp.targets(ADMIN_CDP)) is not None)
+    admin_ws, _ = cdp.page_ws(ADMIN_CDP)
+    async with cdp.Session(admin_ws) as admin:
+        await admin.call("Page.navigate", {"url": f"http://127.0.0.1:{HTTP}/assets.html"})
+        await asyncio.sleep(1.5)
+        size = await admin.eval(RECORD, timeout=30)
+        check("a video was recorded in the page", (size or 0) > 1000, size)
+        recorded = wait_for(lambda: next((a for a in http("GET", "/api/assets", port=HTTP)[1]
+                                          if a["filename"] == "recorded.webm"), None), 20)
+        check("the recording was uploaded", recorded is not None)
+        check("with its measured length, not the default",
+              recorded and recorded["duration"] in (2, 3), recorded)
+
+        print("\n[111b] an existing video can be measured again")
+        http("PUT", f"/api/assets/{recorded['id']}", {"duration": 10}, port=HTTP)
+        await admin.call("Page.reload", {})
+        await asyncio.sleep(1.5)
+        clicked = await admin.eval(f"""(() => {{
+            const row = [...document.querySelectorAll('#assetsBody tr')]
+              .find((tr) => tr.firstChild && tr.firstChild.textContent === '{recorded['id']}');
+            const button = row && [...row.querySelectorAll('button')]
+              .find((b) => b.textContent === 'Länge ermitteln');
+            if (!button) return false;
+            button.click();
+            return true;
+        }})()""")
+        check("a video row has the button", clicked is True, clicked)
+        remeasured = wait_for(lambda: (lambda d: d if d != 10 else None)(
+            next(a for a in http("GET", "/api/assets", port=HTTP)[1]
+                 if a["id"] == recorded["id"])["duration"]), 20)
+        check("and it writes the length back", remeasured in (2, 3), remeasured)
+
+        print("\n[111c] picking the asset in the add form fills in its length")
+        await admin.call("Page.navigate", {"url": f"http://127.0.0.1:{HTTP}/playlist.html"})
+        await asyncio.sleep(2)
+        filled = await admin.eval(f"""(() => {{
+            const pick = document.getElementById('addAsset');
+            pick.value = '{recorded['id']}';
+            pick.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return document.getElementById('addDuration').value;
+        }})()""")
+        check("Dauer shows the asset's length", filled in ("2", "3"), filled)
+
+    print("\n[112] a video item starts with the item's clock, not at load")
+    playlist = a_playlist(port=HTTP)
+    http("POST", "/api/playlist", {"asset_id": recorded["id"], "playlist_id": playlist,
+                                   "duration": 30}, port=HTTP)
+    video_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
+    http("POST", "/api/control/current", {"item_id": video_item}, port=HTTP)
+    ws_url, _ = cdp.page_ws(CDP)
+    async with cdp.Session(ws_url) as page:
+        state = None
+        for _ in range(100):
+            try:
+                state = json.loads(await page.eval(
+                    "JSON.stringify(globalThis.__media ? globalThis.__media.state() : null)"))
+                if state and state.get("kind") == "video" and state.get("startedBy"):
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+        check("the controller started it", state and state.get("startedBy") == "controller", state)
+        # Past the target drain and the readiness wait: a video that started on
+        # load would report a few hundred milliseconds here.
+        check("well after the page loaded, where the item's clock starts",
+              state and (state.get("startedAt") or 0) > 1500, state)
+        playing = json.loads(await page.eval("""JSON.stringify((() => {
+            const v = document.getElementById('media');
+            return { paused: v.paused, t: v.currentTime, controls: v.controls };
+        })())"""))
+        check("and it is playing from near the beginning", not playing["paused"] and playing["t"] < 5,
+              playing)
+
 
 if __name__ == "__main__":
     try:
@@ -395,6 +568,7 @@ if __name__ == "__main__":
             except Exception:
                 p.kill()
         shutil.rmtree(f"{SP}/media-display", ignore_errors=True)
+        shutil.rmtree(f"{SP}/media-admin", ignore_errors=True)
         # Case [109]'s copy of the controller log: scratch, and an untracked file
         # beside the suite is noise in every `git status` afterwards.
         if os.path.exists(f"{SP}/m.log"):

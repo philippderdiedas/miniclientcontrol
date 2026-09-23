@@ -30,6 +30,18 @@ pub fn clamp_duration(secs: i64) -> i64 {
     secs.clamp(MIN_DURATION_SECS, MAX_DURATION_SECS)
 }
 
+/// A length measured by the upload page, as whole seconds: rounded down, at
+/// least 1. Down, because a fraction of the last second cut off is invisible
+/// and a flash of the video starting over is not. `None` for anything that is
+/// not a finite positive number, which leaves the default in place.
+pub(crate) fn seconds_from_measured(raw: &str) -> Option<i64> {
+    let value: f64 = raw.trim().parse().ok()?;
+    if !value.is_finite() || value <= 0.0 {
+        return None;
+    }
+    Some((value.floor() as i64).max(1))
+}
+
 // --- Models for Request Bodies ---
 #[derive(Deserialize)]
 pub struct AddToPlaylistRequest {
@@ -249,10 +261,18 @@ pub async fn upload_asset(
     use tokio::io::AsyncWriteExt;
 
     let mut uploaded_files = Vec::new();
+    // A `duration` field applies to the file parts after it, until the next one:
+    // multipart parts are ordered and read one after another, so this needs no
+    // buffering. The upload page sends one before every file, measured or empty.
+    let mut measured: Option<i64> = None;
 
     while let Some(mut field) = multipart.next_field().await.unwrap_or(None) {
         // Plain (non-file) form fields carry no filename; they are not assets.
+        // The one plain field that means something is the measured length.
         let Some(raw_filename) = field.file_name().map(|f| f.to_string()) else {
+            if field.name() == Some("duration") {
+                measured = field.text().await.ok().as_deref().and_then(seconds_from_measured);
+            }
             continue;
         };
         let filename = sanitize_filename(&raw_filename);
@@ -309,7 +329,7 @@ pub async fn upload_asset(
         }
 
         // Save to DB
-        let default_duration = 10;
+        let default_duration = measured.map(clamp_duration).unwrap_or(10);
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let result = sqlx::query(
@@ -1461,6 +1481,17 @@ mod tests {
             move_item_to_playlist(&pool, 404, 1).await.unwrap(),
             MoveOutcome::UnknownItem
         );
+    }
+
+    #[test]
+    fn a_measured_length_is_rounded_down_to_whole_seconds() {
+        assert_eq!(seconds_from_measured("37.8"), Some(37));
+        assert_eq!(seconds_from_measured(" 5 "), Some(5));
+        // A clip shorter than a second still plays for one.
+        assert_eq!(seconds_from_measured("0.4"), Some(1));
+        for junk in ["", "abc", "NaN", "inf", "-3", "0"] {
+            assert_eq!(seconds_from_measured(junk), None, "{junk:?}");
+        }
     }
 
     #[test]

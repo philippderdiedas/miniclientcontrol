@@ -1202,6 +1202,14 @@
     const addScroll = scrollEditor(null);
     document.getElementById('addScroll').append(addScroll.root);
 
+    // Picking an asset fills in its length -- a video's is measured when it is
+    // uploaded -- and the operator may still change it before adding. Stored on
+    // the item as typed, like every duration.
+    document.getElementById('addAsset').addEventListener('change', (e) => {
+      const asset = assets.find((a) => String(a.id) === e.target.value);
+      if (asset && asset.duration) document.getElementById('addDuration').value = asset.duration;
+    });
+
     document.getElementById('addBtn').addEventListener('click', async () => {
       const feedback = document.getElementById('addFeedback');
       const assetVal = document.getElementById('addAsset').value;

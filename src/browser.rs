@@ -522,6 +522,9 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // The clock starts once the content is actually on screen. Counting
                 // from before navigation meant a slow page (readiness waits up to 12s)
                 // consumed its whole duration loading and flashed past instantly.
+                // The video and the clock start together, so an item as long as
+                // its video ends with it instead of showing its start again.
+                start_media(&active_page).await;
                 let item_started_at = Instant::now();
                 let mut remaining = intended_duration;
 
@@ -768,6 +771,7 @@ async fn run_override_loop(
         if let Err(e) = apply_overlay_payload(page, &overlay).await {
             error!("Failed to apply overlay on the override page: {}", e);
         }
+        start_media(page).await;
 
         tokio::time::sleep(Duration::from_millis(1200)).await;
 
@@ -1596,6 +1600,21 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
         .execute(AddScriptToEvaluateOnNewDocumentParams::new(overlay_runtime_script()))
         .await?;
     Ok(())
+}
+
+/// Start the media viewer's video now, with the item's clock.
+///
+/// Probed, like the scroll and overlay runtimes: on any page but the media
+/// viewer `__media` does not exist and this does nothing, which is why it is
+/// called for every item rather than only for video URLs. A failure is not
+/// worth a log above debug -- the page starts itself after 20 s.
+async fn start_media(page: &Page) {
+    if let Err(e) = page
+        .evaluate("(() => { if (globalThis.__media) globalThis.__media.start(); })()")
+        .await
+    {
+        debug!("Could not start the media on this page: {}", e);
+    }
 }
 
 /// The overlay registration the control page carries for its next document.

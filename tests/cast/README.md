@@ -21,7 +21,7 @@ python3 test_limits.py      # the frame size the display announces to the sender
 python3 test_managed.py     # the managed certificate (needs the network, else skips)
 python3 test_browser.py     # real WebRTC between two Chrome instances
 python3 test_overlay.py     # the settings, and the badge really on the page
-python3 test_media.py       # image fit and a video without controls (needs Chrome)
+python3 test_media.py       # image fit, a video without controls, a video's length (needs Chrome)
 python3 test_webhook.py     # outbound webhooks, end to end (~50s, needs Chrome)
 python3 test_display.py     # several screens at once (needs a Chrome per screen)
 python3 test_castscreens.py # two screens casting at once, independently (needs a Chrome per screen)
@@ -36,8 +36,10 @@ launches Chrome on the very same two ports. **`test_display.py`,
 `test_webhook.py` and `test_castscreens.py` all use CDP port 9242, so no two of
 these three may run at the same time.**
 
-`test_media.py` runs its own display Chrome on CDP port 9252 and its own
-controller on 3051. The API cases (`[100]`-`[102]`) need no browser.
+`test_media.py` runs its own display Chrome on CDP port 9252, a second one for the
+operator pages on 9253, and its own controller on 3051. The API cases
+(`[100]`-`[102]`, `[110]`) need no browser. `[111]` records a three-second WebM in
+the page, so no fixture file and no ffmpeg are involved.
 
 `test_guestpage.py` is slow on purpose: the last case waits out the guest page's
 thirty-second grace period, which is the whole liveness contract of that feature.

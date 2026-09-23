@@ -1,6 +1,6 @@
 # Video length from the file
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-23
 
 ## What and why
@@ -55,7 +55,9 @@ Two findings shape the fix:
   the video starting over is not. A value that is not a finite positive number is
   ignored and the default applies — the upload itself never fails over it.
 - The page measures with a 10 s timeout per file and only for `video/*`. A file it
-  cannot measure is uploaded without the field and gets the default.
+  cannot measure — and every non-video — gets an **empty** `duration` field in front
+  of it, which resets to the default; leaving the field out would hand it the
+  previous file's length.
 
 ## Existing videos: *Länge ermitteln*
 
@@ -122,3 +124,11 @@ not touch its duration — that number was set by somebody on purpose.
 - Lengths for images and PDFs; they keep their default.
 - Changing a card's duration when its asset changes.
 - Ending an item on a page event; decision 3 makes it unnecessary.
+
+## Amendment made while implementing
+
+The browser case measures in a Chrome of its own (CDP 9253), not in a second tab
+of the display's: the control loop brings its page to the front on every item,
+and Chrome defers loading media in a tab that is not in front, so the measuring
+timed out there. An operator uploading is looking at the page, which is what the
+separate browser models.

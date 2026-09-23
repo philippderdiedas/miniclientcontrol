@@ -58,29 +58,60 @@
         media.style.objectFit = fit;
       }
 
+      // Set by `start()`: who started the video and when, for the tests and for
+      // anybody reading the page's state over CDP.
+      let started = null;
+
       if (kind === 'video') {
         // No `controls`: the bar is the complaint this page exists for. `loop`
-        // unconditionally -- the item's duration ends it either way, and without
-        // it a short video parks on its last frame for the rest of the item.
+        // unconditionally -- the item's duration ends it either way. No
+        // `autoplay`: the video waits on its first frame for the controller,
+        // which starts it the moment the item's clock starts -- otherwise it has
+        // been playing for the seconds the readiness wait takes, and an item as
+        // long as the video would show its beginning again at the end.
         media.controls = false;
-        media.autoplay = true;
         media.loop = true;
         media.playsInline = true;
-        // Unmuted first, muted only if the browser refuses. The controller starts
-        // Chromium with --autoplay-policy=no-user-gesture-required, but a browser
-        // started outside it may not have the flag, and a silent video is better
-        // than a black screen.
-        media.addEventListener('canplay', () => {
-          const started = media.play();
-          if (started && started.catch) {
-            started.catch((err) => {
-              if (err && err.name === 'NotAllowedError') {
-                media.muted = true;
-                media.play().catch(() => {});
-              }
-            });
-          }
-        }, { once: true });
+        media.preload = 'auto';
+      }
+
+      // Unmuted first, muted only if the browser refuses. The controller starts
+      // Chromium with --autoplay-policy=no-user-gesture-required, but a browser
+      // started outside it may not have the flag, and a silent video is better
+      // than a black screen.
+      const play = () => {
+        const attempt = media.play();
+        if (attempt && attempt.catch) {
+          attempt.catch((err) => {
+            if (err && err.name === 'NotAllowedError') {
+              media.muted = true;
+              media.play().catch(() => {});
+            }
+          });
+        }
+      };
+
+      const start = (by) => {
+        if (kind !== 'video') return false;
+        started = { by, at: Math.round(performance.now()) };
+        media.currentTime = 0;
+        play();
+        return true;
+      };
+
+      globalThis.__media = {
+        start: () => start('controller'),
+        state: () => ({
+          kind,
+          startedBy: started ? started.by : null,
+          startedAt: started ? started.at : null,
+        }),
+      };
+
+      // Nobody driving this page -- opened by hand, or a controller that never
+      // gets to it -- must not leave it on a still frame for ever.
+      if (kind === 'video') {
+        setTimeout(() => { if (!started) start('fallback'); }, 20000);
       }
 
       document.body.append(media);

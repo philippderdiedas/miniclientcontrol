@@ -37,7 +37,7 @@ its parent, which is what `src/cast/api.rs` and `src/webhook/api.rs` use it for.
 **Stop any locally running instance before the Python suite.** `test_port.py`
 needs the default `3443` free to test the fallback, and
 `test_browser.py`/`test_overlay.py`/`test_media.py`/`test_webhook.py`/`test_display.py`/`test_castscreens.py`
-launch their own Chrome on `9222`+`9223`/`9232`/`9252`/`9242`/`9242`+`9243`/`9242`+`9243`.
+launch their own Chrome on `9222`+`9223`/`9232`/`9252`+`9253`/`9242`/`9242`+`9243`/`9242`+`9243`.
 A dev instance holding those makes them fail in a way that reads exactly like a
 code regression — they pass again the moment it is stopped. `test_display.py`,
 `test_webhook.py` and `test_castscreens.py` all use `9242`, so no two of the three
@@ -275,6 +275,15 @@ editing both; forgetting to rebuild ships neither.
 PDFs are the exception: `web/pdf_viewer.html` drives its own scrolling from query
 parameters, so `browser.rs` detects it with `is_internal_pdf_viewer_url` and skips
 `start_scrolling`/`stop_scrolling`.
+
+**The media viewer holds a video until `__media.start()`.** `browser.rs` calls
+`start_media` where the item's clock starts (and in the override loop), because
+the readiness waits take seconds and an autoplaying video would have run that
+long already — an item as long as its video would show the start again at the
+end. Probed like the other runtimes; the page starts itself after 20 s so an
+undriven page is never a still frame. An upload's `duration` field applies to
+the file parts after it, so the upload page sends one — empty if need be —
+before every file.
 
 **A page that shows a connection code sets `globalThis.__ovSuspend` *before*
 calling `__ov.suspend()`, and the runtime seeds itself from that flag.** This is

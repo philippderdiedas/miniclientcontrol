@@ -167,7 +167,10 @@ declaration.
 ### Assets
 
 - `GET /api/assets` — list assets
-- `POST /api/assets` — upload one or more files (`multipart/form-data`)
+- `POST /api/assets` — upload one or more files (`multipart/form-data`). An optional
+  text field `duration` (seconds, decimal) applies to the file parts after it until
+  the next one; rounded down to whole seconds, at least 1; anything else is the
+  default 10. The upload page measures each video and sends it
 - `PUT /api/assets/{id}` — update asset metadata (currently duration)
 - `DELETE /api/assets/{id}` — delete file + DB row
 

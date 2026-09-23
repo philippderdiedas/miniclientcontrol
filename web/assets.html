@@ -137,10 +137,65 @@
         delBtn.className = 'danger';
         delBtn.textContent = 'Löschen';
         delBtn.addEventListener('click', () => deleteAsset(asset.id, uses, feedback));
-        actions.append(saveBtn, ' ', delBtn, feedback);
+        const extra = [];
+        if ((asset.mimetype || '').startsWith('video/')) {
+          const measureBtn = document.createElement('button');
+          measureBtn.textContent = 'Länge ermitteln';
+          measureBtn.addEventListener('click', () => remeasure(asset, feedback));
+          extra.push(' ', measureBtn);
+        }
+        actions.append(saveBtn, ' ', delBtn, ...extra, feedback);
 
         body.appendChild(tr);
       }
+    }
+
+    // A video's length in seconds, or null. `loadedmetadata` gives it for most
+    // files; one whose header carries none -- a recording straight out of
+    // MediaRecorder, for one -- reports Infinity there, and seeking far past the
+    // end makes the browser work the real length out. Muted and never shown:
+    // this only reads the file.
+    function measureVideo(src, timeoutMs = 10000) {
+      return new Promise((resolve) => {
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.muted = true;
+        let settled = false;
+        const done = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          video.removeAttribute('src');
+          video.load();
+          resolve(Number.isFinite(value) && value > 0 ? value : null);
+        };
+        const timer = setTimeout(() => done(null), timeoutMs);
+        video.addEventListener('error', () => done(null));
+        video.addEventListener('loadedmetadata', () => {
+          if (Number.isFinite(video.duration)) { done(video.duration); return; }
+          video.addEventListener('durationchange', () => {
+            if (Number.isFinite(video.duration)) done(video.duration);
+          });
+          video.currentTime = 1e101;
+        });
+        video.src = src;
+      });
+    }
+
+    async function remeasure(asset, feedback) {
+      flash(feedback, 'messe…');
+      const seconds = await measureVideo(`/uploads/${encodeURIComponent(asset.local_path)}`);
+      if (seconds === null) { flash(feedback, 'Länge nicht lesbar', true); return; }
+      // Rounded down like the server does for an upload, so the two agree.
+      const duration = Math.max(1, Math.floor(seconds));
+      const res = await fetch(`/api/assets/${asset.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ duration }),
+      });
+      if (!res.ok) { flash(feedback, `Speichern fehlgeschlagen (HTTP ${res.status})`, true); return; }
+      flash(feedback, `${duration} s ✓`);
+      await loadAssets();
     }
 
     async function updateDuration(id, feedback) {
@@ -175,9 +230,21 @@
 
       const fd = new FormData();
       const expected = input.files.length;
-      for (const f of input.files) fd.append('file', f);
-
       const msg = document.getElementById('uploadMsg');
+      msg.textContent = 'Messe Videolängen…';
+      // A `duration` field before *every* file, empty when there is nothing to
+      // say: the server applies one to the files after it, so skipping it for an
+      // image would hand the image the previous video's length.
+      for (const f of input.files) {
+        let seconds = null;
+        if ((f.type || '').startsWith('video/')) {
+          const url = URL.createObjectURL(f);
+          seconds = await measureVideo(url);
+          URL.revokeObjectURL(url);
+        }
+        fd.append('duration', seconds === null ? '' : String(seconds));
+        fd.append('file', f);
+      }
       msg.textContent = 'Uploading...';
       const res = await fetch('/api/assets', { method: 'POST', body: fd });
 

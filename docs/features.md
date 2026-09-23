@@ -126,7 +126,10 @@ long page after another. Any other choice makes every page one screen, edge to
 edge, so the **Step** scroll mode with its default step (one screen height) pages
 through the document like a slide show.
 
-Each asset carries a default duration, which an item may override.
+Each asset carries a default duration, which an item may override. A video's is
+its real length, measured when it is uploaded, and picking it for a playlist item
+fills that in. The video starts together with the item's clock, so an item as long
+as its video ends with it. *Länge ermitteln* re-measures a video uploaded before.
 
 ## Scrolling
 
