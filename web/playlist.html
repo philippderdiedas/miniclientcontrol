@@ -330,6 +330,52 @@
       };
     }
 
+    // --- fit editor -----------------------------------------------------------
+    // Image and video items only. A URL or a PDF has no page of ours whose layout
+    // this could reach, so offering it there would be a setting that does nothing.
+    const FIT_CHOICES = [
+      ['contain', 'Einpassen – ganz sichtbar, mit Rand'],
+      ['cover', 'Füllen – beschneidet, was übersteht'],
+      ['fill', 'Strecken – verzerrt'],
+      ['none', 'Original – 1:1, mittig'],
+      ['scroll', 'Scrollen – volle Breite, für hohe Bilder'],
+    ];
+
+    function fitEditor(fitMode, background) {
+      const mode = el('select', {},
+        ...FIT_CHOICES.map(([value, text]) => el('option', { value, text })));
+      mode.value = FIT_CHOICES.some(([value]) => value === fitMode) ? fitMode : 'contain';
+
+      // A colour input only takes #rrggbb; anything else the server accepts
+      // (#rgb, #rrggbbaa) shows as black here and is written back as black on save.
+      const bg = el('input', {
+        type: 'color',
+        value: /^#[0-9a-f]{6}$/i.test(background || '') ? background : '#000000',
+      });
+
+      // The cost of `scroll` being a fit value rather than a rule: two fields that
+      // must agree. The one direction that silently does nothing gets a hint; the
+      // other (fit `scroll`, no scrolling) is a legitimate fit-to-width.
+      const hint = el('p', {
+        class: 'muted',
+        hidden: true,
+        text: 'Bildlauf ist eingestellt, aber die Anpassung ist nicht „Scrollen“ – '
+          + 'das Bild passt ganz auf den Schirm, es gibt nichts zu scrollen.',
+      });
+
+      const root = el('fieldset', {},
+        el('legend', { text: 'Darstellung' }),
+        el('div', { class: 'grid' }, field('Anpassung', mode), field('Hintergrund', bg)),
+        hint);
+
+      return {
+        root,
+        onChange(handler) { mode.addEventListener('change', handler); },
+        hintFor(scrollType) { hint.hidden = !(scrollType !== 'None' && mode.value !== 'scroll'); },
+        read() { return { fit_mode: mode.value, fit_background: bg.value }; },
+      };
+    }
+
     // --- per-item overlay editor ---------------------------------------------
     // Content, a corner, and the text colour. Sizes and opacity come from the
     // global overlay in the admin page, so a display keeps one look across items
@@ -816,6 +862,16 @@
       const scroll = scrollEditor(item.scroll_config);
       card.append(scroll.root);
 
+      const isMedia = isAsset && /^(image|video)\//i.test(item.mimetype || '');
+      const fit = isMedia ? fitEditor(item.fit_mode, item.fit_background) : null;
+      if (fit) {
+        card.append(fit.root);
+        const syncHint = () => fit.hintFor(scroll.read().type);
+        scroll.onInput(syncHint);
+        fit.onChange(syncHint);
+        syncHint();
+      }
+
       const overlay = overlayEditor(item.overlay_config, assets);
       card.append(overlay.root);
 
@@ -878,6 +934,7 @@
           scroll_config: scroll.read(),
           overlay: overlay.read(),
         };
+        if (fit) Object.assign(payload, fit.read());
         if (isAsset) payload.asset_id = Number(assetPicker.value);
         else payload.url = urlInput.value.trim();
 
