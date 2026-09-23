@@ -261,8 +261,12 @@ first admin).
 
 ## Not in scope
 
-- Accounts shared across devices, SSO/OAuth, password reset by e-mail (the CLI
-  credential is the recovery path).
+- Accounts shared across devices, password reset by e-mail (the CLI credential
+  is the recovery path).
+- OpenID Connect sign-in — the next step, with its own spec. The account model is
+  built for it: an SSO account is the same `users` row with an issuer and subject
+  in place of a password hash, and local accounts stay as the fallback for a device
+  that cannot reach its identity provider.
 - Proposing overrides, "Play now", settings or webhooks.
 - Webhook events for proposals.
 - Per-playlist or per-display permissions.
