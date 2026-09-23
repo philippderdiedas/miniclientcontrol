@@ -49,8 +49,9 @@ def assign(playlist_id, port=None):
     This is the operator's step on the displays page, done from the test.
     """
     for row in http("GET", "/api/displays", port=port)[1] or []:
-        if row.get("playlist_id") != playlist_id:
-            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id}, port=port)
+        if (row.get("schedule") or {}).get("default_playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}/schedule",
+                 {"default_playlist_id": playlist_id, "windows": []}, port=port)
 
 def upload_html(name, html, port=None):
     """Upload a page as an asset. Served by the controller itself, so it is

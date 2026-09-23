@@ -14,6 +14,7 @@ mod mdns;
 mod audio;
 mod webhook;
 mod playlists;
+mod schedule;
 
 use anyhow::Result;
 use axum::{

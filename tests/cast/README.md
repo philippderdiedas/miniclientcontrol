@@ -54,7 +54,7 @@ most important case -- a receiver that never answers must not stall the playlist
 so it shares a synthetic camera rather than a screen — a headless Chrome has no
 desktop to pick from. Everything after the `getMedia` call is the same code path.
 
-`test_display.py` (cases `[70]`-`[77]`) declares two displays, `foyer` and
+`test_display.py` (cases `[70]`-`[79]`) declares two displays, `foyer` and
 `werkstatt`, and starts one headless Chrome per screen on its own profile
 directory — two Chromiums sharing a profile corrupt it, which is why the
 controller derives one profile per display in the first place. Its cases are about
@@ -67,6 +67,9 @@ undeclared display falls back to 9222 and would attach to a stray Chrome there a
 write item ids into cases that are asserting an absence of them. A playlist item
 pointed at `127.0.0.1:9` is likewise never loaded: Chromium refuses port 9 outright
 with `ERR_UNSAFE_PORT`, so the navigation never leaves the browser.
+
+`[79b]` waits for the next full minute on purpose — it is the boundary timer
+under test — so it takes up to a minute.
 
 `test_castscreens.py` (cases `[80]`-`[90]`) is `test_display.py`'s harness
 again, proving the same "own" for casting: its own session, claim,

@@ -91,6 +91,20 @@ says which one they mean by scanning the panel in front of them, and two guests
 can cast to two screens at once. See
 [casting.md](casting.md#which-screen-a-cast-lands-on).
 
+### Dayparting
+
+What a screen plays can follow the clock. Each screen has a **default
+playlist** and any number of **time windows** — weekdays, from, to, playlist —
+in priority order: the topmost window that matches now wins, and the default
+covers the rest. "Mo–Fr 08:00–18:00 Büro, sonst Nacht" is one window and a
+default. A window may cross midnight (Fr 22:00–06:00 runs into Saturday
+morning), and a window ending at 00:00 runs to the end of the day.
+
+At a window boundary the screen switches straight away, mid-item, exactly as it
+does when an operator reassigns it by hand. Overlapping windows are allowed —
+"lunch beats the working day" is a reasonable thing to want — and the displays
+page says which row hides which.
+
 ## Assets
 
 Uploads land in `--assets-dir` and are served from `/uploads/`. Images, videos

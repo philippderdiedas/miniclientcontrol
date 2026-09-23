@@ -298,6 +298,13 @@
     // Same node-building rule as the other operator pages: a display label, a
     // playlist name and an item URL are all operator- or guest-supplied, so
     // nothing here is interpolated into innerHTML.
+    // What a screen plays right now, as its timetable resolves it -- a window's
+    // playlist, or the default, or nothing.
+    const livePlaylist = (display) => {
+      const id = display.schedule && display.schedule.now ? display.schedule.now.playlist_id : null;
+      return id === undefined ? null : id;
+    };
+
     const el = (tag, props = {}, ...children) => {
       const node = document.createElement(tag);
       for (const [k, v] of Object.entries(props)) {
@@ -352,13 +359,13 @@
         return `Override aktiv: ${what} – Playlist pausiert`;
       }
       const current = (await curRes.json()).item_id;
-      if (display.playlist_id === null || display.playlist_id === undefined) {
-        return 'keine Playlist zugewiesen';
+      if (livePlaylist(display) === null) {
+        return 'keine Playlist aktiv';
       }
       // The screen's own playlist, never the unscoped list: counting every item
       // on the device is what let an empty screen report that something was
       // about to start.
-      const items = await itemsOf(display.playlist_id, current ?? null);
+      const items = await itemsOf(livePlaylist(display), current ?? null);
       if (!items) return current ? `▶ läuft: #${current} – …` : 'Status unbekannt';
       if (!current) return items.length ? 'Playlist läuft an…' : 'Playlist ist leer';
       const item = items.find((x) => x.id === current);
@@ -395,9 +402,9 @@
         const lines = await Promise.all(displays.map(async (display) => ({
           display,
           text: await screenLine(display),
-          playlist: display.playlist_id === null || display.playlist_id === undefined
+          playlist: livePlaylist(display) === null
             ? null
-            : (names.get(display.playlist_id) || `#${display.playlist_id}`),
+            : (names.get(livePlaylist(display)) || `#${livePlaylist(display)}`),
         })));
 
         // One screen renders exactly the line this page always showed; the name

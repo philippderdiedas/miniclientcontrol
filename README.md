@@ -228,11 +228,18 @@ declaration.
 ### Displays
 
 - `GET /api/displays` — the declared screens, plus any row for a screen this
-  deployment no longer declares (`declared: false`), so its playlist can still be
-  reassigned
-- `PUT /api/displays/{name}` — set `label` and/or `playlist_id`; `null` clears
-  either one, and a `playlist_id` naming a playlist that does not exist is
-  refused with `400` rather than reported as saved
+  deployment no longer declares (`declared: false`), so its timetable can still
+  be reassigned. Each entry carries its `schedule` (the body below)
+- `PUT /api/displays/{name}` — set `label`; `null` clears it. Anything else, the
+  former `playlist_id` included, is refused with `422`
+- `GET /api/displays/{name}/schedule` — the screen's timetable:
+  `{ default_playlist_id, windows: [{ weekdays, from, to, playlist_id }], overlaps, now }`.
+  Weekdays are ISO numbers (Monday = 1), windows are in priority order, `to` may be
+  `24:00`, `overlaps` lists index pairs where an earlier window hides a later one,
+  `now` says which playlist is live and from which window
+- `PUT /api/displays/{name}/schedule` — replace the whole timetable; both fields
+  required, `default_playlist_id: null` means none. A bad row is a `400` naming it,
+  and nothing is written
 
 ### Playback Control
 

@@ -155,8 +155,9 @@ today and an upgrade must keep their scripts working. Picking one of several
 would be a coin flip a script cannot see.
 
 **A playlist is never deleted with a display**, and the schema enforces it:
-`displays.playlist_id` is `ON DELETE SET NULL`, so deleting a playlist unassigns
-it and deleting a display cannot reach the playlist at all. The other direction is
+`displays.default_playlist_id` is `ON DELETE SET NULL`, so deleting a playlist
+unassigns it (and `schedule_windows.playlist_id` is `ON DELETE CASCADE`, so its
+windows go with it) and deleting a display cannot reach the playlist at all. The other direction is
 the handler's, because no `ON DELETE` would do it: deleting a playlist that still
 holds items is a `409` that says how many.
 
@@ -166,12 +167,30 @@ holds items is a `409` that says how many.
 can be in a playlist two screens share, so both have to reach every screen. Same
 rule as ever: `notify_one`, never `notify_waiters`.
 
-**Each loop re-reads its assignment every inner pass** (`SELECT playlist_id FROM
-displays WHERE name = ?`), so a reassignment lands on the next item; the `PUT`
-pokes `playlist_signal` as well so it lands now rather than at the end of a
+**Each loop re-resolves its playlist every inner pass**
+(`schedule::active_playlist`), so a reassignment lands on the next item; the
+`PUT` pokes `playlist_signal` as well so it lands now rather than at the end of a
 ten-minute item. An assignment that *changed* restarts at the playlist's
 beginning rather than resuming at a `play_order` that means nothing in the new
 list.
+
+**A display plays what its timetable resolves, and `schedule::active_playlist`
+is the only resolver.** The timetable is the default playlist plus
+`schedule_windows` in priority order; the first window matching the device's
+local time wins. Both places that decide what plays — the top of the inner pass
+and `is_playlist_item_active_now` — go through it; a third reader of
+`default_playlist_id` is how a screen starts ignoring its windows. The per-item
+`select!` wakes at `schedule::next_boundary`, recomputed on every pass of its
+`while` loop so an edited timetable (whose `PUT` pokes `playlist_signal`) never
+leaves a stale timer. A boundary switches immediately, like a reassignment.
+Windows name the day they *start*; an end at or before the start crosses
+midnight; an end of `00:00` is stored as 1440.
+
+**`PUT /api/displays/{name}/schedule` replaces the whole timetable in one
+transaction**, checking each playlist in the statement that writes it.
+`PUT /api/displays/{name}` takes only `label`, with `deny_unknown_fields`, so a
+script still sending the removed `playlist_id` gets a `422` rather than a silent
+`200`.
 
 **`displays.assignment_decided` separates "nobody has chosen yet" from "somebody
 chose none".** Both are `playlist_id IS NULL`. It is stored rather than inferred
@@ -850,8 +869,9 @@ target, i.e. once per connection. Two traps found on the way:
 `ALTER TABLE ADD COLUMN`. Add new columns the same way. `main.rs` must not create
 tables — a partial duplicate there caused schema drift.
 
-`playlists`, `displays` and `playlist_items.playlist_id` arrived through exactly
-that path, plus **one** backfill: only when there are no playlists at all and
+`playlists`, `displays`, `schedule_windows` and `playlist_items.playlist_id`
+arrived through exactly that path (and `displays.playlist_id` was renamed
+`default_playlist_id` in place, with `ALTER TABLE … RENAME COLUMN`), plus **one** backfill: only when there are no playlists at all and
 items exist without one, a playlist named `Standard` takes them. Gated that way
 because a database that already has playlists and a stray item without one is not
 an upgrade — sweeping it into a new `Standard` would be the migration inventing a

@@ -1,6 +1,6 @@
 # Dayparting: which playlist a screen shows, by weekday and time of day
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-23
 
 ## What and why
@@ -275,3 +275,17 @@ shows up on every other card.
   what the screen switched to.
 - Switching the panel on and off.
 - Cron, see decision 2.
+
+## Amendments made while planning
+
+- The storage reads (`load`, `active_playlist`) live in `src/schedule/mod.rs`
+  beside the rules rather than in `display.rs`, and the handlers in
+  `src/schedule/api.rs` — the pattern `cast/api.rs` and `webhook/api.rs` set.
+  `display::known_display` is the shared "may this name be read or written"
+  check.
+- A request body that does not deserialise — the removed `playlist_id` on
+  `PUT /api/displays/{name}` included — is axum's `422`, not a `400`; the `400`
+  with a German sentence is for a body that parses and says something wrong.
+- An end of `00:00` is stored as 1440, the end of the day: a time input cannot
+  show `24:00`, and "22:00–00:00" means until midnight. `00:00–00:00` is
+  therefore a whole day rather than a refused `start == end`.

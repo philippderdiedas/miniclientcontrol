@@ -11,30 +11,6 @@ and leaves this file when it ships.
 
 ## Next
 
-### Dayparting: which playlist a screen shows, by time of day and weekday
-
-Today a screen is assigned one playlist, and an item has an optional date window
-(from/to). There is no way to say "Monday to Friday 8–18 the office playlist,
-otherwise the night one".
-
-**Decision taken:** the timetable belongs to the **display's assignment**, not to
-the playlist and not to the item. A display gets a default playlist plus slots
-(weekdays, from, to → playlist); the slot that matches now wins, the default
-covers the rest.
-
-Why not on the playlist: a playlist with opening hours leaves open what the screen
-shows outside them, so a fallback is needed anyway — and two screens sharing one
-playlist may well want different hours. Why not per item: that is what the date
-window already does for "this notice until Friday", and hours on every item of a
-playlist is the same schedule typed N times. It also fits the model that exists:
-"a display points at a playlist" becomes "a display points at a playlist, per
-time slot".
-
-Also decided: list order is priority and the UI warns on an overlap, a window
-boundary switches immediately (as a manual reassignment does), and windows are
-structured rather than cron. Designed in
-[the dayparting spec](superpowers/specs/2026-09-23-dayparting-design.md).
-
 ### Video length from the file
 
 An upload gets a default duration of 10 s, whatever it is. A video should get its

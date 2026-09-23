@@ -255,7 +255,7 @@ fn refusal(name: &str, names: Vec<String>) -> Response {
 /// would never play anything and no restart would repair it. The same applies to
 /// a power loss between the insert and the assignment, which on a signage Pi is
 /// an ordinary way to stop. What the flag does *not* do is undo a decision:
-/// every path that writes `playlist_id`, here and in `update`, sets it in the
+/// every path that writes `default_playlist_id`, here and in `update`, sets it in the
 /// same statement, so an operator's "(keine)" is a decided `NULL` and is left
 /// alone for good.
 pub async fn register(
@@ -293,7 +293,7 @@ pub async fn register(
     // that is the intended outcome, but only if it is discoverable.
     if configured.len() > 1 {
         let undecided: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM displays WHERE playlist_id IS NULL
+            "SELECT count(*) FROM displays WHERE default_playlist_id IS NULL
                AND COALESCE(assignment_decided, 0) = 0",
         )
         .fetch_one(&mut *tx)
@@ -354,7 +354,7 @@ async fn inherit_oldest_playlist(
     name: &str,
 ) -> anyhow::Result<()> {
     let row: Option<(Option<i64>, i64)> = sqlx::query_as(
-        "SELECT playlist_id, COALESCE(assignment_decided, 0) FROM displays WHERE name = ?",
+        "SELECT default_playlist_id, COALESCE(assignment_decided, 0) FROM displays WHERE name = ?",
     )
     .bind(name)
     .fetch_optional(&mut *tx)
@@ -389,12 +389,12 @@ async fn inherit_oldest_playlist(
         return Ok(());
     };
 
-    // `playlist_id IS NULL` is already true here and is spelled out anyway: it is
+    // `default_playlist_id IS NULL` is already true here and is spelled out anyway: it is
     // the condition the rule is really about, and a later edit that loosens the
     // gate above must not turn this into an overwrite of somebody's assignment.
     sqlx::query(
-        "UPDATE displays SET playlist_id = ?, assignment_decided = 1
-         WHERE name = ? AND playlist_id IS NULL",
+        "UPDATE displays SET default_playlist_id = ?, assignment_decided = 1
+         WHERE name = ? AND default_playlist_id IS NULL",
     )
     .bind(playlist_id)
     .bind(name)
@@ -408,10 +408,49 @@ async fn inherit_oldest_playlist(
     Ok(())
 }
 
+/// Make sure `name` is a display this API may read or write, and that its row
+/// exists.
+///
+/// A declared display is upserted rather than looked up, so a row deleted out of
+/// band comes back instead of turning into a refusal an operator cannot act on.
+/// A name this deployment does *not* declare is only reachable when it already
+/// has a row -- the screen taken away whose timetable is being reassigned.
+/// Anything else is a typo, and accepting it would write a row nothing reads,
+/// answer `200`, and leave the operator believing a screen was configured.
+pub(crate) async fn known_display(state: &AppState, name: &str) -> Result<(), Response> {
+    if state.display(name).is_some() {
+        if let Err(e) =
+            sqlx::query("INSERT INTO displays (name) VALUES (?) ON CONFLICT(name) DO NOTHING")
+                .bind(name)
+                .execute(&state.pool)
+                .await
+        {
+            tracing::error!("Failed to ensure display row for {}: {}", name, e);
+        }
+        return Ok(());
+    }
+    let known: i64 = sqlx::query_scalar("SELECT count(*) FROM displays WHERE name = ?")
+        .bind(name)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Failed to look up display {}: {}", name, e);
+            0
+        });
+    if known == 0 {
+        return Err(unknown_here(state, name).await);
+    }
+    Ok(())
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/displays", get(list))
         .route("/api/displays/{name}", put(update))
+        .route(
+            "/api/displays/{name}/schedule",
+            get(crate::schedule::api::get_schedule).put(crate::schedule::api::put_schedule),
+        )
         .route(
             "/api/displays/{name}/control/current",
             get(crate::handlers::get_current_for).post(crate::handlers::set_current_for),
@@ -429,69 +468,75 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    let rows = match sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
-        "SELECT name, label, playlist_id FROM displays ORDER BY name ASC",
+    let failed = |e: sqlx::Error| {
+        tracing::error!("Failed to list displays: {}", e);
+        // Swallowing this would render every declared screen as unassigned,
+        // which is a real state an operator acts on. Saying nothing could be
+        // read is the only honest answer.
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Displays konnten nicht gelesen werden." })),
+        )
+            .into_response()
+    };
+    let rows = match sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT name, label FROM displays ORDER BY name ASC",
     )
     .fetch_all(&state.pool)
     .await
     {
         Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!("Failed to list displays: {}", e);
-            // Swallowing this one would render every declared screen as
-            // unassigned, which is a real state an operator acts on -- they
-            // would go and assign a playlist that is already assigned, or read
-            // a blank screen's cause off a list that invented it. Saying
-            // nothing could be read is the only honest answer here.
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "Displays konnten nicht gelesen werden." })),
-            )
-                .into_response();
-        }
+        Err(e) => return failed(e),
     };
 
     // Driven off the declared displays, not off the table: a row for a screen
-    // this deployment no longer declares must still be visible (so its playlist
+    // this deployment no longer declares must still be visible (so its timetable
     // can be reassigned) but must not claim to be attached.
-    let out: Vec<_> = state
+    let mut entries: Vec<(String, Option<String>, bool)> = state
         .displays
         .iter()
         .map(|d| {
-            let stored = rows.iter().find(|(name, _, _)| name == &d.name);
-            json!({
-                "name": d.name,
-                "label": stored.and_then(|(_, label, _)| label.clone()).unwrap_or_else(|| d.name.clone()),
-                "playlist_id": stored.and_then(|(_, _, id)| *id),
-                "declared": true,
-            })
+            let label = rows.iter().find(|(name, _)| name == &d.name).and_then(|(_, l)| l.clone());
+            (d.name.clone(), label, true)
         })
-        .chain(
-            rows.iter()
-                .filter(|(name, _, _)| state.display(name).is_none())
-                .map(|(name, label, playlist_id)| {
-                    json!({
-                        "name": name,
-                        "label": label.clone().unwrap_or_else(|| name.clone()),
-                        "playlist_id": playlist_id,
-                        "declared": false,
-                    })
-                }),
-        )
         .collect();
+    entries.extend(
+        rows.iter()
+            .filter(|(name, _)| state.display(name).is_none())
+            .map(|(name, label)| (name.clone(), label.clone(), false)),
+    );
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (name, label, declared) in entries {
+        let schedule = match crate::schedule::api::body(&state.pool, &name).await {
+            Ok(schedule) => schedule,
+            Err(e) => return failed(e),
+        };
+        out.push(json!({
+            "label": label.unwrap_or_else(|| name.clone()),
+            "name": name,
+            "declared": declared,
+            "schedule": schedule,
+        }));
+    }
     Json(out).into_response()
 }
 
+/// What is about the display itself. Its playlist is not: that is the
+/// timetable's, at `/api/displays/{name}/schedule`.
+///
+/// `deny_unknown_fields` so a script still sending the `playlist_id` this route
+/// used to take is refused (`422`) rather than answered `200` for a change that
+/// never happened.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateDisplay {
-    /// `double_option` for the same reason `playlist_id` has it: without it a
-    /// JSON `null` collapses into the outer `None` and reads as "field absent",
-    /// so a label could only ever be cleared by sending `""` -- a rule nothing
-    /// states and the next client would not guess.
+    /// `double_option`: without it a JSON `null` collapses into the outer
+    /// `None` and reads as "field absent", so a label could only ever be
+    /// cleared by sending `""` -- a rule nothing states and the next client
+    /// would not guess.
     #[serde(default, deserialize_with = "crate::handlers::double_option")]
     label: Option<Option<String>>,
-    #[serde(default, deserialize_with = "crate::handlers::double_option")]
-    playlist_id: Option<Option<i64>>,
 }
 
 async fn update(
@@ -499,63 +544,9 @@ async fn update(
     Path(name): Path<String>,
     Json(payload): Json<UpdateDisplay>,
 ) -> Response {
-    // A declared display is upserted rather than looked up, so a row deleted out
-    // of band comes back instead of turning into a refusal an operator cannot
-    // act on. A name this deployment does *not* declare is only writable when it
-    // already has a row -- that is the screen taken away whose playlist is being
-    // reassigned. Anything else is a typo, and accepting it would write a row
-    // nothing reads, answer `200`, and leave the operator believing a screen was
-    // configured.
-    let declared = state.display(&name).is_some();
-    if declared {
-        if let Err(e) =
-            sqlx::query("INSERT INTO displays (name) VALUES (?) ON CONFLICT(name) DO NOTHING")
-                .bind(&name)
-                .execute(&state.pool)
-                .await
-        {
-            tracing::error!("Failed to ensure display row for {}: {}", name, e);
-        }
-    } else {
-        let known: i64 = sqlx::query_scalar("SELECT count(*) FROM displays WHERE name = ?")
-            .bind(&name)
-            .fetch_one(&state.pool)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("Failed to look up display {}: {}", name, e);
-                0
-            });
-        if known == 0 {
-            return unknown_here(&state, &name).await;
-        }
+    if let Err(response) = known_display(&state, &name).await {
+        return response;
     }
-
-    // Checked before anything is written, and checked at all because the foreign
-    // key would otherwise refuse the write, the error would be logged and
-    // swallowed, and the operator would be told `200` for an assignment that
-    // never happened -- ending in the blank screen `PUT /api/playlist/{id}`
-    // checks `asset_id` against `assets` to avoid.
-    if let Some(Some(playlist_id)) = payload.playlist_id {
-        match sqlx::query_scalar::<_, i64>("SELECT id FROM playlists WHERE id = ?")
-            .bind(playlist_id)
-            .fetch_optional(&state.pool)
-            .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "Unbekannte Playlist." })),
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                tracing::error!("Failed to check playlist {}: {}", playlist_id, e);
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        }
-    }
-
     if let Some(label) = &payload.label {
         // An empty or absent label is stored as SQL `NULL` rather than "": the
         // read path falls back to the name only on `NULL`, so an operator
@@ -568,27 +559,6 @@ async fn update(
             .await
         {
             tracing::error!("Failed to set label for display {}: {}", name, e);
-        }
-    }
-    if let Some(playlist_id) = payload.playlist_id {
-        // `assignment_decided` is set in the same statement as the assignment,
-        // not beside it: the record that somebody chose and what they chose can
-        // then not be torn apart by a power loss, which is the only way the next
-        // start could inherit a playlist over a deliberate "(keine)".
-        if let Err(e) = sqlx::query(
-            "UPDATE displays SET playlist_id = ?, assignment_decided = 1 WHERE name = ?",
-        )
-        .bind(playlist_id)
-        .bind(&name)
-        .execute(&state.pool)
-        .await
-        {
-            tracing::error!("Failed to assign playlist to display {}: {}", name, e);
-        }
-        // The loop re-reads its assignment every pass, but poking it means the
-        // change lands on the next item rather than at the end of this one.
-        if let Some(display) = state.display(&name) {
-            display.playlist_signal.notify_one();
         }
     }
     Json(json!({ "ok": true })).into_response()
@@ -744,7 +714,7 @@ mod tests {
     }
 
     async fn assignment(pool: &sqlx::SqlitePool, name: &str) -> Option<Option<i64>> {
-        sqlx::query_scalar::<_, Option<i64>>("SELECT playlist_id FROM displays WHERE name = ?")
+        sqlx::query_scalar::<_, Option<i64>>("SELECT default_playlist_id FROM displays WHERE name = ?")
             .bind(name)
             .fetch_optional(pool)
             .await
@@ -796,7 +766,7 @@ mod tests {
         // And an operator who chose "(keine)" keeps that choice across a
         // restart: re-assigning the oldest playlist here would silently undo a
         // decision somebody made on purpose.
-        sqlx::query("UPDATE displays SET playlist_id = NULL WHERE name = 'default'")
+        sqlx::query("UPDATE displays SET default_playlist_id = NULL WHERE name = 'default'")
             .execute(&pool)
             .await
             .unwrap();
@@ -870,7 +840,7 @@ mod tests {
         assert_eq!(assignment(&pool, "default").await, Some(Some(standard)));
 
         // And the repair is itself a decision, so clearing it afterwards sticks.
-        sqlx::query("UPDATE displays SET playlist_id = NULL WHERE name = 'default'")
+        sqlx::query("UPDATE displays SET default_playlist_id = NULL WHERE name = 'default'")
             .execute(&pool)
             .await
             .unwrap();
@@ -891,7 +861,7 @@ mod tests {
         // What `PUT /api/displays/{name}` writes for "(keine)": the assignment
         // and the record that somebody chose it, in one statement.
         sqlx::query(
-            "UPDATE displays SET playlist_id = NULL, assignment_decided = 1 WHERE name = 'default'",
+            "UPDATE displays SET default_playlist_id = NULL, assignment_decided = 1 WHERE name = 'default'",
         )
         .execute(&pool)
         .await

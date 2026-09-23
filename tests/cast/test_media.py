@@ -78,8 +78,9 @@ def a_playlist(port=None):
     playlist_id = (rows[0]["id"] if rows
                    else http("POST", "/api/playlists", {"name": "Test"}, port=port)[1]["id"])
     for row in http("GET", "/api/displays", port=port)[1] or []:
-        if row.get("playlist_id") != playlist_id:
-            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id}, port=port)
+        if (row.get("schedule") or {}).get("default_playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}/schedule",
+                 {"default_playlist_id": playlist_id, "windows": []}, port=port)
     return playlist_id
 
 
@@ -394,5 +395,9 @@ if __name__ == "__main__":
             except Exception:
                 p.kill()
         shutil.rmtree(f"{SP}/media-display", ignore_errors=True)
+        # Case [109]'s copy of the controller log: scratch, and an untracked file
+        # beside the suite is noise in every `git status` afterwards.
+        if os.path.exists(f"{SP}/m.log"):
+            os.remove(f"{SP}/m.log")
     print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
     sys.exit(1 if failures else 0)

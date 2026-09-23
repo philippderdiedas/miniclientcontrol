@@ -264,8 +264,9 @@ def a_playlist():
     # screen and every playback event below goes missing. This is the
     # operator's step on the displays page, done from the test.
     for row in http("GET", "/api/displays")[1] or []:
-        if row.get("playlist_id") != playlist_id:
-            http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id})
+        if (row.get("schedule") or {}).get("default_playlist_id") != playlist_id:
+            http("PUT", f"/api/displays/{row['name']}/schedule",
+                 {"default_playlist_id": playlist_id, "windows": []})
     return playlist_id
 
 

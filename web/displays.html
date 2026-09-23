@@ -40,13 +40,21 @@
       padding: .35rem .8rem; border-radius: 4px; cursor: pointer;
     }
     button { padding: .35rem .7rem; cursor: pointer; }
+    fieldset { border: 1px solid var(--line); border-radius: 4px; margin: .6rem 0 0; padding: .5rem .7rem; }
+    legend { font-size: .85rem; color: var(--muted); }
+    .window { display: flex; flex-wrap: wrap; gap: .4rem .8rem; align-items: center; padding: .3rem 0; border-top: 1px dotted var(--line); }
+    .window:first-of-type { border-top: 0; }
+    .days label { margin-right: .35rem; font-size: .85rem; }
+    .overlap { color: var(--warn); font-size: .85rem; margin: .2rem 0; }
+    .live { font-size: .85rem; margin: .4rem 0 0; }
   </style>
 </head>
 <body>
   <h1>Displays</h1>
   <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/webhooks.html">Webhooks</a></nav>
   <p class="muted">
-    Welche Playlist auf welchem Schirm läuft. Welche Schirme es gibt, entscheidet
+    Was auf welchem Schirm läuft: eine Standard-Playlist und Zeitfenster nach
+    Wochentag und Uhrzeit. Welche Schirme es gibt, entscheidet
     das Deployment über <code>--display</code>; die Fensterplatzierung macht der
     Fenstermanager.
   </p>
@@ -92,7 +100,7 @@
 
     let PLAYLISTS = [];
     // Cards the operator has touched since their last save. Skipped by the poll,
-    // because a card holds the label input and the playlist dropdown.
+    // because a card holds the label input and the timetable editor.
     const dirty = new Set();
     // name -> the card's DOM node, so a reload can carry an edited card across
     // instead of rebuilding it and eating what is being typed.
@@ -102,6 +110,101 @@
     // detach the card and its feedback span, and the operator would see no
     // confirmation for a save that did happen.
     const saving = new Set();
+
+    const WEEKDAYS = [[1, 'Mo'], [2, 'Di'], [3, 'Mi'], [4, 'Do'], [5, 'Fr'], [6, 'Sa'], [7, 'So']];
+
+    const playlistName = (id) => {
+      const list = PLAYLISTS.find((p) => p.id === id);
+      return list ? list.name : `#${id}`;
+    };
+
+    const playlistSelect = (selected, withNone, onchange) => el('select', { onchange },
+      withNone ? el('option', { value: '', text: '(keine)' }) : null,
+      ...PLAYLISTS.map((list) => el('option', {
+        value: String(list.id),
+        text: `${list.name} (${list.items})`,
+        selected: selected === list.id,
+      })));
+
+    // A time input cannot hold 24:00; the server reads an end of 00:00 as the
+    // end of the day and answers 24:00, so the two are shown as one.
+    const toInput = (hhmm) => (hhmm === '24:00' ? '00:00' : hhmm);
+
+    // The timetable of one card: its default, its windows in priority order, and
+    // what the server last said about overlaps and what is live.
+    function scheduleEditor(schedule, markDirty) {
+      const defaultSelect = playlistSelect(schedule.default_playlist_id, true, markDirty);
+      const rows = el('div', {});
+      const hints = el('div', {});
+
+      const rowNodes = () => [...rows.children];
+
+      function addRow(entry) {
+        const days = el('span', { class: 'days' }, ...WEEKDAYS.map(([iso, label]) => el('label', {},
+          el('input', { type: 'checkbox', checked: entry.weekdays.includes(iso), onchange: markDirty }),
+          document.createTextNode(label))));
+        const from = el('input', { type: 'time', value: toInput(entry.from), oninput: markDirty });
+        const to = el('input', { type: 'time', value: toInput(entry.to), oninput: markDirty });
+        const list = playlistSelect(entry.playlist_id, false, markDirty);
+        const row = el('div', { class: 'window' }, days,
+          el('span', { text: 'von' }), from, el('span', { text: 'bis' }), to,
+          el('span', { text: '→' }), list,
+          el('button', { type: 'button', text: '↑', title: 'höhere Priorität', onclick: () => {
+            if (row.previousElementSibling) { rows.insertBefore(row, row.previousElementSibling); markDirty(); }
+          } }),
+          el('button', { type: 'button', text: '↓', title: 'niedrigere Priorität', onclick: () => {
+            if (row.nextElementSibling) { rows.insertBefore(row.nextElementSibling, row); markDirty(); }
+          } }),
+          el('button', { type: 'button', text: 'Entfernen', onclick: () => { row.remove(); markDirty(); } }));
+        row._read = () => ({
+          weekdays: [...days.querySelectorAll('input')]
+            .map((box, index) => (box.checked ? index + 1 : null)).filter(Boolean),
+          from: from.value,
+          to: to.value,
+          playlist_id: Number(list.value),
+        });
+        rows.append(row);
+      }
+
+      function showState(state) {
+        hints.replaceChildren(
+          ...(state.overlaps || []).map(([first, second]) => el('p', {
+            class: 'overlap',
+            text: `Zeile ${first + 1} verdeckt Zeile ${second + 1}, wo sie sich überschneiden.`,
+          })),
+          el('p', {
+            class: 'live',
+            text: state.now && state.now.playlist_id !== null
+              ? `Jetzt aktiv: ${playlistName(state.now.playlist_id)} `
+                + (state.now.window === null ? '(Standard)' : `(Zeitfenster ${state.now.window + 1})`)
+              : 'Jetzt aktiv: nichts – der Schirm zeigt die Leerlauf-Seite.',
+          }));
+      }
+
+      for (const entry of schedule.windows || []) addRow(entry);
+      showState(schedule);
+
+      const root = el('fieldset', {},
+        el('legend', { text: 'Zeitplan' }),
+        field('Standard-Playlist (wenn kein Zeitfenster passt)', defaultSelect),
+        rows,
+        el('button', { type: 'button', text: '+ Zeitfenster', onclick: () => {
+          if (!PLAYLISTS.length) return;
+          addRow({ weekdays: [1, 2, 3, 4, 5], from: '08:00', to: '18:00', playlist_id: PLAYLISTS[0].id });
+          markDirty();
+        } }),
+        el('p', { class: 'note', text: 'Das oberste passende Zeitfenster gewinnt. Bis 00:00 heißt: bis Tagesende.' }),
+        hints);
+
+      return {
+        root,
+        showState,
+        read: () => ({
+          default_playlist_id: defaultSelect.value === '' ? null : Number(defaultSelect.value),
+          windows: rowNodes().map((row) => row._read()),
+        }),
+      };
+    }
 
     function buildCard(display) {
       const card = el('div', { class: display.declared ? 'card' : 'card gone' });
@@ -116,44 +219,36 @@
       // without saying so.
       const name = el('span', { class: 'name', text: display.name });
 
-      const playlist = el('select', { onchange: markDirty },
-        el('option', { value: '', text: '(keine)' }),
-        ...PLAYLISTS.map((list) => el('option', {
-          value: String(list.id),
-          text: `${list.name} (${list.items})`,
-          selected: display.playlist_id === list.id,
-        })));
+      const schedule = scheduleEditor(display.schedule || { windows: [] }, markDirty);
 
       const feedback = el('span', { class: 'feedback' });
 
       const save = async () => {
         flash(feedback, 'Speichern…', false);
-        // Held across the request so a poll landing mid-flight keeps this card
-        // rather than replacing it -- otherwise the confirmation below would be
-        // written into a node that is no longer on screen, for a save that
-        // succeeded.
         saving.add(display.name);
-        let response;
+        const path = `/api/displays/${encodeURIComponent(display.name)}`;
+        const put = (url, body) => fetch(url, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
         try {
-          response = await fetch(`/api/displays/${encodeURIComponent(display.name)}`, {
-            method: 'PUT',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              label: label.value,
-              // null, not omitted: the server distinguishes "clear it" from
-              // "not given", so an empty selection has to travel as null.
-              playlist_id: playlist.value === '' ? null : Number(playlist.value),
-            }),
-          });
+          const labelRes = await put(path, { label: label.value });
+          if (!labelRes.ok) {
+            flash(feedback, await readError(labelRes, 'Fehler beim Speichern.'), true);
+            return;
+          }
+          const scheduleRes = await put(`${path}/schedule`, schedule.read());
+          if (!scheduleRes.ok) {
+            flash(feedback, await readError(scheduleRes, 'Fehler beim Speichern des Zeitplans.'), true);
+            return;
+          }
+          schedule.showState(await scheduleRes.json());
         } catch (_) {
-          saving.delete(display.name);
           flash(feedback, 'Server nicht erreichbar.', true);
           return;
-        }
-        saving.delete(display.name);
-        if (!response.ok) {
-          flash(feedback, await readError(response, 'Fehler beim Speichern.'), true);
-          return;
+        } finally {
+          saving.delete(display.name);
         }
         dirty.delete(display.name);
         card.classList.remove('dirty');
@@ -163,9 +258,9 @@
       card.append(
         el('div', { class: 'grid' },
           field('Name', label),
-          field('Playlist', playlist),
           el('div', { class: 'f' }, el('span', { text: 'Bezeichner' }), name),
           display.declared ? null : el('span', { class: 'badge', text: 'nicht deklariert' })),
+        schedule.root,
         display.declared ? null : el('p', {
           class: 'note',
           text: 'Dieses Display ist im Deployment nicht mehr deklariert. Seine '

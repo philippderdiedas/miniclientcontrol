@@ -272,8 +272,29 @@ def add_item(playlist_id, url=None, duration=LONG):
     return rows[-1]["id"]
 
 
+def put_schedule(display, default, windows=()):
+    """The whole timetable of one screen, as the displays page saves it."""
+    return http("PUT", f"/api/displays/{display}/schedule",
+                {"default_playlist_id": default, "windows": list(windows)})
+
+
 def assign(display, playlist_id):
-    return http("PUT", f"/api/displays/{display}", {"playlist_id": playlist_id})
+    """A screen's default playlist, and no windows."""
+    return put_schedule(display, playlist_id)
+
+
+def schedule_of(display):
+    for row in http("GET", "/api/displays")[1] or []:
+        if row["name"] == display:
+            return row.get("schedule") or {}
+    return {}
+
+
+def playlist_id_of(display):
+    for row in http("GET", "/api/displays")[1] or []:
+        if row["name"] == display:
+            return (row.get("schedule") or {}).get("default_playlist_id")
+    return "no such display"
 
 
 def current(display):
@@ -284,13 +305,6 @@ def current(display):
 
 def item_of(display):
     return current(display)[1]
-
-
-def playlist_id_of(display):
-    for row in http("GET", "/api/displays")[1] or []:
-        if row["name"] == display:
-            return row.get("playlist_id")
-    return "no such display"
 
 
 def case_70():
@@ -420,7 +434,7 @@ def case_73():
 
         # Clearing it is the other half of the same write, and the one an
         # operator reaches for when a screen should go dark.
-        http("PUT", "/api/displays/foyer", {"playlist_id": None})
+        assign("foyer", None)
         check("clearing the assignment empties the screen",
               until(lambda: item_of("foyer") is None), item_of("foyer"))
         # The stored assignment as well as what is on screen: the other loop is
@@ -604,7 +618,140 @@ def case_77():
               http("GET", "/api/playlists")[1])
 
 
-CASES = [case_70, case_71, case_72, case_73, case_74, case_75, case_76, case_77]
+def case_78():
+    print("\n[78] a screen's timetable is stored in order, checked, and read back")
+    # The routes and the checks are an HTTP handler's; no loop needed. On the
+    # non-primary screen, so an implementation that resolved every request to
+    # `displays[0]` would read the foyer's empty timetable here and fail.
+    with Alone():
+        office = make_playlist("Büro")
+        night = make_playlist("Nacht")
+        lunch = make_playlist("Mittag")
+        windows = [
+            {"weekdays": [1, 2, 3, 4, 5], "from": "12:00", "to": "13:00", "playlist_id": lunch},
+            {"weekdays": [1, 2, 3, 4, 5], "from": "08:00", "to": "18:00", "playlist_id": office},
+            {"weekdays": [5], "from": "22:00", "to": "00:00", "playlist_id": night},
+        ]
+        status, body = put_schedule("werkstatt", night, windows)
+        check("a timetable saves", status == 200, (status, body))
+        check("the answer is the timetable, windows in order",
+              [w["playlist_id"] for w in (body or {}).get("windows", [])] == [lunch, office, night],
+              body)
+        check("an end of 00:00 reads back as the end of the day",
+              body["windows"][2]["to"] == "24:00", body["windows"][2])
+        check("the lunch window hides the office one where they meet",
+              body.get("overlaps") == [[0, 1]], body.get("overlaps"))
+        check("and what is live now is reported",
+              "playlist_id" in (body.get("now") or {}) and "window" in body["now"], body.get("now"))
+
+        stored = schedule_of("werkstatt")
+        check("the list of displays embeds the same timetable",
+              stored.get("default_playlist_id") == night and len(stored.get("windows", [])) == 3,
+              stored)
+        check("and the other screen's is untouched",
+              schedule_of("foyer").get("windows") == [], schedule_of("foyer"))
+
+        print("\n[78b] a bad row is refused, names itself, and writes nothing")
+        refusals = [
+            ({"weekdays": [], "from": "08:00", "to": "18:00", "playlist_id": office}, "Zeile 2"),
+            ({"weekdays": [8], "from": "08:00", "to": "18:00", "playlist_id": office}, "Zeile 2"),
+            ({"weekdays": [1], "from": "8 Uhr", "to": "18:00", "playlist_id": office}, "Zeile 2"),
+            ({"weekdays": [1], "from": "08:00", "to": "08:00", "playlist_id": office}, "Zeile 2"),
+            ({"weekdays": [1], "from": "08:00", "to": "18:00", "playlist_id": 99999}, "Zeile 2"),
+        ]
+        for bad, row in refusals:
+            status, body = put_schedule("werkstatt", office, [windows[0], bad])
+            check(f"{bad} is a 400 naming {row}",
+                  status == 400 and row in (body or {}).get("error", ""), (status, body))
+        after = schedule_of("werkstatt")
+        check("and none of them changed anything -- the default included",
+              after.get("default_playlist_id") == night and len(after.get("windows", [])) == 3,
+              after)
+
+        status, body = put_schedule("werkstatt", 99999, [])
+        check("an unknown default is a 400 too", status == 400 and "error" in (body or {}),
+              (status, body))
+
+        status, _ = http("PUT", "/api/displays/werkstatt/schedule", {"windows": []})
+        check("leaving out the default is refused rather than read as none", status == 400, status)
+
+        print("\n[78c] replacing the timetable removes what was not sent")
+        status, body = put_schedule("werkstatt", office, [windows[1]])
+        check("one window left", status == 200 and len(body["windows"]) == 1, body)
+        check("no overlap left to warn about", body["overlaps"] == [], body)
+
+        print("\n[78d] the display's own route no longer takes a playlist")
+        status, _ = http("PUT", "/api/displays/werkstatt", {"playlist_id": night})
+        check("a script still sending playlist_id is refused, not ignored",
+              status == 422, status)
+        check("and nothing moved", playlist_id_of("werkstatt") == office, playlist_id_of("werkstatt"))
+        status, _ = http("PUT", "/api/displays/werkstatt", {"label": "Werkstatt hinten"})
+        check("the label still saves there", status == 200, status)
+
+
+def local_minute(offset=0):
+    """`HH:MM` for the local minute `offset` minutes from now -- the device's
+    clock, which is the one the controller reads."""
+    t = time.localtime(time.time() + offset * 60)
+    return f"{t.tm_hour:02d}:{t.tm_min:02d}"
+
+
+EVERY_DAY = [1, 2, 3, 4, 5, 6, 7]
+
+
+def case_79():
+    print("\n[79] a window that covers now switches the screen to its playlist")
+    # On the non-primary screen: the foyer is displays[0], and a loop that
+    # resolved every screen's timetable through `state.primary()` would pass a
+    # foyer-only case unchanged.
+    with Screens():
+        day = make_playlist("Tag")
+        window_list = make_playlist("Fenster")
+        foyer_list = make_playlist("Foyer")
+        day_item = add_item(day)
+        window_item = add_item(window_list)
+        foyer_item = add_item(foyer_list)
+        assign("foyer", foyer_list)
+
+        put_schedule("werkstatt", day, [
+            {"weekdays": EVERY_DAY, "from": local_minute(-2), "to": local_minute(30),
+             "playlist_id": window_list},
+        ])
+        check("the workshop plays the window's playlist, not its default",
+              until(lambda: item_of("werkstatt") == window_item),
+              (item_of("werkstatt"), window_item))
+        check("the foyer keeps its own", until(lambda: item_of("foyer") == foyer_item),
+              (item_of("foyer"), foyer_item))
+        now = schedule_of("werkstatt").get("now") or {}
+        check("and the timetable says which window is live",
+              now.get("playlist_id") == window_list and now.get("window") == 0, now)
+
+        print("\n[79b] a window starting at the next minute interrupts the item on screen")
+        # At least 20 s away, so "not yet" below is not a race with the minute.
+        wait = 1 if time.localtime().tm_sec < 40 else 2
+        # Taken now, from the same clock reading the window is built from: taken
+        # after the wait below it could already be a minute later.
+        boundary = (int(time.time() // 60) + wait) * 60
+        put_schedule("werkstatt", day, [
+            {"weekdays": EVERY_DAY, "from": local_minute(wait), "to": local_minute(wait + 30),
+             "playlist_id": window_list},
+        ])
+        check("until then the default plays",
+              until(lambda: item_of("werkstatt") == day_item), (item_of("werkstatt"), day_item))
+        check("the window is not live early", item_of("werkstatt") == day_item,
+              item_of("werkstatt"))
+        # The day item is 600 s long, so only the boundary timer can move it.
+        switched = until(lambda: item_of("werkstatt") == window_item,
+                         timeout=boundary - time.time() + 20)
+        late = round(time.time() - boundary, 1)
+        check("at the boundary the screen switches, mid-item", switched,
+              (item_of("werkstatt"), window_item))
+        check("within a few seconds of the minute, not at the end of the item",
+              switched and late < 10, late)
+        check("and the foyer never noticed", item_of("foyer") == foyer_item, item_of("foyer"))
+
+
+CASES = [case_70, case_71, case_72, case_73, case_74, case_75, case_76, case_77, case_78, case_79]
 
 
 def main(wanted):

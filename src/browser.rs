@@ -217,23 +217,15 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             }
 
             // 2. Fetch Playlist
-            // Which playlist this screen plays is read per pass and never
-            // cached: an operator reassigning it expects the next item to come
-            // from the new one, and this is a single row out of a table with
-            // single-digit rows. A failure to read it is *not* treated as "no
-            // playlist" -- a locked database would then blank a screen that is
-            // playing perfectly well -- so it takes the same log-and-retry path
-            // as a failed playlist read below and leaves the page alone.
-            let assigned = match sqlx::query_scalar::<_, Option<i64>>(
-                "SELECT playlist_id FROM displays WHERE name = ?",
-            )
-            .bind(&display_name)
-            .fetch_optional(&state.pool)
-            .await
-            {
-                Ok(row) => row.flatten(),
+            // What this screen plays is resolved per pass and never cached: an
+            // operator editing the timetable expects the next item to follow it,
+            // and a window that opened since the last pass is exactly that. A
+            // failure to read it is *not* treated as "no playlist" -- a locked
+            // database would then blank a screen that is playing perfectly well.
+            let assigned = match crate::schedule::active_playlist(&state.pool, &display_name).await {
+                Ok(active) => active.playlist_id,
                 Err(e) => {
-                    error!("Failed to read the playlist assignment: {}", e);
+                    error!("Failed to read the timetable: {}", e);
                     sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -536,6 +528,21 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 let mut skip_requested = false;
                 let mut reload_before_next = false;
                 while !remaining.is_zero() {
+                    // Recomputed on every pass rather than once per item: an
+                    // edited timetable pokes `playlist_signal`, which lands here,
+                    // and a timer computed before the edit would fire at a
+                    // boundary that no longer exists -- or miss one that does.
+                    let boundary = match crate::schedule::load(&state.pool, &display_name).await {
+                        Ok((_, windows)) => {
+                            let now = crate::schedule::now();
+                            crate::schedule::next_boundary(&windows, now)
+                                .and_then(|at| (at - now).to_std().ok())
+                        }
+                        Err(e) => {
+                            debug!("Failed to read the timetable for the boundary timer: {}", e);
+                            None
+                        }
+                    };
                     tokio::select! {
                         _ = sleep(remaining) => {
                             info!("Duration ended.");
@@ -598,6 +605,28 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                                 break;
                             }
                         }
+                        _ = async {
+                            match boundary {
+                                Some(wait) => sleep(wait).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {
+                            // A window opened or closed. Switching is immediate,
+                            // like a reassignment; two adjacent windows naming the
+                            // same playlist are not a switch, and the item carries
+                            // on with its remaining time.
+                            let live = crate::schedule::active_playlist(&state.pool, &display_name)
+                                .await
+                                .map(|active| active.playlist_id);
+                            if matches!(live, Ok(live) if live != assigned) {
+                                info!("The timetable changed what this screen plays, leaving item {} now.", item.id);
+                                reload_before_next = true;
+                                break;
+                            }
+                            remaining = intended_duration
+                                .checked_sub(item_started_at.elapsed())
+                                .unwrap_or(Duration::from_secs(0));
+                        },
                     }
                 }
 
@@ -1022,29 +1051,35 @@ fn empty_playlist_url(port: u16, display: &str) -> String {
 
 /// Whether the item on screen is still one this display should be showing.
 ///
-/// The join against `displays` is what makes a reassignment land on the item
-/// already playing: an item that belongs to a playlist this screen is no longer
-/// assigned -- including no playlist at all, since SQL never matches two `NULL`s
-/// -- is as gone from here as a deleted one. Waiting out its duration instead
-/// would leave an operator standing in front of the screen they just reassigned
-/// watching it ignore them for up to a whole item. The assignment is read here
-/// rather than taken from the pass's snapshot for the same reason that snapshot
-/// cannot be trusted anywhere else: it may have changed since.
+/// Judged against the playlist the timetable makes live *now*, not the one the
+/// pass started with: a reassignment, a timetable edit and an item that was
+/// disabled all land on the item already playing. Resolved here rather than
+/// taken from the pass's snapshot for the reason that snapshot cannot be trusted
+/// anywhere else: it may have changed since.
 async fn is_playlist_item_active_now(state: &AppState, display_name: &str, id: i64) -> bool {
+    let live = match crate::schedule::active_playlist(&state.pool, display_name).await {
+        Ok(active) => active.playlist_id,
+        Err(e) => {
+            error!("Failed to read the timetable: {}", e);
+            return false;
+        }
+    };
+    let Some(playlist_id) = live else {
+        return false;
+    };
     let row: Result<(i64,), _> = sqlx::query_as(
         r#"
         SELECT COUNT(*)
         FROM playlist_items p
-        JOIN displays d ON d.playlist_id = p.playlist_id
         WHERE p.id = ?
-          AND d.name = ?
+          AND p.playlist_id = ?
           AND p.is_enabled = 1
           AND (p.start_date IS NULL OR datetime(p.start_date) <= datetime('now'))
           AND (p.end_date IS NULL OR datetime('now') <= datetime(p.end_date))
         "#,
     )
     .bind(id)
-    .bind(display_name)
+    .bind(playlist_id)
     .fetch_one(&state.pool)
     .await;
 

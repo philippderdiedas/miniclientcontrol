@@ -201,12 +201,12 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // playlist and no second chance.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS displays (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-            name               TEXT NOT NULL UNIQUE,
-            label              TEXT,
-            playlist_id        INTEGER,
-            assignment_decided BOOLEAN DEFAULT 0,
-            FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT NOT NULL UNIQUE,
+            label               TEXT,
+            default_playlist_id INTEGER,
+            assignment_decided  BOOLEAN DEFAULT 0,
+            FOREIGN KEY(default_playlist_id) REFERENCES playlists(id) ON DELETE SET NULL
         );"
     )
     .execute(pool)
@@ -229,6 +229,43 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             .execute(pool)
             .await;
     }
+
+    // `playlist_id` became the *default* playlist when displays got a timetable,
+    // and is named for what it is. Renamed in place, so its foreign key, its
+    // `ON DELETE SET NULL` and every stored assignment carry over. `?` rather
+    // than `let _`: a database left half-way would have every query in
+    // `display.rs` naming a column that is not there.
+    let has_old_assignment: bool = sqlx::query(
+        "SELECT count(*) FROM pragma_table_info('displays') WHERE name='playlist_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .map(|row| row.get::<i32, _>(0) > 0)
+    .unwrap_or(false);
+
+    if has_old_assignment {
+        sqlx::query("ALTER TABLE displays RENAME COLUMN playlist_id TO default_playlist_id")
+            .execute(pool)
+            .await?;
+    }
+
+    // A display's timetable: ordered windows, the first match wins. Deleting a
+    // playlist deletes its windows -- a window with no playlist would be a
+    // setting that silently does nothing -- and deleting a display row takes its
+    // timetable with it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schedule_windows (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            display      TEXT NOT NULL REFERENCES displays(name) ON DELETE CASCADE,
+            position     INTEGER NOT NULL,
+            weekdays     INTEGER NOT NULL,
+            start_minute INTEGER NOT NULL,
+            end_minute   INTEGER NOT NULL,
+            playlist_id  INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE
+        );",
+    )
+    .execute(pool)
+    .await?;
 
     let has_playlist_id: bool = sqlx::query(
         "SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='playlist_id'",
@@ -566,27 +603,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_playlist_unassigns_it_from_a_display() {
+    async fn deleting_a_playlist_unassigns_it_and_deletes_its_windows() {
         let pool = pool().await;
-        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'Foyer')")
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (1, 'Foyer'), (2, 'Nacht')")
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO displays (name, playlist_id) VALUES ('foyer', 1)")
+        sqlx::query("INSERT INTO displays (name, default_playlist_id) VALUES ('foyer', 1)")
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO schedule_windows (display, position, weekdays, start_minute, end_minute, playlist_id)
+             VALUES ('foyer', 0, 127, 1320, 360, 1), ('foyer', 1, 127, 0, 1440, 2)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        sqlx::query("DELETE FROM playlists WHERE id = 1")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query("DELETE FROM playlists WHERE id = 1").execute(&pool).await.unwrap();
 
-        let assigned: Option<i64> =
-            sqlx::query_scalar("SELECT playlist_id FROM displays WHERE name = 'foyer'")
+        let default: Option<i64> =
+            sqlx::query_scalar("SELECT default_playlist_id FROM displays WHERE name = 'foyer'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(assigned.is_none(), "ON DELETE SET NULL did not fire -- is PRAGMA foreign_keys on?");
+        assert!(default.is_none(), "ON DELETE SET NULL did not fire -- is PRAGMA foreign_keys on?");
+        let windows: Vec<i64> = sqlx::query_scalar("SELECT playlist_id FROM schedule_windows")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(windows, vec![2], "the window naming the deleted playlist must go with it");
+    }
+
+    #[tokio::test]
+    async fn a_display_assigned_before_dayparting_keeps_its_playlist_as_the_default() {
+        let pool = sqlx::SqlitePool::connect("sqlite:file:db_display_rename?mode=memory&cache=shared")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE playlists (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE displays (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, label TEXT,
+                playlist_id INTEGER, assignment_decided BOOLEAN DEFAULT 0,
+                FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE SET NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO playlists (id, name) VALUES (5, 'Standard')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO displays (name, playlist_id, assignment_decided) VALUES ('left', 5, 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        run_migrations(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        let default: Option<i64> =
+            sqlx::query_scalar("SELECT default_playlist_id FROM displays WHERE name = 'left'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(default, Some(5));
+        assert_eq!(count(&pool, "SELECT count(*) FROM schedule_windows").await, 0);
     }
 }

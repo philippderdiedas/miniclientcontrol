@@ -224,6 +224,13 @@
     // Every node here is built with createElement/textContent. Filenames and URLs are
     // operator- and upload-supplied, so string-interpolated innerHTML would be an
     // injection sink.
+    // What a screen plays right now, as its timetable resolves it -- a window's
+    // playlist, or the default, or nothing.
+    const livePlaylist = (screen) => {
+      const id = screen.schedule && screen.schedule.now ? screen.schedule.now.playlist_id : null;
+      return id === undefined ? null : id;
+    };
+
     const el = (tag, props = {}, ...children) => {
       const node = document.createElement(tag);
       for (const [k, v] of Object.entries(props)) {
@@ -775,12 +782,12 @@
       const note = document.getElementById('screenNote');
       const screen = screenOf(currentScreen);
       if (!screen || !currentPlaylist) { note.textContent = ''; return; }
-      if (screen.playlist_id === null || screen.playlist_id === undefined) {
+      if (livePlaylist(screen) === null) {
         note.textContent = `„${screenLabel()}“ spielt zurzeit keine Playlist.`;
         return;
       }
-      if (String(screen.playlist_id) !== String(currentPlaylist)) {
-        note.textContent = `„${screenLabel()}“ spielt „${playlistName(screen.playlist_id)}“ `
+      if (String(livePlaylist(screen)) !== String(currentPlaylist)) {
+        note.textContent = `„${screenLabel()}“ spielt „${playlistName(livePlaylist(screen))}“ `
           + '– unten wird eine andere Playlist bearbeitet.';
         return;
       }
@@ -1170,7 +1177,7 @@
         // the one on screen here -- so an id the list cannot explain says where
         // it is rather than trailing off into "…".
         const screen = screenOf(currentScreen);
-        const elsewhere = screen && String(screen.playlist_id) !== String(currentPlaylist);
+        const elsewhere = screen && String(livePlaylist(screen)) !== String(currentPlaylist);
         const source = item ? sourceLabel(item)
           : (elsewhere ? 'in einer anderen Playlist' : '…');
         nowPlaying.textContent = currentItemId
