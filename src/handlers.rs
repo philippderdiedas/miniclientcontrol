@@ -457,11 +457,28 @@ pub async fn add_to_playlist(
         Ok(value) => value.unwrap_or_else(|| crate::models::DEFAULT_FIT_BACKGROUND.to_string()),
         Err(response) => return response,
     };
-    let fit_mode = payload
-        .fit_mode
-        .as_deref()
-        .map(FitMode::from_value)
-        .unwrap_or_default();
+    // Named or not, an item always stores a concrete fit. When it names none,
+    // the default follows what it plays: a PDF keeps the full-width layout it
+    // has always had.
+    let fit_mode = match payload.fit_mode.as_deref() {
+        Some(raw) => FitMode::from_value(raw),
+        None => {
+            let mimetype = match payload.asset_id {
+                Some(asset_id) => sqlx::query_scalar::<_, String>(
+                    "SELECT mimetype FROM assets WHERE id = ?",
+                )
+                .bind(asset_id)
+                .fetch_optional(&state.pool)
+                .await
+                .unwrap_or_else(|e| {
+                    error!("Failed to read the mimetype of asset {}: {}", asset_id, e);
+                    None
+                }),
+                None => None,
+            };
+            FitMode::default_for(mimetype.as_deref())
+        }
+    };
 
     // Scoped to the target playlist: an unscoped max would give a new
     // playlist's first item a high order borrowed from an unrelated screen's
@@ -1148,13 +1165,21 @@ async fn set_override_of(
     // Captured before `payload.url` is moved into the item below.
     let announced_url = payload.url.clone().unwrap_or_default();
 
+    // Decided before `mimetype` moves into the item: an asset override that
+    // names no fit gets the one its kind defaults to, as a playlist item does.
+    let fit_mode = payload
+        .fit_mode
+        .as_deref()
+        .map(FitMode::from_value)
+        .unwrap_or_else(|| FitMode::default_for(mimetype.as_deref()));
+
     let override_item = OverrideItem {
         asset_id: payload.asset_id,
         url: payload.url,
         local_path,
         mimetype,
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
-        fit_mode: payload.fit_mode.as_deref().map(FitMode::from_value).unwrap_or_default(),
+        fit_mode,
         fit_background,
     };
 

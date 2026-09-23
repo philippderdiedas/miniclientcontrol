@@ -229,12 +229,17 @@ impl Default for ScrollMode {
     }
 }
 
-/// How an image or video asset sits on the screen. Stored per playlist item by
-/// name; `web/media_viewer.html` is what turns it into a layout.
+/// How an image, video or PDF asset sits on the screen. Stored per playlist
+/// item by name; `web/media_viewer.html` and `web/pdf_viewer.html` are what
+/// turn it into a layout.
 ///
-/// Four of these are CSS `object-fit`. `Scroll` is not: it draws the image at
-/// full width and natural height and lets the document scroll, which is what
-/// gives the scroll runtime something to move.
+/// This is the layout axis only. Whether anything then moves is `ScrollMode`'s
+/// business, and the two combine: `Width` on a tall image or a PDF gives the
+/// scroll runtime a document to scroll, `Contain` or `Height` on a PDF gives one
+/// screen per page, which a step scroll then turns into paging.
+///
+/// Four of these are CSS `object-fit`. `Width` and `Height` are not: they fill
+/// one dimension and let the other follow the asset's aspect ratio.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum FitMode {
@@ -243,19 +248,24 @@ pub enum FitMode {
     Cover,
     Fill,
     None,
-    Scroll,
+    Width,
+    Height,
 }
 
 impl FitMode {
     /// Total on purpose. The value ends up on a screen nobody is standing in
     /// front of, so an unknown one falls back rather than failing -- the same
     /// rule the overlay applies to an unknown corner.
+    ///
+    /// `scroll` is what `width` was called before the rename. It is read, never
+    /// written, so a row stored under the old name keeps its layout.
     pub fn from_value(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "cover" => Self::Cover,
             "fill" => Self::Fill,
             "none" => Self::None,
-            "scroll" => Self::Scroll,
+            "width" | "scroll" => Self::Width,
+            "height" => Self::Height,
             _ => Self::Contain,
         }
     }
@@ -266,7 +276,19 @@ impl FitMode {
             Self::Cover => "cover",
             Self::Fill => "fill",
             Self::None => "none",
-            Self::Scroll => "scroll",
+            Self::Width => "width",
+            Self::Height => "height",
+        }
+    }
+
+    /// The fit an item gets when nobody chose one, which depends on what it
+    /// plays. A PDF has always been drawn at full width, so that is its default;
+    /// `Contain` there would repaginate every PDF a venue already has.
+    pub fn default_for(mimetype: Option<&str>) -> Self {
+        if mimetype.is_some_and(|m| m.eq_ignore_ascii_case("application/pdf")) {
+            Self::Width
+        } else {
+            Self::Contain
         }
     }
 }
@@ -552,19 +574,40 @@ mod tests {
     }
 
     #[test]
-    fn fit_mode_parses_its_five_names_and_falls_back_on_anything_else() {
+    fn fit_mode_parses_its_six_names_and_falls_back_on_anything_else() {
         use super::FitMode;
         assert_eq!(FitMode::from_value("contain"), FitMode::Contain);
         assert_eq!(FitMode::from_value("cover"), FitMode::Cover);
         assert_eq!(FitMode::from_value("fill"), FitMode::Fill);
         assert_eq!(FitMode::from_value("none"), FitMode::None);
-        assert_eq!(FitMode::from_value("scroll"), FitMode::Scroll);
+        assert_eq!(FitMode::from_value("width"), FitMode::Width);
+        assert_eq!(FitMode::from_value("height"), FitMode::Height);
         assert_eq!(FitMode::from_value(" COVER "), FitMode::Cover);
-        for junk in ["", "stretch", "object-fit: cover", "Scroll;"] {
+        for junk in ["", "stretch", "object-fit: cover", "width;"] {
             assert_eq!(FitMode::from_value(junk), FitMode::Contain, "{junk:?}");
         }
-        for mode in [FitMode::Contain, FitMode::Cover, FitMode::Fill, FitMode::None, FitMode::Scroll] {
+        for mode in [FitMode::Contain, FitMode::Cover, FitMode::Fill, FitMode::None,
+                     FitMode::Width, FitMode::Height] {
             assert_eq!(FitMode::from_value(mode.as_str()), mode);
         }
+    }
+
+    #[test]
+    fn scroll_is_still_read_as_width() {
+        // What `width` was called before it was renamed; a row written then must
+        // keep its layout rather than fall back.
+        assert_eq!(super::FitMode::from_value("scroll"), super::FitMode::Width);
+    }
+
+    #[test]
+    fn a_pdf_defaults_to_full_width_and_everything_else_to_contain() {
+        use super::FitMode;
+        // Full width is how a PDF has always been drawn; anything else would
+        // change every existing PDF item on upgrade.
+        assert_eq!(FitMode::default_for(Some("application/pdf")), FitMode::Width);
+        assert_eq!(FitMode::default_for(Some("Application/PDF")), FitMode::Width);
+        assert_eq!(FitMode::default_for(Some("image/png")), FitMode::Contain);
+        assert_eq!(FitMode::default_for(Some("video/mp4")), FitMode::Contain);
+        assert_eq!(FitMode::default_for(None), FitMode::Contain);
     }
 }

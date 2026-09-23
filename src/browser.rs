@@ -899,7 +899,7 @@ fn asset_target_url(
     background: &str,
 ) -> String {
     if is_internal_pdf_mimetype(mimetype) {
-        return internal_pdf_viewer_url(port, local_path, scroll);
+        return internal_pdf_viewer_url(port, local_path, scroll, fit, background);
     }
     if let Some(kind) = media_kind(mimetype) {
         return format!(
@@ -934,7 +934,13 @@ fn is_internal_pdf_viewer_url(url: &str) -> bool {
     url.contains("/pdf_viewer.html?")
 }
 
-fn internal_pdf_viewer_url(port: u16, local_path: &str, mode: &ScrollMode) -> String {
+fn internal_pdf_viewer_url(
+    port: u16,
+    local_path: &str,
+    mode: &ScrollMode,
+    fit: FitMode,
+    background: &str,
+) -> String {
     let mut query = vec![format!("asset={}", encode(local_path))];
     match mode {
         ScrollMode::None => {
@@ -958,6 +964,9 @@ fn internal_pdf_viewer_url(port: u16, local_path: &str, mode: &ScrollMode) -> St
             }
         }
     }
+
+    query.push(format!("fit={}", fit.as_str()));
+    query.push(format!("bg={}", encode(background)));
 
     format!(
         "http://127.0.0.1:{}/pdf_viewer.html?{}",
@@ -1641,10 +1650,14 @@ mod tests {
     }
 
     #[test]
-    fn a_pdf_keeps_its_own_viewer() {
+    fn a_pdf_keeps_its_own_viewer_and_is_told_its_fit() {
         let url = asset_target_url(3000, "doc.pdf", Some("application/pdf"), &ScrollMode::None,
-                                   FitMode::Cover, "#000000");
+                                   FitMode::Height, "#112233");
         assert!(url.contains("/pdf_viewer.html?"), "{url}");
+        assert!(url.contains("&fit=height"), "{url}");
+        assert!(url.contains("&bg=%23112233"), "{url}");
+        // Still exempt from start_scrolling: it drives its own scrolling.
+        assert!(is_internal_pdf_viewer_url(&url), "{url}");
     }
 
     #[test]
@@ -1662,7 +1675,7 @@ mod tests {
         // `scroll` depends on the scroll runtime driving this page. Only the PDF
         // viewer scrolls itself and is skipped by `start_scrolling`.
         let url = asset_target_url(3000, "tall.png", Some("image/png"), &ScrollMode::None,
-                                   FitMode::Scroll, "#000000");
+                                   FitMode::Width, "#000000");
         assert!(!is_internal_pdf_viewer_url(&url), "{url}");
     }
 }

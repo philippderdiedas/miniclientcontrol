@@ -22,6 +22,37 @@ HTTP, TLS, CDP = 3051, 3494, 9252
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
+
+
+def pdf_bytes(pages=2, width=595, height=842):
+    """A minimal PDF, built by hand so the suite needs no fixture file.
+
+    Portrait A4 pages, each with one filled rectangle so pdf.js has something to
+    draw. The xref offsets are computed, not guessed: pdf.js repairs a broken
+    table, but a test that only passes because of a repair is testing the repair.
+    """
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(pages))
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>",
+               f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>"]
+    for i in range(pages):
+        content = f"0 0 1 rg {50 + 10 * i} 50 200 200 re f"
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+                       f"/Contents {4 + 2 * i} 0 R >>")
+        objects.append(f"<< /Length {len(content)} >>\nstream\n{content}\nendstream")
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += f"{number} 0 obj\n{body}\nendobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref}\n%%EOF\n").encode()
+    return out
+
+
 procs = []
 
 
@@ -77,11 +108,31 @@ def api_flow():
 
         status, _ = http("POST", "/api/playlist",
                          {"asset_id": asset, "playlist_id": playlist,
-                          "fit_mode": "scroll", "fit_background": "#123"})
+                          "fit_mode": "height", "fit_background": "#123"})
         created = http("GET", "/api/playlist")[1][-1]
         check("a new item can carry both from the start",
-              status == 201 and created["fit_mode"] == "scroll"
+              status == 201 and created["fit_mode"] == "height"
               and created["fit_background"] == "#123", created)
+
+        http("POST", "/api/playlist",
+             {"asset_id": asset, "playlist_id": playlist, "fit_mode": "scroll"})
+        renamed = http("GET", "/api/playlist")[1][-1]
+        check("`scroll`, the old name for full width, is stored as width",
+              renamed["fit_mode"] == "width", renamed)
+
+        print("\n[101b] a PDF defaults to full width, the way it has always been drawn")
+        pdf = upload("handout.pdf", pdf_bytes(), "application/pdf")
+        http("POST", "/api/playlist", {"asset_id": pdf, "playlist_id": playlist})
+        handout = http("GET", "/api/playlist")[1][-1]
+        check("an item that names no fit gets width for a PDF",
+              handout["fit_mode"] == "width", handout)
+        http("POST", "/api/playlist",
+             {"asset_id": pdf, "playlist_id": playlist, "fit_mode": "contain"})
+        chosen = http("GET", "/api/playlist")[1][-1]
+        check("and whatever it names when it names one", chosen["fit_mode"] == "contain", chosen)
+        http("POST", "/api/playlist", {"url": "https://example.test", "playlist_id": playlist})
+        page = http("GET", "/api/playlist")[1][-1]
+        check("a URL item gets the plain default", page["fit_mode"] == "contain", page)
 
         print("\n[102] nonsense falls back, a colour that is not one is refused")
         http("PUT", f"/api/playlist/{row['id']}", {"fit_mode": "stretch-it"})
@@ -202,13 +253,13 @@ async def browser_flow():
               shown and shown["background"] == "rgb(0, 255, 0)", shown)
         check("and nothing to scroll", shown and shown["scrollable"] is False, shown)
 
-        print("\n[104] `scroll` draws it full width and gives the document height")
-        http("PUT", f"/api/playlist/{image_item}", {"fit_mode": "scroll"}, port=HTTP)
+        print("\n[104] `width` draws it full width and gives the document height")
+        http("PUT", f"/api/playlist/{image_item}", {"fit_mode": "width"}, port=HTTP)
         # The edit lands on the item's next navigation; the item is three
         # seconds long and loops, so that is within a few seconds. Waits for the
         # height as well as the URL: until the image has loaded it is zero
         # pixels tall and the page is not scrollable yet.
-        tall = await on_media(page, lambda m: "fit=scroll" in m["href"] and m["scrollable"])
+        tall = await on_media(page, lambda m: "fit=width" in m["href"] and m["scrollable"])
         check("the page is taller than the screen",
               tall and tall["scrollable"] is True, tall)
 
