@@ -8,16 +8,28 @@ import os, sys, urllib.error, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_cast import Server, check, failures, HTTP, TLS
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
 def status_of(path, user=None, password=None):
+    """The status, not following a redirect -- a page that sends an
+    unauthenticated browser to the login page answers 303 with a Location."""
     req = urllib.request.Request(f"http://127.0.0.1:{HTTP}{path}")
     if user:
         import base64
         token = base64.b64encode(f"{user}:{password}".encode()).decode()
         req.add_header("Authorization", "Basic " + token)
     try:
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with _opener.open(req, timeout=5) as res:
             return res.status
     except urllib.error.HTTPError as e:
+        if e.code in (302, 303) and (e.headers.get("Location") or "").startswith("/login.html"):
+            return "login"
         return e.code
 
 def main():
@@ -30,14 +42,15 @@ def main():
         for path in ["/admin.html", "/playlist.html", "/assets.html",
                      "/api/playlist", "/api/settings"]:
             code = status_of(path)
-            check(f"{path} demands credentials", code == 401, code)
+            # An API answers 401; a page sends the browser to the login page.
+            check(f"{path} demands credentials", code in (401, "login"), code)
 
         for path in ["/admin.html", "/playlist.html", "/api/playlist"]:
             code = status_of(path, "admin", "s3cret")
             check(f"{path} opens with credentials", code == 200, code)
 
         check("wrong credentials are refused",
-              status_of("/admin.html", "admin", "nope") == 401)
+              status_of("/admin.html", "admin", "nope") in (401, "login"))
 
         # the old sender URL should still land somewhere useful
         check("/cast.html redirects to the new root",

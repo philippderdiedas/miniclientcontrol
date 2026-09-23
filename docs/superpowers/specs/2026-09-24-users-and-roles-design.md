@@ -1,6 +1,6 @@
 # Users, roles and proposed changes
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-24
 
 ## What and why
@@ -270,3 +270,18 @@ first admin).
 - Proposing overrides, "Play now", settings or webhooks.
 - Webhook events for proposals.
 - Per-playlist or per-display permissions.
+
+## Amendments made while implementing
+
+- **Open mode needs no command-line credential either.** Open only when there is
+  no account *and* no `--basic-auth-*` flag: a device run with only the flags had
+  a protected admin before, and would have come up open.
+- A bundle is claimed with a state `applying` in one statement before it is
+  replayed, so two managers approving at once cannot both replay it.
+- Webhook targets are admin-only even to read (their headers hold other people's
+  tokens), which the role table's first draft had as `Read`.
+- The editor's pickers do **not** yet offer a playlist proposed in the same draft:
+  the API accepts `new:N` as `playlist_id`, but the playlist page loads a list by
+  id and has no draft objects to show. An editor proposes the playlist, and adds
+  items to it once it is approved — or through the API with the placeholder.
+- New pages need `touch src/web.rs` to be compiled in (see `CLAUDE.md`).

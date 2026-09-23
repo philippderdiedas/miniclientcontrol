@@ -12,7 +12,8 @@ python3 test_conflict.py    # override precedence during a cast
 python3 test_settings.py    # runtime settings, persistence, CLI precedence
 python3 test_auth.py        # public cast paths vs. protected admin, loopback-only HTTP
 python3 test_reserve.py     # the claim step: reserve before sharing
-python3 test_basicauth.py   # credentials from the admin panel, CLI as the way back in
+python3 test_basicauth.py   # the first account from the admin panel, CLI as the way back in
+python3 test_users.py       # accounts, sessions, roles, and an editor's proposals
 python3 test_port.py        # TLS port clash: fatal when explicit, next free otherwise
 python3 test_public.py      # --public-url modes and the QR endpoint
 python3 test_guestpage.py   # a guest showing a web page instead of casting (~45s)

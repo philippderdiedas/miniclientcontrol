@@ -25,8 +25,9 @@ async def main():
             "import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
             "s.connect(('10.254.254.254',1));print(s.getsockname()[0])"],
             capture_output=True, text=True).stdout.strip()
-        http("PUT", "/api/settings",
-             {"auth_enabled": True, "auth_user": "op", "auth_password": "geheim!!"})
+        # The first account, created while the device is still open; from here
+        # on credentials decide.
+        http("POST", "/api/users", {"name": "op", "password": "geheim!!", "role": "admin"})
         try:
             with urllib.request.urlopen(f"https://{lan}:{TLS}/api/audio", timeout=5,
                                         context=ssl._create_unverified_context()) as res:

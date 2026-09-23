@@ -105,6 +105,18 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // around it. Both carry a default so the rows an older binary wrote get one
     // too -- and every read COALESCEs anyway, because a NULL in a String field
     // fails the whole playlist query and blanks the screen.
+    // An editor's upload, stored at once but hidden until its bundle is applied.
+    let has_pending: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('assets') WHERE name='pending_changeset'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+    if !has_pending {
+        let _ = sqlx::query("ALTER TABLE assets ADD COLUMN pending_changeset INTEGER")
+            .execute(pool)
+            .await;
+    }
+
     let has_fit_mode: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name='fit_mode'")
         .fetch_one(pool)
         .await
@@ -153,6 +165,91 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Accounts and their sessions. A session stores only the SHA-256 of its
+    // cookie value, so a copy of the database signs nobody in.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role          TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'editor')),
+            disabled      BOOLEAN NOT NULL DEFAULT 0,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );"
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY,
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            expires_at DATETIME NOT NULL
+        );"
+    )
+    .execute(pool)
+    .await?;
+
+    // An editor's proposals: a bundle, and the requests it holds, each with a
+    // snapshot of the object as it read when proposed.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS changesets (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            state        TEXT NOT NULL CHECK (state IN ('draft','submitted','applying','applied','rejected','stale','failed')),
+            note         TEXT,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            submitted_at DATETIME,
+            decided_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            decided_at   DATETIME
+        );"
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS change_requests (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            changeset_id INTEGER NOT NULL REFERENCES changesets(id) ON DELETE CASCADE,
+            position     INTEGER NOT NULL,
+            method       TEXT NOT NULL,
+            path         TEXT NOT NULL,
+            body         TEXT,
+            placeholder  TEXT,
+            before       TEXT,
+            applied      BOOLEAN NOT NULL DEFAULT 0,
+            result       TEXT
+        );"
+    )
+    .execute(pool)
+    .await?;
+
+    // After the table it alters, not before: on a fresh database the probe
+    // would find no table, the ALTER would fail silently, and every UPDATE
+    // naming the column after it with it.
+    // Whether the author has looked at a decision on their bundle since it was
+    // made -- what the editor's "new decisions" count is.
+    let has_seen: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('changesets') WHERE name='author_seen'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+    if !has_seen {
+        let _ = sqlx::query("ALTER TABLE changesets ADD COLUMN author_seen BOOLEAN NOT NULL DEFAULT 1")
+            .execute(pool)
+            .await;
+    }
+    // A decided bundle its author has cleared from their own list; kept for the
+    // reviewers' history.
+    let has_hidden: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('changesets') WHERE name='author_hidden'")
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false);
+    if !has_hidden {
+        let _ = sqlx::query("ALTER TABLE changesets ADD COLUMN author_hidden BOOLEAN NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+    }
 
     // 8. Webhook targets. A table rather than a settings key: these are rows
     // with independent lifetimes, and the settings KV would have to rewrite the

@@ -65,6 +65,8 @@
   </table>
 
   <script src="/preview.js"></script>
+  <script src="/me.js"></script>
+  <script src="/proposals.js"></script>
   <script>
     // Rows are built with DOM calls rather than innerHTML: filenames come from
     // uploads and would otherwise be interpreted as markup.
@@ -267,5 +269,6 @@
 
     loadAssets();
   </script>
+  <script>Me.bar().then(() => Proposals.start());</script>
 </body>
 </html>

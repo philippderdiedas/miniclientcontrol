@@ -221,6 +221,8 @@
   <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
   <script src="/preview.js"></script>
+  <script src="/me.js"></script>
+  <script src="/proposals.js"></script>
   <script>
     // Every node here is built with createElement/textContent. Filenames and URLs are
     // operator- and upload-supplied, so string-interpolated innerHTML would be an
@@ -989,7 +991,9 @@
         dirty.delete(item.id);
         card.classList.remove('dirty');
         dirtyBadge.hidden = true;
-        flash(feedback, 'gespeichert ✓');
+        // 202: an editor's save is recorded as a proposal, not applied.
+        flash(feedback, res.status === 202 ? 'als Vorschlag gespeichert ✓' : 'gespeichert ✓');
+        if (res.status === 202 && globalThis.Proposals) Proposals.refresh();
         await loadPlaylist();
       });
 
@@ -1342,5 +1346,6 @@
       setInterval(poll, 2000);
     })();
   </script>
+  <script>Me.bar().then(() => Proposals.start());</script>
 </body>
 </html>

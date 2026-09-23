@@ -211,7 +211,7 @@ declaration.
 
 - `GET /api/settings` — current settings plus which ones the command line pinned
 - `PUT /api/settings` — `{ cast_enabled?, guest_pages_enabled?, cast_auth?,
-  cast_code?, cast_qr_target?, auth_enabled?, auth_user?, auth_password?,
+  cast_code?, cast_qr_target?,
   overlay?, locale? }`; a pinned setting answers `409`. `cast_qr_target` is
   `screen` or `chooser` and decides whether a panel's QR code names that panel or
   opens the screen chooser
@@ -243,6 +243,39 @@ declaration.
 - `PUT /api/displays/{name}/schedule` — replace the whole timetable; both fields
   required, `default_playlist_id: null` means none. A bad row is a `400` naming it,
   and nothing is written
+
+### Accounts and proposals
+
+- `POST /api/login` `{ name, password }` — sets the session cookie; `POST
+  /api/logout`; `GET /api/me` → `{ name, role, open }`; `PUT /api/me/password`
+  `{ current, new }`
+- `GET`/`POST /api/users`, `PUT`/`DELETE /api/users/{id}` — admin only; roles
+  `admin`, `manager`, `editor`; the first account must be an admin and the last
+  enabled admin cannot be removed, disabled or demoted
+- Scripts use HTTP Basic against the same accounts. With no account and no
+  `--basic-auth-*` flags the operator API is open, as before.
+- An editor's content writes answer `202 { proposed, change, placeholder? }` and
+  wait in a draft: `GET`/`DELETE /api/changesets/draft`,
+  `DELETE /api/changesets/draft/requests/{id}`, `POST /api/changesets/draft/submit`.
+  A create's `placeholder` (`new:N`) may be used by later requests in the draft.
+  Every bundle carries `refs` — `{ playlists, items, assets }` as they read now,
+  keyed by id — so a line can name what it touches; pending uploads are included
+  there although the asset list hides them from everybody but their author.
+- Managers: `GET /api/changesets?state=submitted`, `POST /api/changesets/{id}/approve`
+  (`409` with `state: stale` when something it touches changed since, or `failed`
+  with the requests before it applied), `POST /api/changesets/{id}/reject` `{ note }`
+- Anyone: `GET /api/changesets/mine` → `{ bundles, unseen }` — the caller's own
+  bundles with their state and the reviewer's note; `POST /api/changesets/mine/seen`
+  marks the decisions as read. `approve` takes an optional `{ note }` like `reject`.
+  `POST /api/changesets/{id}/withdraw` pulls one's own submitted bundle back into
+  the draft; `POST /api/changesets/{id}/hide` and `POST
+  /api/changesets/mine/hide-decided` hide decided bundles from `mine` (managers
+  still see them).
+- A draft keeps one line per object: a second write to the same path merges into
+  the first, a `DELETE` of something the draft created removes the create. A write
+  to an object in one's own submitted bundle reopens that bundle into the draft
+  (`202 { reopened: true }`).
+- `POST /api/playlist` answers `201 { id }`
 
 ### Playback Control
 

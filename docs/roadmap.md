@@ -11,28 +11,6 @@ and leaves this file when it ships.
 
 ## Next
 
-### Users and roles
-
-One set of basic-auth credentials covers everything today. Three roles instead:
-
-- **Admin** — the system side: settings, webhooks, displays, casting, users.
-- **Manager** — content: assets, playlists, assignments; approves what an editor
-  proposes.
-- **Editor** (Redakteur) — proposes changes to content, which take effect only
-  once a manager approves them.
-
-This is the largest item here. It needs a users table with password hashes (the
-PBKDF2 already used for the operator password), a login with sessions instead of
-basic auth, a role check per route alongside `is_display_path` and
-`cast::is_cast_public_path`, and a model for **pending changes** — an edit that
-is stored but not live, shown to a manager as a diff.
-
-Decided: proposals are recorded requests replayed on approval (not a new write
-layer), collected in bundles, never applied when stale; open until the first
-account; scripts use HTTP Basic against the accounts; the CLI credential stays the
-recovery path. Designed in
-[the users-and-roles spec](superpowers/specs/2026-09-24-users-and-roles-design.md).
-
 ### Single sign-on with OpenID Connect
 
 Signing in through the venue's identity provider instead of a local password, on

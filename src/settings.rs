@@ -40,8 +40,6 @@ const KEY_LOCALE: &str = "locale";
 /// Overlay images travel base64-encoded inside every apply, so this caps what one
 /// costs. Generous for a logo, small enough that a re-apply stays cheap on a Pi.
 pub const OVERLAY_IMAGE_MAX_BYTES: usize = 512 * 1024;
-const KEY_AUTH_USER: &str = "basic_auth_user";
-const KEY_AUTH_HASH: &str = "basic_auth_hash";
 
 #[derive(Clone, Debug)]
 pub struct AppSettings {
@@ -56,10 +54,6 @@ pub struct AppSettings {
     pub cast_code: String,
     /// What the QR drawn on a screen points at.
     pub cast_qr_target: CastQrTarget,
-    /// Basic-auth user. `None` means the operator UI is open.
-    pub auth_user: Option<String>,
-    /// PBKDF2 hash, or the marker for a plaintext password supplied on the CLI.
-    pub auth_secret: Option<Secret>,
     /// The badge drawn on top of whatever is playing.
     pub overlay: Overlay,
     /// BCP-47 tag for the dates and times the display shows. Empty means
@@ -436,22 +430,6 @@ impl Overlay {
     }
 }
 
-/// Either a hash read from the database, or a password handed over on the
-/// command line. Kept apart so the CLI case avoids a PBKDF2 round per request.
-#[derive(Clone, Debug)]
-pub enum Secret {
-    Plain(String),
-    Hash(String),
-}
-
-impl Secret {
-    pub fn verify(&self, password: &str) -> bool {
-        match self {
-            Secret::Plain(expected) => constant_time_eq(expected.as_bytes(), password.as_bytes()),
-            Secret::Hash(encoded) => verify_hash(encoded, password),
-        }
-    }
-}
 
 /// Which settings the command line has pinned. Reported to the admin UI so a
 /// locked control can be shown as locked instead of silently ignoring edits.
@@ -529,7 +507,7 @@ pub fn hash_password(password: &str) -> String {
     )
 }
 
-fn verify_hash(encoded: &str, password: &str) -> bool {
+pub(crate) fn verify_hash(encoded: &str, password: &str) -> bool {
     let mut parts = encoded.split('$');
     if parts.next() != Some("pbkdf2-sha256") {
         return false;
@@ -632,17 +610,6 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         .and_then(|raw| serde_json::from_str::<Overlay>(&raw).ok())
         .unwrap_or_default()
         .sanitized();
-    let stored_user = crate::db::load_setting(pool, KEY_AUTH_USER).await;
-    let stored_hash = crate::db::load_setting(pool, KEY_AUTH_HASH).await;
-
-    let (auth_user, auth_secret) = match (&args.basic_auth_user, &args.basic_auth_password) {
-        (Some(user), Some(password)) => (Some(user.clone()), Some(Secret::Plain(password.clone()))),
-        _ => match (stored_user, stored_hash) {
-            (Some(user), Some(hash)) if !user.is_empty() => (Some(user), Some(Secret::Hash(hash))),
-            _ => (None, None),
-        },
-    };
-
     AppSettings {
         // --disable-cast forces off; otherwise the stored switch decides.
         cast_enabled: !args.disable_cast && stored_enabled,
@@ -656,8 +623,6 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
         // No CLI flag: this is a UX choice, not a capability, so nothing ever
         // pins it -- only the stored value, or the default of one's own screen.
         cast_qr_target: stored_qr_target.unwrap_or_default(),
-        auth_user,
-        auth_secret,
         overlay: stored_overlay,
         // Command line, then what the operator stored, then the system this runs
         // on. The last step is the point: a box already set up in German should
@@ -675,7 +640,7 @@ pub async fn load(pool: &sqlx::SqlitePool, args: &Args) -> AppSettings {
 /// Write the editable settings back. Values pinned by the command line are
 /// written too, so removing the flag later leaves the operator's intent intact.
 pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
-    let mut rows = vec![
+    let rows = vec![
         (KEY_CAST_ENABLED, settings.cast_enabled.to_string()),
         (KEY_GUEST_PAGES, settings.guest_pages_enabled.to_string()),
         (KEY_CAST_AUTH, cast_auth_key(settings.cast_auth).to_string()),
@@ -686,21 +651,10 @@ pub async fn persist(pool: &sqlx::SqlitePool, settings: &AppSettings) {
         ),
         (KEY_LOCALE, settings.locale.clone()),
         (
-            KEY_AUTH_USER,
-            settings.auth_user.clone().unwrap_or_default(),
-        ),
-        (
             KEY_OVERLAY,
             serde_json::to_string(&settings.overlay).unwrap_or_default(),
         ),
     ];
-    // Only a hash is ever written; a CLI password stays out of the database.
-    if let Some(Secret::Hash(hash)) = &settings.auth_secret {
-        rows.push((KEY_AUTH_HASH, hash.clone()));
-    } else if settings.auth_user.is_none() {
-        rows.push((KEY_AUTH_HASH, String::new()));
-    }
-
     // Swallow-and-log, like every other write here: a failed settings write must
     // not take down the request, let alone the display.
     for (key, value) in rows {
@@ -976,9 +930,6 @@ struct SettingsResponse {
     cast_auth: &'static str,
     cast_code: String,
     cast_qr_target: &'static str,
-    /// Whether the operator UI currently demands credentials.
-    auth_enabled: bool,
-    auth_user: Option<String>,
     overlay: Overlay,
     locale: String,
     /// What the surrounding system reports, so the admin page can offer it.
@@ -995,8 +946,6 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
         cast_auth: cast_auth_key(settings.cast_auth),
         cast_code: settings.cast_code.clone(),
         cast_qr_target: cast_qr_target_key(settings.cast_qr_target),
-        auth_enabled: settings.auth_user.is_some(),
-        auth_user: settings.auth_user.clone(),
         overlay: settings.overlay.clone(),
         locale: settings.locale.clone(),
         system_locale: system_locale(),
@@ -1004,16 +953,17 @@ pub async fn read_settings(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
+/// `deny_unknown_fields`: the credential fields this used to take moved to
+/// accounts, and a script still sending them must be told rather than answered
+/// `200` for a change that no longer happens here.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateRequest {
     cast_enabled: Option<bool>,
     guest_pages_enabled: Option<bool>,
     cast_auth: Option<String>,
     cast_code: Option<String>,
     cast_qr_target: Option<String>,
-    auth_enabled: Option<bool>,
-    auth_user: Option<String>,
-    auth_password: Option<String>,
     overlay: Option<Overlay>,
     locale: Option<String>,
 }
@@ -1036,7 +986,6 @@ pub async fn update_settings(
     };
 
     let mut next = state.settings.read().await.clone();
-    let mut credentials_changed = false;
 
     if let Some(enabled) = payload.cast_enabled {
         if enabled != next.cast_enabled {
@@ -1120,53 +1069,6 @@ pub async fn update_settings(
         return bad("Für den Code-Modus muss ein Code gesetzt sein.".to_string());
     }
 
-    // --- operator credentials ---
-
-    if payload.auth_enabled.is_some() || payload.auth_user.is_some() || payload.auth_password.is_some() {
-        if state.locks.basic_auth {
-            return locked("--basic-auth-user/--basic-auth-password");
-        }
-
-        let wants_auth = payload.auth_enabled.unwrap_or(next.auth_user.is_some());
-        if !wants_auth {
-            next.auth_user = None;
-            next.auth_secret = None;
-            credentials_changed = true;
-        } else {
-            let user = payload
-                .auth_user
-                .clone()
-                .or_else(|| next.auth_user.clone())
-                .unwrap_or_default();
-            let user = user.trim().to_string();
-            if user.is_empty() {
-                return bad("Benutzername darf nicht leer sein.".to_string());
-            }
-
-            match payload.auth_password.as_deref() {
-                Some(password) if !password.is_empty() => {
-                    if password.chars().count() < 8 {
-                        return bad("Das Passwort muss mindestens 8 Zeichen haben.".to_string());
-                    }
-                    next.auth_secret = Some(Secret::Hash(hash_password(password)));
-                    credentials_changed = true;
-                }
-                // Keeping the existing password is fine; turning auth *on*
-                // without ever setting one is not, or the UI would lock behind
-                // credentials nobody knows.
-                _ if next.auth_secret.is_none() => {
-                    return bad("Für die Anmeldung muss ein Passwort gesetzt werden.".to_string());
-                }
-                _ => {}
-            }
-
-            if next.auth_user.as_deref() != Some(user.as_str()) {
-                credentials_changed = true;
-            }
-            next.auth_user = Some(user);
-        }
-    }
-
     let mut overlay_changed = false;
     if let Some(overlay) = payload.overlay {
         let overlay = overlay.sanitized();
@@ -1189,11 +1091,6 @@ pub async fn update_settings(
         *settings = next.clone();
         was_enabled && !next.cast_enabled
     };
-
-    if credentials_changed {
-        // Otherwise the cache keeps accepting the previous password.
-        *state.auth_cache.lock().await = None;
-    }
 
     persist(&state.pool, &next).await;
 

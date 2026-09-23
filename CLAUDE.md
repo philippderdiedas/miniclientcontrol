@@ -22,7 +22,11 @@ the rule is here and the reason is a link.
 
 **`web/` is compiled into the binary** via `include_dir!` (`src/web.rs`). After
 changing anything under `web/`, rebuild — it is not read from disk, and an
-unrebuilt change looks exactly like a change that did not work.
+unrebuilt change looks exactly like a change that did not work. **A new file under
+`web/` needs `touch src/web.rs` as well**: cargo notices a changed file but not an
+added one, so without a Rust change in the same build the new page is simply not
+in the binary — and `/new.html` quietly serves the guest page through the
+fallback.
 
 `cargo build` is the gate for the Rust side. There is no linting config.
 
@@ -78,7 +82,7 @@ the rules that break it:
   to the whole LAN; narrowing the cast list locks guests out.
 - Both listeners must be started with
   `into_make_service_with_connect_info::<SocketAddr>()`. The loopback exemption in
-  `basic_auth_middleware` reads the peer from `ConnectInfo<SocketAddr>`, and **the
+  `auth_middleware` reads the peer from `ConnectInfo<SocketAddr>`, and **the
   extractor panics without it** — including on the TLS listener.
 - **`/api/displays*`, `/api/playlists*` and `/displays.html` are operator-only**,
   in neither list. The display browser never asks which screen it is — the
@@ -98,6 +102,24 @@ the cast list and checks `caster_only`; `/api/audio` is not, so basic auth
 decides. **Do not widen `caster_only` to admit the operator** — that route is
 exempt from auth, so it would admit the whole LAN. Both end in
 `cast::apply_audio`, which is what keeps them from drifting.
+**Accounts sit behind the two exemptions, never in front of them.**
+`accounts::middleware::auth_middleware` resolves, in order: the display and cast
+exemptions (unchanged), `/login.html` and `POST /api/login`, a session cookie,
+HTTP Basic against the accounts, the command-line credential (a built-in admin),
+and **open mode only when there is neither an account nor a command-line
+credential** — a device run with only the flags had a protected admin and must
+not come up open (`test_auth.py` caught exactly that). `accounts::roles::required`
+is the one table of which role a route needs, and it **fails closed**: a write it
+does not know needs an admin, and a route added without a row fails its matrix
+test. A cookie-authenticated write needs an `Origin` of this host.
+
+**An approved proposal is replayed through the application's own router**
+(`AppState::router`, set once in `main`), so validation, webhooks and signals are
+those of a direct write. Such a request must carry `ConnectInfo<SocketAddr>` — the
+extractor panics without it, on this path as on the TLS listener — and a
+`ReplayIdentity` *extension*, which the middleware trusts because no client can
+send one. Never turn it into a header.
+
 **Loopback is not a way around auth**: the exemption covers `is_display_path`
 only, so the admin page asks for credentials even on the device itself.
 
@@ -812,11 +834,11 @@ whether the HTTPS listener binds at all, so it cannot be undone without a restar
 on **every** screen, looping the displays — the switch is the venue's, not one
 panel's.
 
-**`AppState::auth_cache` must be cleared whenever the credentials change**, or the
-old password keeps working. It remembers the last `Authorization` header that
-verified. It exists because PBKDF2 is deliberately slow and the
-admin page polls every two seconds. A password passed on the CLI stays
-`Secret::Plain` and is never written.
+**`AppState::basic_cache` must be cleared whenever any account changes**, or an
+old password keeps working. It maps a verified `Authorization` header to its
+identity; it exists because PBKDF2 is deliberately slow and the admin page polls
+every two seconds. The command-line credential is compared in memory and never
+written.
 
 A code-auth misconfiguration (mode `code`, empty code) logs an error and refuses
 every sender but does **not** stop the process. Casting must never keep the

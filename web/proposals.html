@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meine Vorschläge</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto 4rem; padding: 0 1rem; line-height: 1.45; }
+    nav { margin: 0 0 1rem; color: #666; }
+    h2 { font-size: 1.1rem; margin-top: 1.6rem; }
+    .muted { color: #666; font-size: .9rem; }
+    details { border-bottom: 1px solid #e3e3e3; padding: .35rem 0; }
+    summary { cursor: pointer; }
+    .open { border: 1px solid #ddd; border-radius: 6px; padding: .6rem .8rem; margin: .6rem 0; }
+    .new { font-weight: bold; }
+    .note { font-style: italic; margin: .2rem 0; }
+    .state-applied { color: #0b6b3a; }
+    .state-rejected, .state-failed { color: #a11; }
+    .state-stale { color: #8a5a00; }
+    button { font: inherit; margin-left: .4rem; }
+  </style>
+</head>
+<body>
+  <h1>Meine Vorschläge</h1>
+  <nav><a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/displays.html">Displays</a></nav>
+
+  <h2>Offen</h2>
+  <p class="muted">Noch nicht entschieden. Zurückziehen holt einen Vorschlag in den Entwurf zurück;
+    eine neue Änderung an etwas, das darin steckt, tut das von selbst.</p>
+  <div id="open"></div>
+  <p class="muted" id="openEmpty" hidden>Nichts offen.</p>
+
+  <h2>Entschieden <button id="hideAll" hidden>Alle ausblenden</button></h2>
+  <div id="decided"></div>
+  <p class="muted" id="decidedEmpty" hidden>Nichts entschieden – oder alles ausgeblendet.</p>
+
+  <script src="/preview.js"></script>
+  <script src="/me.js"></script>
+  <script src="/proposals.js"></script>
+  <script>
+    const STATES = {
+      submitted: 'eingereicht', applying: 'wird angewendet', applied: 'freigegeben',
+      rejected: 'abgelehnt', stale: 'veraltet', failed: 'fehlgeschlagen',
+    };
+
+    function lines(bundle) {
+      const ul = document.createElement('ul');
+      ul.append(...bundle.requests.map((r) => {
+        const li = document.createElement('li');
+        li.append(Proposals.render(r, bundle));
+        return li;
+      }));
+      return ul;
+    }
+
+    function noteOf(bundle) {
+      if (!bundle.note) return null;
+      const p = document.createElement('p');
+      p.className = 'note';
+      p.textContent = `Notiz: ${bundle.note}`;
+      return p;
+    }
+
+    function openCard(bundle) {
+      const box = document.createElement('div');
+      box.className = 'open';
+      const head = document.createElement('span');
+      head.textContent = `${bundle.submitted_at || ''} – ${STATES[bundle.state] || bundle.state}`
+        + ` – ${bundle.requests.length} Änderung(en)`;
+      box.append(head);
+      if (bundle.state === 'submitted') {
+        const back = document.createElement('button');
+        back.textContent = 'Zurückziehen';
+        back.addEventListener('click', async () => {
+          await fetch(`/api/changesets/${bundle.id}/withdraw`, { method: 'POST' });
+          load();
+        });
+        box.append(back);
+      }
+      box.append(lines(bundle));
+      return box;
+    }
+
+    function decidedRow(bundle) {
+      const d = document.createElement('details');
+      const s = document.createElement('summary');
+      const state = document.createElement('span');
+      state.className = `state-${bundle.state}`;
+      state.textContent = STATES[bundle.state] || bundle.state;
+      s.append(document.createTextNode(`${bundle.decided_at || bundle.submitted_at || ''} – `), state,
+        document.createTextNode(` – ${bundle.requests.length} Änderung(en)`));
+      if (!bundle.seen) s.classList.add('new');
+      const hide = document.createElement('button');
+      hide.textContent = 'Ausblenden';
+      hide.addEventListener('click', async (event) => {
+        event.preventDefault();
+        await fetch(`/api/changesets/${bundle.id}/hide`, { method: 'POST' });
+        load();
+      });
+      s.append(hide);
+      d.append(s, noteOf(bundle) || '', lines(bundle));
+      return d;
+    }
+
+    async function load() {
+      const res = await fetch('/api/changesets/mine');
+      const data = res.ok ? await res.json() : { bundles: [], unseen: 0 };
+      const open = data.bundles.filter((b) => b.state === 'submitted' || b.state === 'applying');
+      const decided = data.bundles.filter((b) => !open.includes(b));
+      document.getElementById('open').replaceChildren(...open.map(openCard));
+      document.getElementById('openEmpty').hidden = open.length > 0;
+      document.getElementById('decided').replaceChildren(...decided.map(decidedRow));
+      document.getElementById('decidedEmpty').hidden = decided.length > 0;
+      document.getElementById('hideAll').hidden = decided.length === 0;
+      // Seen once shown: the bold rows stay bold until the next load.
+      if (data.unseen) {
+        await fetch('/api/changesets/mine/seen', { method: 'POST' });
+        Proposals.refreshMine();
+      }
+      Proposals.refresh();
+    }
+
+    document.getElementById('hideAll').addEventListener('click', async () => {
+      if (!confirm('Alle entschiedenen Vorschläge aus dieser Liste ausblenden?')) return;
+      await fetch('/api/changesets/mine/hide-decided', { method: 'POST' });
+      load();
+    });
+
+    Me.bar().then(() => Proposals.start()).then(load);
+  </script>
+</body>
+</html>

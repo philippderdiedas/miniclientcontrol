@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anmelden</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 360px; margin: 12vh auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    label { display: flex; flex-direction: column; gap: .2rem; margin: .8rem 0; font-size: .9rem; color: #555; }
+    input { font: inherit; padding: .45rem .5rem; }
+    button { font: inherit; padding: .5rem 1rem; background: #0b6b3a; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+    .err { color: #a11; min-height: 1.4em; }
+  </style>
+</head>
+<body>
+  <h1>Mini Client Control</h1>
+  <form id="form">
+    <label>Name <input id="name" autocomplete="username" required autofocus /></label>
+    <label>Passwort <input id="password" type="password" autocomplete="current-password" required /></label>
+    <p class="err" id="error"></p>
+    <button type="submit">Anmelden</button>
+  </form>
+  <script>
+    // Only a path on this host: `?next=//evil.test` or an absolute URL would
+    // turn the login page into a redirect to wherever a link says.
+    const wanted = new URLSearchParams(location.search).get('next') || '/admin.html';
+    const next = wanted.startsWith('/') && !wanted.startsWith('//') ? wanted : '/admin.html';
+
+    document.getElementById('form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const error = document.getElementById('error');
+      error.textContent = '';
+      let res;
+      try {
+        res = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: document.getElementById('name').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+      } catch (_) {
+        error.textContent = 'Server nicht erreichbar.';
+        return;
+      }
+      if (res.ok) { location.href = next; return; }
+      let message = 'Anmeldung fehlgeschlagen.';
+      try { message = (await res.json()).error || message; } catch (_) { /* not JSON */ }
+      error.textContent = message;
+    });
+  </script>
+</body>
+</html>

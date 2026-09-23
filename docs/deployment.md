@@ -363,12 +363,16 @@ the command line **pins** that setting: the API answers `409` naming the flag an
 the UI renders the control as locked. `cast_qr_target` has no flag at all, so it
 is the one in that list that is always editable.
 
-Besides deferring to whoever wrote the unit file, that is the recovery path — an
-operator who enables authentication and forgets the password can always get back
-in by passing `--basic-auth-user` and `--basic-auth-password`.
+Besides deferring to whoever wrote the unit file, that is the recovery path: an
+admin who forgets their password can always get back in by passing
+`--basic-auth-user` and `--basic-auth-password`. That credential is a built-in
+admin, never stored as an account; sign in with it, reset the forgotten password
+on `/users.html`, and restart without the flags.
 
-Passwords are stored as PBKDF2 hashes, so a copy of the database is not a copy of
-the credentials.
+Accounts live in the database, passwords as PBKDF2 hashes and sessions as the
+SHA-256 of their cookie, so a copy of the database is not a copy of anybody's
+credentials. **Upgrading** a device that had one operator credential stored turns
+it into the first admin account on the first start, same name and password.
 
 ## A webhook target may hold somebody else's secret
 
@@ -381,8 +385,9 @@ thought.
 `GET /api/webhooks` returns each target's headers as stored. That is deliberate:
 the operator has to be able to see and correct what they typed, and a write-only
 field would be inconsistent for no gain against an attacker who is already
-authenticated. But **basic auth is unconfigured by default**, and with no
-credentials set the operator API is served to anyone who can reach the LAN-facing
+authenticated — and reading them is admin-only. But **a device starts with no
+accounts**, and with none (and no `--basic-auth-*` flags) the operator API is
+served to anyone who can reach the LAN-facing
 HTTPS listener. `CorsLayer::permissive()` additionally makes that response
 readable to any website the operator happens to visit from a browser on the same
 network.
@@ -392,9 +397,9 @@ clear under exactly the same conditions, and the operator surface has always bee
 "protected when you protect it". The difference is only that a webhook target is
 the first thing here that can hold a secret which is not the device's own.
 
-So: **on any device where a webhook target carries a credential, configure basic
-auth.** Either from the admin page, or with `--basic-auth-user` and
-`--basic-auth-password`, which additionally pins it — see
+So: **on any device where a webhook target carries a credential, create an admin
+account** on `/users.html`, or start with `--basic-auth-user` and
+`--basic-auth-password` — see
 [Runtime settings versus flags](#runtime-settings-versus-flags). A device with no
 webhook targets, or with targets whose URLs are unauthenticated internal
 endpoints, is in the same position it was before.

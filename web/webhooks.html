@@ -75,6 +75,7 @@
   <p class="muted" id="emptyHint" hidden>Noch keine Webhooks.</p>
   <button type="button" class="primary" id="addBtn">Webhook hinzufügen</button>
 
+  <script src="/me.js"></script>
   <script>
     // Every node here is built with createElement/textContent. A webhook URL and
     // a receiver's error body are both attacker-influenced, so string-interpolated
@@ -476,5 +477,6 @@
       setInterval(poll, 2000);
     })();
   </script>
+  <script>Me.bar();</script>
 </body>
 </html>

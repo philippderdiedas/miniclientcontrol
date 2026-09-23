@@ -63,6 +63,8 @@
   <div id="list"></div>
   <p class="muted" id="emptyHint" hidden>Keine Displays.</p>
 
+  <script src="/me.js"></script>
+  <script src="/proposals.js"></script>
   <script>
     // Every node is built with createElement/textContent. A label and a playlist
     // name are both operator-supplied, so string-interpolated innerHTML would be
@@ -325,5 +327,6 @@
       setInterval(poll, 2000);
     })();
   </script>
+  <script>Me.bar().then(() => Proposals.start());</script>
 </body>
 </html>

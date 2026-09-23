@@ -256,8 +256,14 @@ fn sanitize_filename(raw: &str) -> String {
 
 pub async fn upload_asset(
     State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::accounts::Identity>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    // An editor's upload is stored at once -- a file cannot wait as JSON -- but
+    // pending in their draft, invisible to everyone else until it is applied.
+    let proposer = identity
+        .filter(|who| who.role == crate::accounts::Role::Editor)
+        .and_then(|who| who.user_id);
     use tokio::io::AsyncWriteExt;
 
     let mut uploaded_files = Vec::new();
@@ -344,7 +350,16 @@ pub async fn upload_asset(
         .await;
 
         match result {
-            Ok(_) => uploaded_files.push(safe_filename),
+            Ok(row) => {
+                if let Some(author) = proposer {
+                    use sqlx::Row;
+                    let asset_id: i64 = row.get(0);
+                    if let Err(e) = crate::proposals::record_upload(&state.pool, author, asset_id, &filename).await {
+                        error!("Failed to record an upload as a proposal: {}", e);
+                    }
+                }
+                uploaded_files.push(safe_filename)
+            }
             Err(e) => {
                 error!("DB Insert error: {}", e);
                 let _ = tokio::fs::remove_file(&filepath).await;
@@ -355,8 +370,19 @@ pub async fn upload_asset(
     (StatusCode::OK, Json(UploadResponse { uploaded: uploaded_files }))
 }
 
-pub async fn list_assets(State(state): State<AppState>) -> impl IntoResponse {
-    let assets = sqlx::query_as::<_, Asset>("SELECT * FROM assets ORDER BY created_at DESC")
+pub async fn list_assets(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::accounts::Identity>>,
+) -> impl IntoResponse {
+    // A proposed upload is its author's until the bundle is applied.
+    let viewer = identity.and_then(|who| who.user_id);
+    let assets = sqlx::query_as::<_, Asset>(
+        "SELECT * FROM assets
+         WHERE pending_changeset IS NULL
+            OR pending_changeset IN (SELECT id FROM changesets WHERE author_id = ?)
+         ORDER BY created_at DESC",
+    )
+        .bind(viewer)
         .fetch_all(&state.pool)
         .await
         .unwrap_or_default();
@@ -524,7 +550,7 @@ pub async fn add_to_playlist(
         .filter(|overlay| overlay.matters())
         .map(sqlx::types::Json);
 
-    if let Err(e) = sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
@@ -541,15 +567,20 @@ pub async fn add_to_playlist(
     .bind(fit_mode.as_str())
     .bind(fit_background)
     .execute(&state.pool)
-    .await
-    {
-        error!("Failed to add playlist item: {}", e);
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    .await;
+    let id = match inserted {
+        Ok(result) => result.last_insert_rowid(),
+        Err(e) => {
+            error!("Failed to add playlist item: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     state.notify_playlist_changed();
 
-    StatusCode::CREATED.into_response()
+    // The id, so a caller can refer to what it created -- which is what an
+    // approved proposal does when a later request in its bundle names the item.
+    (StatusCode::CREATED, Json(serde_json::json!({ "id": id }))).into_response()
 }
 
 pub async fn update_playlist_item(

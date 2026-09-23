@@ -258,7 +258,7 @@ server shows no panel at all rather than a set of controls that do nothing.
 `/admin.html` shows what is on the screens — one line per declared display, with
 its playlist and any override — what is casting, and the runtime settings:
 whether casting is allowed, how a guest authenticates, the overlay, the language
-for dates and times, and the credentials for the operator UI itself. It also
+for dates and times, and a link to the accounts. It also
 carries the room-audio panel and, while one is alive, the **pairing code the
 display is currently showing** with its remaining seconds — otherwise the person
 helping a guest over the phone is the only one who cannot see it.
@@ -274,6 +274,28 @@ not part of what a link about a playlist means.
 Settings live in the database, so they survive restarts. Anything passed on the
 command line pins that setting and the UI shows it as locked — which is also the
 way back in if the operator password is ever forgotten.
+
+## Accounts and roles
+
+The operator pages are behind accounts once the first one exists (until then they
+are open, as a device without credentials always was). **Admins** run the system
+side — settings, webhooks, accounts, casting, audio. **Managers** change content
+directly, pin overrides and approve proposals. **Editors** change content too, but
+their changes are *proposals*: collected in a draft, submitted as a bundle, and
+applied only when a manager approves it on `/approvals.html`. A bundle is applied
+as a whole in order, is refused as stale if something it touches changed in the
+meantime, and an editor's upload stays invisible to others until then.
+
+The draft holds one line per object: editing the same item twice updates the
+line, deleting something the draft created removes both. Editing an object that
+sits in one's own *submitted* bundle pulls that bundle back into the draft rather
+than racing it — the manager would otherwise approve a version its author has
+already moved past. **Meine Vorschläge** (`/proposals.html`) lists open bundles
+(withdraw one to keep working on it) and decided ones with the manager's note;
+decided bundles can be hidden, singly or all at once, so the list stays short.
+Managers keep the full history. Scripts
+sign in with HTTP Basic against the same accounts; the command-line credential is
+always the way back in.
 
 ## Webhooks
 

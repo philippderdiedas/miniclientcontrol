@@ -15,15 +15,13 @@ mod audio;
 mod webhook;
 mod playlists;
 mod schedule;
+mod accounts;
+mod proposals;
 
 use anyhow::Result;
 use axum::{
-    extract::State,
-    extract::ConnectInfo,
     extract::DefaultBodyLimit,
-    http::{header, HeaderMap, StatusCode},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
+    middleware,
     routing::{get, put}, // Only get and put are used as starting points
     Router,
 };
@@ -35,7 +33,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use models::{AppState, Args};
-use base64::Engine;
 use handlers::{
     list_assets, upload_asset, update_asset, delete_asset,
     get_playlist, add_to_playlist, update_playlist_item, delete_playlist_item,
@@ -49,7 +46,7 @@ use web::serve_embedded_ui;
 /// Paths the *display* browser fetches. Chromium runs on this device over CDP and
 /// has no way to present credentials, so requiring auth here blanks the signage.
 /// These stay reachable without auth, but only from loopback.
-fn is_display_path(path: &str) -> bool {
+pub(crate) fn is_display_path(path: &str) -> bool {
     if path.starts_with("/uploads/") {
         return true;
     }
@@ -67,80 +64,6 @@ fn is_display_path(path: &str) -> bool {
             // remote operators still need credentials for it
             | "/api/cast/state"
     )
-}
-
-/// Decode a `Basic` header into its user and password halves.
-fn decode_basic(header: &str) -> Option<(String, String)> {
-    let encoded = header.strip_prefix("Basic ")?;
-    let decoded = base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?;
-    let text = String::from_utf8(decoded).ok()?;
-    let (user, password) = text.split_once(':')?;
-    Some((user.to_string(), password.to_string()))
-}
-
-/// Guards the operator surface.
-///
-/// Always installed: credentials can be switched on at runtime from the admin UI,
-/// so whether authentication applies is a per-request question.
-async fn basic_auth_middleware(
-    State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    request: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let path = request.uri().path();
-
-    if peer.ip().is_loopback() && is_display_path(path) {
-        return next.run(request).await;
-    }
-
-    // The cast sender is a guest's laptop on the LAN, not the operator and not
-    // loopback, so this exemption is *not* address-scoped. Requiring basic auth
-    // here would mean handing the operator password to everyone who wants to
-    // share a screen; the cast's own auth guards these routes instead. Gated on
-    // the hard switch only: with casting merely turned off at runtime the page
-    // still has to load to say so.
-    if !state.args.disable_cast && cast::is_cast_public_path(path) {
-        return next.run(request).await;
-    }
-
-    let (expected_user, secret) = {
-        let settings = state.settings.read().await;
-        (settings.auth_user.clone(), settings.auth_secret.clone())
-    };
-    let (Some(expected_user), Some(secret)) = (expected_user, secret) else {
-        return next.run(request).await;
-    };
-
-    let provided = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-
-    if !provided.is_empty() {
-        // A stored password is a PBKDF2 hash, which is slow by design. The admin
-        // page polls every two seconds, so repeat the full check only when the
-        // header is one we have not already accepted.
-        if state.auth_cache.lock().await.as_deref() == Some(provided) {
-            return next.run(request).await;
-        }
-        if let Some((user, password)) = decode_basic(provided) {
-            if settings::constant_time_eq(user.as_bytes(), expected_user.as_bytes())
-                && secret.verify(&password)
-            {
-                *state.auth_cache.lock().await = Some(provided.to_string());
-                return next.run(request).await;
-            }
-        }
-    }
-
-    let mut response = StatusCode::UNAUTHORIZED.into_response();
-    response.headers_mut().insert(
-        header::WWW_AUTHENTICATE,
-        header::HeaderValue::from_static("Basic realm=\"Mini Client Control\", charset=\"UTF-8\""),
-    );
-    response
 }
 
 #[tokio::main]
@@ -167,6 +90,9 @@ async fn main() -> Result<()> {
 
     // Schema lives entirely in db::run_migrations so there is a single source of truth.
     db::run_migrations(&pool).await?;
+    // Before anything reads an account: a device upgrading from the single
+    // basic-auth credential keeps it, as its first admin.
+    accounts::adopt_stored_credential(&pool).await?;
 
     // Stored settings, with anything passed on the command line winning.
     let app_settings = settings::load(&pool, &args).await;
@@ -279,7 +205,10 @@ async fn main() -> Result<()> {
         managed_cert: managed_cert_active,
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
         locks,
-        auth_cache: Arc::new(Mutex::new(None)),
+        login_attempts: Arc::new(Mutex::new(Default::default())),
+        basic_cache: Arc::new(Mutex::new(Default::default())),
+        rescue: args.basic_auth_user.clone().zip(args.basic_auth_password.clone()),
+        router: Default::default(),
         audio: Arc::new(audio::Backend::detect().await),
         audio_owner: Arc::new(Mutex::new(None)),
         webhooks: Arc::new(webhook::Dispatcher::new(pool.clone())),
@@ -362,12 +291,17 @@ async fn main() -> Result<()> {
         // which is the right way round: a target is a few kilobytes of
         // template.
         .merge(webhook::api::routes())
+        .merge(accounts::api::routes())
+        .merge(proposals::api::routes())
         .with_state(state.clone());
 
     let app = app.layer(middleware::from_fn_with_state(
         state.clone(),
-        basic_auth_middleware,
+        accounts::middleware::auth_middleware,
     ));
+    // Kept for replaying an approved proposal through the very same routes,
+    // middleware included.
+    let _ = state.router.set(app.clone());
 
     // The cast sender page needs HTTPS (secure context), everything else is happy
     // over plain HTTP. Both listeners serve the *same* Router and the same AppState,
@@ -404,7 +338,8 @@ async fn main() -> Result<()> {
                         bundle,
                     );
                 }
-                let tls_app = app.clone();
+                // Marked, so a session cookie set over TLS is `Secure`.
+                let tls_app = app.clone().layer(axum::Extension(accounts::middleware::ViaTls));
                 // Must go through the same resolution the API and the QR code
                 // use, or the first thing an operator reads on startup disagrees
                 // with the address guests are actually given.
@@ -413,7 +348,7 @@ async fn main() -> Result<()> {
                 let server = axum_server::from_tcp_rustls(listener, config)?;
                 tokio::spawn(async move {
                     // ConnectInfo here too: without it the loopback exemption in
-                    // basic_auth_middleware panics on the extractor for TLS requests.
+                    // auth_middleware panics on the extractor for TLS requests.
                     if let Err(e) = server
                         .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>())
                         .await
@@ -444,7 +379,7 @@ async fn main() -> Result<()> {
     }
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    // ConnectInfo is required by basic_auth_middleware to recognise loopback peers.
+    // ConnectInfo is required by auth_middleware to recognise loopback peers.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

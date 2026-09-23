@@ -142,30 +142,12 @@
 
   <div class="card" id="authCard">
     <p class="status">Zugang zur Verwaltung</p>
-    <p class="muted" id="lockAuthBasic" hidden>
-      Per <code>--basic-auth-user</code> / <code>--basic-auth-password</code>
-      festgelegt und hier nicht änderbar.
+    <p>
+      Konten und Rollen (Admin, Manager, Redakteur) werden auf der Seite
+      <a href="/users.html">Benutzer</a> verwaltet. Die Gästeseite bleibt offen —
+      wer überträgt, wird über den Zugang oben geregelt.
     </p>
-    <div id="authSettings">
-      <p>
-        <label><input type="checkbox" id="authEnabled" /> Anmeldung verlangen</label>
-      </p>
-      <div id="authFields" hidden>
-        <p>
-          <label for="authUser">Benutzer:</label>
-          <input id="authUser" autocomplete="username" />
-        </p>
-        <p>
-          <label for="authPassword">Passwort:</label>
-          <input id="authPassword" type="password" autocomplete="new-password"
-                 placeholder="unverändert lassen" />
-        </p>
-      </div>
-      <p class="muted">
-        Gilt für Verwaltung, Playlist und Assets. Die Gästeseite bleibt offen —
-        wer überträgt, wird über den Zugang oben geregelt.
-      </p>
-    </div>
+  </div>
   </div>
 
   <!-- Outside the cards on purpose: this button covers the cast settings *and*
@@ -295,6 +277,7 @@
 
   <script src="/audio.js"></script>
   <script src="/preview.js"></script>
+  <script src="/me.js"></script>
   <script>
     // Same node-building rule as the other operator pages: a display label, a
     // playlist name and an item URL are all operator- or guest-supplied, so
@@ -594,10 +577,6 @@
         document.getElementById('setAuth').value !== 'code';
     }
 
-    function syncAuthFields() {
-      document.getElementById('authFields').hidden =
-        !document.getElementById('authEnabled').checked;
-    }
 
     // Kept from the settings load so the cast status line formats its time the
     // same way the display does.
@@ -611,9 +590,6 @@
       const qrTarget = settings.cast_qr_target || 'screen';
       document.getElementById('setQrTargetScreen').checked = qrTarget === 'screen';
       document.getElementById('setQrTargetChooser').checked = qrTarget === 'chooser';
-      document.getElementById('authEnabled').checked = settings.auth_enabled;
-      document.getElementById('authUser').value = settings.auth_user || '';
-      document.getElementById('authPassword').value = '';
       uiLocale = settings.locale || '';
       document.getElementById('setLocale').value = uiLocale;
 
@@ -638,14 +614,8 @@
         document.getElementById(control).disabled = !!locks[key];
         document.getElementById(label).hidden = !locks[key];
       }
-      const authLocked = !!locks.basic_auth;
-      document.getElementById('lockAuthBasic').hidden = !authLocked;
-      ['authEnabled', 'authUser', 'authPassword'].forEach((id) => {
-        document.getElementById(id).disabled = authLocked;
-      });
 
       syncCodeRow();
-      syncAuthFields();
       if (settings.overlay) applyOverlay(settings.overlay);
     }
 
@@ -657,7 +627,6 @@
     }
 
     document.getElementById('setAuth').addEventListener('change', syncCodeRow);
-    document.getElementById('authEnabled').addEventListener('change', syncAuthFields);
 
     function feedback(message, ok) {
       const node = document.getElementById('setFeedback');
@@ -667,7 +636,6 @@
 
     document.getElementById('setSave').addEventListener('click', async () => {
       feedback('', true);
-      const password = document.getElementById('authPassword').value;
       const body = {
         cast_enabled: document.getElementById('setEnabled').checked,
         guest_pages_enabled: document.getElementById('setGuestPages').checked,
@@ -675,11 +643,7 @@
         cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
         cast_qr_target: document.getElementById('setQrTargetChooser').checked ? 'chooser' : 'screen',
         locale: document.getElementById('setLocale').value.trim(),
-        auth_enabled: document.getElementById('authEnabled').checked,
-        auth_user: document.getElementById('authUser').value.trim(),
       };
-      // An empty field means "keep the current password", not "clear it".
-      if (password) body.auth_password = password;
 
       try {
         const res = await fetch('/api/settings', {
@@ -949,6 +913,21 @@
     loadOverlayImages().finally(loadSettings);
     setInterval(refresh, 3000);
     setInterval(refreshCast, 2000);
+  </script>
+  <script>
+    // Settings, casting, audio and the credential card are an admin's; the
+    // server refuses them to other roles anyway, so a manager or editor is not
+    // shown controls that could only fail.
+    Me.bar();
+    Me.load().then((me) => {
+      if (!me || Me.atLeast('admin')) return;
+      for (const id of ['castCard', 'audioCard', 'authCard', 'localeCard', 'overlayCard']) {
+        // Hidden by style, not removed: the page's own code still fills these
+        // cards, and toggles `hidden` on some of them.
+        const node = document.getElementById(id);
+        if (node) node.style.display = 'none';
+      }
+    });
   </script>
 </body>
 </html>

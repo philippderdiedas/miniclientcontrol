@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Freigaben</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 0 auto 4rem; padding: 0 1rem; line-height: 1.45; }
+    nav { margin: 0 0 1rem; color: #666; }
+    .bundle { border: 1px solid #ddd; border-radius: 6px; padding: .8rem; margin: .8rem 0; }
+    .bundle.stale { border-color: #8a5a00; background: #fff5e0; }
+    .muted { color: #666; font-size: .9rem; }
+    li { margin: .25rem 0; }
+    pre { background: #f6f6f6; padding: .4rem; font-size: .8rem; overflow-x: auto; margin: .2rem 0; }
+    .actions { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; flex-wrap: wrap; }
+    .feedback { font-size: .85rem; }
+    .err { color: #a11; }
+  </style>
+</head>
+<body>
+  <h1>Freigaben</h1>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/displays.html">Displays</a></nav>
+  <p class="muted">Vorschläge von Redakteuren. Ein Paket wird ganz freigegeben oder abgelehnt.
+    Hat sich etwas, das es ändert, inzwischen geändert, ist es veraltet und kann nur abgelehnt werden.</p>
+  <div id="list"></div>
+  <p class="muted" id="empty" hidden>Keine offenen Vorschläge.</p>
+
+  <script src="/preview.js"></script>
+  <script src="/me.js"></script>
+  <script src="/proposals.js"></script>
+  <script>
+    const pretty = (value) => JSON.stringify(value, null, 1);
+
+    function request(r, b) {
+      const li = document.createElement('li');
+      li.append(Proposals.render(r, b));
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = 'Vorher / Nachher';
+      const before = document.createElement('pre');
+      before.textContent = 'Vorher: ' + (r.before === null ? '(neu)' : pretty(r.before));
+      const after = document.createElement('pre');
+      after.textContent = 'Nachher: ' + pretty(r.body);
+      details.append(summary, before, after);
+      li.append(details);
+      return li;
+    }
+
+    function bundle(b) {
+      const box = document.createElement('div');
+      box.className = 'bundle' + (b.state === 'stale' ? ' stale' : '');
+      const head = document.createElement('p');
+      head.textContent = `Von ${b.author || '?'}, eingereicht ${b.submitted_at || ''}`
+        + (b.state === 'stale' ? ` – veraltet: ${b.note || ''}` : '');
+      const ul = document.createElement('ul');
+      ul.append(...b.requests.map((r) => request(r, b)));
+      const note = document.createElement('input');
+      note.placeholder = 'Notiz an den Redakteur (optional)';
+      const approve = document.createElement('button');
+      approve.textContent = 'Freigeben';
+      approve.disabled = b.state !== 'submitted';
+      const reject = document.createElement('button');
+      reject.textContent = 'Ablehnen';
+      const feedback = document.createElement('span');
+      feedback.className = 'feedback';
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      actions.append(approve, reject, note, feedback);
+
+      approve.addEventListener('click', async () => {
+        approve.disabled = true;
+        const res = await fetch(`/api/changesets/${b.id}/approve`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: note.value || null }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) { feedback.textContent = body.error || 'Fehler'; feedback.className = 'feedback err'; load(); return; }
+        load();
+      });
+      reject.addEventListener('click', async () => {
+        const res = await fetch(`/api/changesets/${b.id}/reject`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: note.value || null }),
+        });
+        if (!res.ok) { feedback.textContent = 'Fehler'; feedback.className = 'feedback err'; return; }
+        load();
+      });
+      box.append(head, ul, actions);
+      return box;
+    }
+
+    async function load() {
+      const [submitted, stale] = await Promise.all(
+        ['submitted', 'stale'].map((s) => fetch(`/api/changesets?state=${s}`).then((r) => (r.ok ? r.json() : []))));
+      const all = [...submitted, ...stale];
+      document.getElementById('list').replaceChildren(...all.map(bundle));
+      document.getElementById('empty').hidden = all.length > 0;
+    }
+
+    Me.bar();
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Benutzer</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto 4rem; padding: 0 1rem; line-height: 1.45; }
+    nav { margin: 0 0 1rem; color: #666; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #ddd; vertical-align: middle; }
+    .muted { color: #666; }
+    .feedback { font-size: .85rem; margin-left: .4rem; }
+    .err { color: #a11; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: .8rem; margin: 1rem 0; }
+    input, select, button { font: inherit; }
+  </style>
+</head>
+<body>
+  <h1>Benutzer</h1>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/displays.html">Displays</a></nav>
+  <p class="muted">
+    <b>Admin</b>: Einstellungen, Webhooks, Benutzer, Casting, Audio.
+    <b>Manager</b>: Inhalte direkt ändern, Overrides, Vorschläge freigeben.
+    <b>Redakteur</b>: schlägt Änderungen vor, die ein Manager freigibt.
+  </p>
+  <table>
+    <thead><tr><th>Name</th><th>Rolle</th><th>Deaktiviert</th><th>Neues Passwort</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="card">
+    <b>Konto hinzufügen</b>
+    <p>
+      <input id="newName" placeholder="Name" autocomplete="off" />
+      <input id="newPassword" type="password" placeholder="Passwort (mind. 8 Zeichen)" autocomplete="new-password" />
+      <select id="newRole">
+        <option value="editor">Redakteur</option>
+        <option value="manager">Manager</option>
+        <option value="admin">Admin</option>
+      </select>
+      <button id="add">Hinzufügen</button>
+      <span class="feedback" id="addFeedback"></span>
+    </p>
+  </div>
+
+  <script src="/me.js"></script>
+  <script>
+    const ROLES = [['editor', 'Redakteur'], ['manager', 'Manager'], ['admin', 'Admin']];
+
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+    }
+
+    async function readError(res, fallback) {
+      try { return (await res.json()).error || fallback; } catch (_) { return fallback; }
+    }
+
+    function row(user) {
+      const tr = document.createElement('tr');
+      const name = document.createElement('td');
+      name.textContent = user.name;
+      const roleCell = document.createElement('td');
+      const role = document.createElement('select');
+      for (const [value, text] of ROLES) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = text;
+        role.append(option);
+      }
+      role.value = user.role;
+      roleCell.append(role);
+      const disabledCell = document.createElement('td');
+      const disabled = document.createElement('input');
+      disabled.type = 'checkbox';
+      disabled.checked = !!user.disabled;
+      disabledCell.append(disabled);
+      const passCell = document.createElement('td');
+      const password = document.createElement('input');
+      password.type = 'password';
+      password.placeholder = 'unverändert';
+      password.autocomplete = 'new-password';
+      passCell.append(password);
+      const actions = document.createElement('td');
+      const save = document.createElement('button');
+      save.textContent = 'Speichern';
+      const del = document.createElement('button');
+      del.textContent = 'Löschen';
+      const feedback = document.createElement('span');
+      feedback.className = 'feedback';
+      actions.append(save, ' ', del, feedback);
+
+      save.addEventListener('click', async () => {
+        const body = { role: role.value, disabled: disabled.checked };
+        if (password.value) body.password = password.value;
+        const res = await fetch(`/api/users/${user.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+        password.value = '';
+        flash(feedback, 'gespeichert ✓');
+      });
+      del.addEventListener('click', async () => {
+        if (!confirm(`Konto „${user.name}“ löschen?`)) return;
+        const res = await fetch(`/api/users/${user.id}`, { method: 'DELETE' });
+        if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+        await load();
+      });
+      tr.append(name, roleCell, disabledCell, passCell, actions);
+      return tr;
+    }
+
+    async function load() {
+      const res = await fetch('/api/users');
+      const rows = document.getElementById('rows');
+      rows.replaceChildren();
+      if (!res.ok) return;
+      for (const user of await res.json()) rows.append(row(user));
+    }
+
+    document.getElementById('add').addEventListener('click', async () => {
+      const feedback = document.getElementById('addFeedback');
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: document.getElementById('newName').value,
+          password: document.getElementById('newPassword').value,
+          role: document.getElementById('newRole').value,
+        }),
+      });
+      if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+      document.getElementById('newName').value = '';
+      document.getElementById('newPassword').value = '';
+      flash(feedback, 'angelegt ✓');
+      // The first account ends open mode: from here on this page needs a login.
+      if ((await Me.load()).open) { location.href = '/login.html?next=%2Fusers.html'; return; }
+      await load();
+    });
+
+    Me.bar();
+    load();
+  </script>
+</body>
+</html>

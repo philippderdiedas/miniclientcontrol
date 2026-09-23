@@ -485,12 +485,19 @@ pub struct AppState {
     pub settings: Arc<RwLock<crate::settings::AppSettings>>,
     /// Which settings the command line pinned. Fixed for the process lifetime.
     pub locks: crate::settings::Locks,
-    /// The last `Authorization` header that verified successfully.
-    ///
-    /// Stored passwords are PBKDF2 hashes, which are deliberately slow; the
-    /// operator UI polls every two seconds, so verifying every request would
-    /// burn real time on a Pi. Cleared whenever the credentials change.
-    pub auth_cache: Arc<Mutex<Option<String>>>,
+    /// Failed sign-ins per address and when the window started. Checked and
+    /// incremented under one lock acquisition, so N concurrent guesses cannot
+    /// all pass the bound before any of them counts.
+    pub login_attempts: Arc<Mutex<std::collections::HashMap<std::net::IpAddr, (u32, std::time::Instant)>>>,
+    /// Basic headers already verified, to the account they resolved to. PBKDF2
+    /// is slow by design and a page polls every two seconds; cleared whenever
+    /// any account changes, so an old password stops working at once.
+    pub basic_cache: Arc<Mutex<std::collections::HashMap<String, crate::accounts::Identity>>>,
+    /// The command-line credential: a built-in admin, never stored.
+    pub rescue: Option<(String, String)>,
+    /// The application's own router, for replaying an approved proposal
+    /// through it. Set once in `main`, after the router exists.
+    pub router: Arc<std::sync::OnceLock<axum::Router>>,
     /// How the venue's audio is controlled, decided once at startup.
     pub audio: Arc<crate::audio::Backend>,
     /// Which screen's cast currently owns the room audio, if any.
