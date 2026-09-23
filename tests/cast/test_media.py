@@ -650,6 +650,29 @@ async def browser_flow():
         check("the add form's picker shows the chosen PDF's first page beside it",
               thumb.get("state") == "ready", thumb)
 
+        print("\n[113c] the overlay settings keep their image picked")
+        # The page used to load the image list and the settings side by side,
+        # and a settings answer that came first set the picker's value before its
+        # option existed -- dropped without a word, so the next save cleared the
+        # overlay's image.
+        picture = assets_by_name["fit.png"]["id"]
+        http("PUT", "/api/settings", {"overlay": {"enabled": True, "text": "Bild",
+                                                   "image_asset_id": picture}}, port=HTTP)
+        for attempt in range(5):
+            await admin.call("Page.navigate", {"url": f"http://127.0.0.1:{HTTP}/admin.html"})
+            picked = None
+            for _ in range(30):
+                picked = await admin.eval(
+                    "(() => document.getElementById('ovImage').value)()")
+                if picked:
+                    break
+                await asyncio.sleep(0.2)
+            if picked != str(picture):
+                break
+        check("every load shows the stored image in the picker", picked == str(picture),
+              (attempt, picked))
+        http("PUT", "/api/settings", {"overlay": {"enabled": False}}, port=HTTP)
+
 
 if __name__ == "__main__":
     try:

@@ -941,11 +941,12 @@
       })
       .catch(() => { /* the status poll reports unreachability */ });
 
-    loadOverlayImages();
-
     refresh();
     refreshCast();
-    loadSettings();
+    // The images first: the settings set the picker's value, and a value set
+    // before its option exists is silently dropped -- the picker then reads
+    // "keins", and the next save of the overlay clears its image.
+    loadOverlayImages().finally(loadSettings);
     setInterval(refresh, 3000);
     setInterval(refreshCast, 2000);
   </script>
