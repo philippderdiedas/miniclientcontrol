@@ -100,11 +100,17 @@ or a video is drawn by a small page of ours for the same kind of reason —
 Chromium's own image and video documents have a layout nothing can change and a
 video control bar nothing turns off.
 
-Each playlist item that plays an image or a video says **how it sits on the
-screen**: *Einpassen* (whole picture, with bars), *Füllen* (fills, crops),
-*Strecken* (fills, distorts), *Original* (1:1) or *Scrollen* (full width, for a
-tall image the scroll modes then move). The colour of the bars is the item's too.
-A video loops until its item's duration is up.
+Each playlist item that plays an image, a video or a PDF says **how it sits on
+the screen**: *Einpassen* (whole picture, with bars), *Füllen* (fills, crops),
+*Strecken* (fills, distorts), *Original* (1:1), *Breite füllen* (full width, the
+height follows — what a tall image or a PDF scrolls through) or *Höhe füllen*
+(full height, centred). The colour of the bars is the item's too. A video loops
+until its item's duration is up.
+
+A PDF defaults to *Breite füllen*, which is how PDFs have always been shown: one
+long page after another. Any other choice makes every page one screen, edge to
+edge, so the **Step** scroll mode with its default step (one screen height) pages
+through the document like a slide show.
 
 Each asset carries a default duration, which an item may override.
 

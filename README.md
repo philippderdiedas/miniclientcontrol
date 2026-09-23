@@ -193,10 +193,12 @@ declaration.
   end of the target playlist, renumbering both playlists `1..n`. An unknown
   `playlist_id` is refused, and so is `null`: an item in no playlist is the state
   this field exists to repair
-- `POST` and `PUT` also take, for an image or video item:
-  - `fit_mode`: `contain` (default), `cover`, `fill`, `none` or `scroll` — how the
-    asset sits on the screen. An unknown value is stored as `contain`. Ignored for
-    URL and PDF items
+- `POST` and `PUT` also take, for an image, video or PDF item:
+  - `fit_mode`: `contain`, `cover`, `fill`, `none`, `width` or `height` — how the
+    asset sits on the screen. Left out on `POST`, it is `width` for a PDF (how
+    PDFs have always been drawn) and `contain` for anything else. An unknown
+    value is stored as `contain`; `scroll`, the former name of `width`, is still
+    read as `width`. Ignored for URL items
   - `fit_background`: hex colour behind a contained asset (default `#000000`);
     anything that is not a hex colour is a `400`
 - `POST /api/playlist/{id}/move` — renumber within the item's own playlist
@@ -515,11 +517,15 @@ If the browser is started outside the controller, use the managed policy instead
 
 PDFs are rendered through the internal viewer (`/pdf_viewer.html`) and support both step and continuous scrolling.
 
-Images and videos are rendered through `/media_viewer.html`, which applies the
-item's `fit_mode` and `fit_background` and plays videos without controls, on a
-loop, unmuted. `fit_mode: "scroll"` draws an image at full width so the scroll
-modes above have something to scroll; with any other fit the whole image is on
-screen and there is nothing to scroll.
+Images and videos are rendered through `/media_viewer.html`; both viewers apply
+the item's `fit_mode` and `fit_background`, and videos play without controls, on
+a loop, unmuted. `fit_mode` is the layout and `scroll_config` the motion:
+
+- On an image, `width` draws it at full width so the modes above have something to
+  scroll; with any other fit it is on screen whole and there is nothing to scroll.
+- On a PDF, `width` stacks full-width pages (the default, and how PDFs have always
+  looked). Every other fit makes each page one screen, edge to edge, so `Step` with
+  `step_px: null` turns one step into one page.
 
 ## Project Layout
 

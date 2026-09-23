@@ -1,7 +1,7 @@
 # Media fit, silent video, and an overlay that does not blink
 
 **Status:** implemented
-**Date:** 2026-09-22
+**Date:** 2026-09-22, revised 2026-09-23 (see *Revision* at the end)
 
 ## What and why
 
@@ -322,7 +322,8 @@ from `overlay_payload` with the display the loop was given.
 ## Not in scope
 
 - **Per-asset fit defaults.** Decision 1; adding them later is additive.
-- **Fit for URL items and PDFs.** Neither has a page of ours whose layout we own.
+- **Fit for URL items.** There is no page of ours whose layout we own. (PDFs were
+  out of scope here too, and came in with the revision below.)
 - **Ending an item when its video ends.** The item's `duration` stays the only
   clock. Making the video's length end the item means the loop waiting on a page
   event instead of a timer, which is a different change to `browser.rs` and a
@@ -333,3 +334,52 @@ from `overlay_payload` with the display the loop was given.
   a page that blocks our script blocks the badge. Unchanged from today.
 - **Free CSS for the background.** A hex colour, validated. `background_css`
   exists in the overlay as an escape hatch and is not worth a second copy here.
+
+## Revision: PDFs, and `width` and `height` (2026-09-23)
+
+Testing on a real screen made the obvious case: a PDF has its own viewer of
+ours, so nothing kept it out, and for a PDF *fit width* and *fit height* are the
+two layouts that matter. Three changes, and the sections above are read with them
+applied — where they still say `scroll`, read `width`.
+
+**`scroll` is renamed `width`, and `height` joins it.** `scroll` described a
+layout — fill the width, let the height follow — by the name of the other axis,
+which is what made the UI need a hint to explain it. Fit is the layout and
+`scroll_config` is the motion; the values now say which layout they are. The
+enum is `contain`, `cover`, `fill`, `none`, `width`, `height`, one set for every
+kind rather than a PDF-only list. `height` fills the height, lets the width
+follow and centres the result; wider than the screen is cut at both sides, since
+the scroll runtime only moves vertically. `scroll` is still *read* as `width` by
+`FitMode::from_value`, never written, so a row stored under the old name keeps its
+layout. `width` on a video lands on `contain`, as `scroll` did.
+
+**A PDF defaults to `width`, not `contain`.** `width` is exactly what
+`pdf_viewer.html` has always drawn, and `contain` as its default would repaginate
+every PDF a venue has on upgrade. The value stays concrete — no "unset" state was
+added — so the default is decided where the value is first written:
+`FitMode::default_for(mimetype)`, used by `POST /api/playlist` when the request
+names no fit (one mimetype lookup) and by the override, which has the asset in
+hand already. The migration sets existing PDF items to `width`, and only in the
+same step that adds the column; after that the value is the operator's.
+
+**The PDF viewer honours the fit.** `width` renders as before and is the viewer's
+fallback for a missing or unknown `fit`. Every other value makes each page one
+screen, edge to edge, so a step scroll with the default step of one screen height
+is exactly one page — a PDF becomes a slide show without a new mode. The four
+`object-fit` values render each page at the resolution it is displayed at (the
+larger ratio for `cover` and `fill`, so neither is drawn small and stretched) and
+place it with `object-fit` on a canvas box the size of the screen. That box is
+transparent: its own white background would otherwise paint the bars, and the
+page is opaque anyway. The background colour now reaches PDFs too, which changes
+the default margin colour from the viewer's `#111` to the item's `#000000`.
+
+The card offers the fit on PDF items. The "nothing to scroll" hint stays
+image-only: a PDF's pages stack, so every fit leaves something to scroll through.
+
+Tests added: `FitMode` reads six names and the alias, `default_for` gives `width`
+to a PDF only, the migration sets an older PDF item to `width` and leaves an
+image at `contain`, the PDF viewer URL carries `fit` and `bg`; in `test_media.py`
+`[101b]` (the PDF default on create), `[104b]` (an image at full height), `[106]`
+(a two-page PDF at `contain` is two screen-sized pages, one screen height apart,
+on the item's colour), `[107]` (`height` gives screen-high pages at the page's
+aspect ratio) and `[108]` (a PDF naming no fit looks the way it always has).
