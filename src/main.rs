@@ -55,6 +55,7 @@ fn is_display_path(path: &str) -> bool {
     matches!(
         path,
         "/pdf_viewer.html"
+            | "/media_viewer.html"
             | "/pdf.min.js"
             | "/pdf.worker.min.js"
             | "/autoscroll.js"
@@ -450,4 +451,15 @@ async fn main() -> Result<()> {
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_media_viewer_is_reachable_by_the_display_browser() {
+        // The display browser is driven over CDP and presents no credentials; a
+        // page it loads that is not here is a 401 on every screen the moment
+        // basic auth is configured.
+        assert!(super::is_display_path("/media_viewer.html"));
+    }
 }

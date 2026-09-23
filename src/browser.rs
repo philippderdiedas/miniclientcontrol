@@ -12,7 +12,7 @@ use chromiumoxide::listeners::EventStream;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use crate::models::{AppState, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Display, FitMode, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use urlencoding::encode;
 
 /// Drive one screen.
@@ -803,11 +803,14 @@ fn playlist_target_url(state: &AppState, item: &PlaylistItemWithAsset) -> String
         if !full_path.exists() {
             return no_content_url(state.args.port);
         }
-
-        if is_internal_pdf_mimetype(item.mimetype.as_deref()) {
-            return internal_pdf_viewer_url(state.args.port, path, &item.scroll_config.0);
-        }
-        return format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", state.args.port, path);
+        return asset_target_url(
+            state.args.port,
+            path,
+            item.mimetype.as_deref(),
+            &item.scroll_config.0,
+            FitMode::from_value(&item.fit_mode),
+            &item.fit_background,
+        );
     }
 
     no_content_url(state.args.port)
@@ -819,13 +822,60 @@ fn override_target_url(state: &AppState, item: &OverrideItem) -> String {
     }
 
     if let Some(path) = &item.local_path {
-        if is_internal_pdf_mimetype(item.mimetype.as_deref()) {
-            return internal_pdf_viewer_url(state.args.port, path, &item.scroll_config);
-        }
-        return format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", state.args.port, path);
+        return asset_target_url(
+            state.args.port,
+            path,
+            item.mimetype.as_deref(),
+            &item.scroll_config,
+            item.fit_mode,
+            &item.fit_background,
+        );
     }
 
     "about:blank".to_string()
+}
+
+/// Where an asset is shown, given what it is and how its item wants it to sit.
+///
+/// Images and videos go through `media_viewer.html` rather than to `/uploads/`
+/// directly: navigated to directly, Chromium builds its own image or media
+/// document, whose layout no setting of ours can reach and whose video comes
+/// with a control bar nothing turns off. PDFs keep their own viewer; anything
+/// else is navigated to as before. The existence check stays with the caller,
+/// so this is testable without an `AppState`.
+fn asset_target_url(
+    port: u16,
+    local_path: &str,
+    mimetype: Option<&str>,
+    scroll: &ScrollMode,
+    fit: FitMode,
+    background: &str,
+) -> String {
+    if is_internal_pdf_mimetype(mimetype) {
+        return internal_pdf_viewer_url(port, local_path, scroll);
+    }
+    if let Some(kind) = media_kind(mimetype) {
+        return format!(
+            "http://127.0.0.1:{}/media_viewer.html?asset={}&kind={}&fit={}&bg={}",
+            port,
+            encode(local_path),
+            kind,
+            fit.as_str(),
+            encode(background)
+        );
+    }
+    format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", port, local_path)
+}
+
+fn media_kind(mimetype: Option<&str>) -> Option<&'static str> {
+    let m = mimetype.unwrap_or_default().to_ascii_lowercase();
+    if m.starts_with("image/") {
+        Some("image")
+    } else if m.starts_with("video/") {
+        Some("video")
+    } else {
+        None
+    }
 }
 
 fn is_internal_pdf_mimetype(mimetype: Option<&str>) -> bool {
@@ -1468,4 +1518,54 @@ async fn apply_overlay(
     let shown: bool = page.evaluate(script).await?.into_value().unwrap_or(false);
     debug!("Overlay applied (visible: {})", shown);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::FitMode;
+
+    #[test]
+    fn an_image_goes_through_the_media_viewer_with_its_fit() {
+        let url = asset_target_url(3000, "a b.png", Some("image/png"), &ScrollMode::None,
+                                   FitMode::Cover, "#00ff00");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:3000/media_viewer.html?asset=a%20b.png&kind=image&fit=cover&bg=%2300ff00"
+        );
+    }
+
+    #[test]
+    fn a_video_goes_through_the_media_viewer_as_a_video() {
+        let url = asset_target_url(3000, "clip.mp4", Some("video/mp4"), &ScrollMode::None,
+                                   FitMode::Contain, "#000000");
+        assert!(url.contains("/media_viewer.html?"), "{url}");
+        assert!(url.contains("kind=video"), "{url}");
+    }
+
+    #[test]
+    fn a_pdf_keeps_its_own_viewer() {
+        let url = asset_target_url(3000, "doc.pdf", Some("application/pdf"), &ScrollMode::None,
+                                   FitMode::Cover, "#000000");
+        assert!(url.contains("/pdf_viewer.html?"), "{url}");
+    }
+
+    #[test]
+    fn anything_else_is_navigated_to_directly() {
+        let url = asset_target_url(3000, "page.html", Some("text/html"), &ScrollMode::None,
+                                   FitMode::Cover, "#000000");
+        assert!(url.starts_with("http://127.0.0.1:3000/uploads/page.html"), "{url}");
+        let unknown = asset_target_url(3000, "blob", None, &ScrollMode::None,
+                                       FitMode::Contain, "#000000");
+        assert!(unknown.contains("/uploads/blob"), "{unknown}");
+    }
+
+    #[test]
+    fn the_media_viewer_is_not_exempt_from_scrolling() {
+        // `scroll` depends on the scroll runtime driving this page. Only the PDF
+        // viewer scrolls itself and is skipped by `start_scrolling`.
+        let url = asset_target_url(3000, "tall.png", Some("image/png"), &ScrollMode::None,
+                                   FitMode::Scroll, "#000000");
+        assert!(!is_internal_pdf_viewer_url(&url), "{url}");
+    }
 }

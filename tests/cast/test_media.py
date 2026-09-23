@@ -107,11 +107,134 @@ def api_flow():
               status == 400, status)
 
 
+def spawn(cmd):
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(p)
+    return p
+
+
+def wait_for(fn, timeout=30, interval=0.3):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            value = fn()
+            if value:
+                return value
+        except Exception:
+            pass
+        time.sleep(interval)
+    return None
+
+
+MEDIA = """(() => {
+  const m = document.getElementById('media');
+  if (!m) return JSON.stringify({media: false, href: location.href});
+  const root = document.scrollingElement || document.documentElement;
+  return JSON.stringify({
+    media: true,
+    tag: m.tagName.toLowerCase(),
+    href: location.href,
+    objectFit: getComputedStyle(m).objectFit,
+    controls: m.controls === true || m.hasAttribute('controls'),
+    loop: m.loop === true,
+    autoplay: m.autoplay === true,
+    background: getComputedStyle(document.body).backgroundColor,
+    scrollable: root.scrollHeight > window.innerHeight + 2,
+  });
+})()"""
+
+
+async def on_media(page, predicate, timeout=40):
+    """Poll the display until the media viewer shows something `predicate` likes."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            last = json.loads(await page.eval(MEDIA))
+            if last.get("media") and predicate(last):
+                return last
+        except Exception:
+            pass  # mid-navigation: the context was just destroyed
+        await asyncio.sleep(0.3)
+    return last
+
+
+async def browser_flow():
+    print("\n[103] an image item is drawn by our page with the fit it asked for")
+    if not os.path.exists(CHROME):
+        print("  SKIP  no Chrome at " + CHROME)
+        return
+
+    shutil.rmtree(f"{SP}/media-display", ignore_errors=True)
+    spawn([CHROME, "--headless=new", f"--remote-debugging-port={CDP}",
+           f"--user-data-dir={SP}/media-display", "--no-first-run", "--no-sandbox",
+           "--disable-gpu", "--window-size=1280,720",
+           "--autoplay-policy=no-user-gesture-required", "about:blank"])
+    check("display chrome up", wait_for(lambda: cdp.targets(CDP)) is not None)
+
+    for leftover in ("m.db", "m.db-wal", "m.db-shm"):
+        try:
+            os.remove(os.path.join(SP, leftover))
+        except FileNotFoundError:
+            pass
+    spawn([BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
+           "--database-path", f"{SP}/m.db", "--assets-dir", f"{SP}/assets",
+           "--cast-cert-path", f"{SP}/cert.pem", "--no-launch-browser",
+           "--managed-cert", "off", "--cdp-url", f"http://127.0.0.1:{CDP}"])
+    check("controller up", wait_for(
+        lambda: http("GET", "/api/cast/info", port=HTTP)[0] == 200) is not None)
+
+    image = upload("fit.png", PNG, "image/png", port=HTTP)
+    video = upload("clip.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4", port=HTTP)
+    playlist = a_playlist(port=HTTP)
+    http("POST", "/api/playlist",
+         {"asset_id": image, "playlist_id": playlist, "duration": 3,
+          "fit_mode": "cover", "fit_background": "#00ff00"}, port=HTTP)
+    image_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
+
+    ws_url, _ = cdp.page_ws(CDP)
+    async with cdp.Session(ws_url) as page:
+        shown = await on_media(page, lambda m: m["tag"] == "img")
+        check("the display is on the media viewer, not /uploads/",
+              shown and "/media_viewer.html?" in shown["href"], shown)
+        check("with the item's fit", shown and shown["objectFit"] == "cover", shown)
+        check("and its background colour",
+              shown and shown["background"] == "rgb(0, 255, 0)", shown)
+        check("and nothing to scroll", shown and shown["scrollable"] is False, shown)
+
+        print("\n[104] `scroll` draws it full width and gives the document height")
+        http("PUT", f"/api/playlist/{image_item}", {"fit_mode": "scroll"}, port=HTTP)
+        # The edit lands on the item's next navigation; the item is three
+        # seconds long and loops, so that is within a few seconds. Waits for the
+        # height as well as the URL: until the image has loaded it is zero
+        # pixels tall and the page is not scrollable yet.
+        tall = await on_media(page, lambda m: "fit=scroll" in m["href"] and m["scrollable"])
+        check("the page is taller than the screen",
+              tall and tall["scrollable"] is True, tall)
+
+        print("\n[105] a video has no control bar, and loops")
+        status, _ = http("POST", "/api/override", {"asset_id": video, "fit_mode": "fill"}, port=HTTP)
+        check("the override is up", status == 200, status)
+        clip = await on_media(page, lambda m: m["tag"] == "video")
+        check("it is a <video> on our page", clip and clip["tag"] == "video", clip)
+        check("without controls", clip and clip["controls"] is False, clip)
+        check("looping and autoplaying", clip and clip["loop"] and clip["autoplay"], clip)
+        check("and the override's own fit", clip and clip["objectFit"] == "fill", clip)
+        http("DELETE", "/api/override", port=HTTP)
+
+
 if __name__ == "__main__":
     try:
         api_flow()
+        asyncio.run(browser_flow())
     finally:
         for p in procs:
             p.terminate()
+        for p in procs:
+            try:
+                p.wait(timeout=10)
+            except Exception:
+                p.kill()
+        shutil.rmtree(f"{SP}/media-display", ignore_errors=True)
     print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))
     sys.exit(1 if failures else 0)

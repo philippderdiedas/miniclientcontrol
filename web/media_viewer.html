@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Media</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #000; }
+    /* Every mode but `scroll` fills the window exactly and never scrolls. */
+    body.fixed { width: 100vw; height: 100vh; overflow: hidden; }
+    body.fixed #media { display: block; width: 100vw; height: 100vh; }
+    /* `scroll`: full width, natural height. The document scrolls, and the scroll
+       runtime the controller injects is what moves it -- which is why this page,
+       unlike the PDF viewer, is not exempt from start_scrolling. */
+    body.scroll #media { display: block; width: 100%; height: auto; }
+  </style>
+</head>
+<body>
+  <script>
+    // Chromium's own image and media documents are what this page replaces:
+    // navigated to directly, an asset gets a layout no setting can reach and a
+    // video gets a control bar nothing turns off.
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const asset = params.get('asset');
+      const kind = params.get('kind') === 'video' ? 'video' : 'image';
+
+      // An unknown fit falls back rather than drawing nothing, and `scroll` on a
+      // video has no overflow worth scrolling -- both land on contain.
+      const FITS = ['contain', 'cover', 'fill', 'none', 'scroll'];
+      let fit = FITS.includes(params.get('fit')) ? params.get('fit') : 'contain';
+      if (kind === 'video' && fit === 'scroll') fit = 'contain';
+
+      // Validated here as well as on write: a row from an older binary, or one
+      // edited by hand, must not paint an undefined colour.
+      const bg = params.get('bg') || '';
+      if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(bg)) {
+        document.documentElement.style.background = bg;
+        document.body.style.background = bg;
+      }
+
+      if (!asset) return;
+
+      const media = document.createElement(kind === 'video' ? 'video' : 'img');
+      media.id = 'media';
+      media.src = '/uploads/' + encodeURIComponent(asset);
+
+      if (fit === 'scroll') {
+        document.body.className = 'scroll';
+      } else {
+        document.body.className = 'fixed';
+        media.style.objectFit = fit;
+      }
+
+      if (kind === 'video') {
+        // No `controls`: the bar is the complaint this page exists for. `loop`
+        // unconditionally -- the item's duration ends it either way, and without
+        // it a short video parks on its last frame for the rest of the item.
+        media.controls = false;
+        media.autoplay = true;
+        media.loop = true;
+        media.playsInline = true;
+        // Unmuted first, muted only if the browser refuses. The controller starts
+        // Chromium with --autoplay-policy=no-user-gesture-required, but a browser
+        // started outside it may not have the flag, and a silent video is better
+        // than a black screen.
+        media.addEventListener('canplay', () => {
+          const started = media.play();
+          if (started && started.catch) {
+            started.catch((err) => {
+              if (err && err.name === 'NotAllowedError') {
+                media.muted = true;
+                media.play().catch(() => {});
+              }
+            });
+          }
+        }, { once: true });
+      }
+
+      document.body.append(media);
+    })();
+  </script>
+</body>
+</html>
