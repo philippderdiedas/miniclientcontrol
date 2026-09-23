@@ -6,21 +6,8 @@ scope here on purpose, and so is switching the panel itself on and off: that
 belongs to the hardware, not to this software.
 
 Each entry says what it is, why it is wanted, and the decision it still needs.
-An entry becomes a spec under `docs/superpowers/specs/` when work on it starts.
-
-## Now
-
-### Credentials in URLs never reach the journal
-
-A playlist URL can carry a secret in its query — the checkmk kiosk logs in with
-`login.py?_username=…&_password=…` — and the control loop logged every target URL
-at `info`, so the password sat in the journal in plain text. `guest_page::redact`
-only dropped the userinfo, and webhooks and the admin card went through it, but
-the loop's own log lines did not.
-
-**Decision:** `redact` also masks the values of query and fragment parameters
-whose names look like a secret, and every URL the control loop logs goes through
-it. Secrets in a path segment cannot be recognised and stay out of reach.
+An entry becomes a spec under `docs/superpowers/specs/` when work on it starts,
+and leaves this file when it ships.
 
 ## Next
 

@@ -266,10 +266,15 @@ async def browser_flow():
             os.remove(os.path.join(SP, leftover))
         except FileNotFoundError:
             pass
-    spawn([BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
-           "--database-path", f"{SP}/m.db", "--assets-dir", f"{SP}/assets",
-           "--cast-cert-path", f"{SP}/cert.pem", "--no-launch-browser",
-           "--managed-cert", "off", "--cdp-url", f"http://127.0.0.1:{CDP}"])
+    # Logged to a file rather than discarded: case [109] reads it back, because
+    # what the control loop writes to the journal is part of what is under test.
+    log = open(f"{SP}/m.log", "w")
+    procs.append(subprocess.Popen(
+        [BIN, "--port", str(HTTP), "--cast-tls-port", str(TLS),
+         "--database-path", f"{SP}/m.db", "--assets-dir", f"{SP}/assets",
+         "--cast-cert-path", f"{SP}/cert.pem", "--no-launch-browser",
+         "--managed-cert", "off", "--cdp-url", f"http://127.0.0.1:{CDP}"],
+        stdout=log, stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"}))
     check("controller up", wait_for(
         lambda: http("GET", "/api/cast/info", port=HTTP)[0] == 200) is not None)
 
@@ -348,6 +353,32 @@ async def browser_flow():
         check("full width less the viewer's margin, one page after another",
               wide and all(near(w, wide["vw"] - 24) for w, _ in wide["rects"]), wide)
         http("DELETE", "/api/override", port=HTTP)
+
+        print("\n[109] a secret in a playlist URL never reaches the log")
+        # The shape that put a real password in a real journal: a dashboard that
+        # logs in through its query string. Served by the controller itself so the
+        # navigation succeeds offline.
+        secret_url = (f"http://127.0.0.1:{HTTP}/empty_playlist.html"
+                      "?_username=kiosk&_password=hunter2&token=s3cr3t-t0ken")
+        http("POST", "/api/playlist",
+             {"url": secret_url, "duration": 600, "playlist_id": playlist}, port=HTTP)
+        secret_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
+        http("POST", "/api/control/current", {"item_id": secret_item}, port=HTTP)
+        on_it = wait_for(lambda: http("GET", "/api/control/current", port=HTTP)[1]
+                         .get("item_id") == secret_item, 40)
+        check("the loop is showing the item", on_it is True)
+        # And through the override path, which logs its own line.
+        http("POST", "/api/override", {"url": secret_url}, port=HTTP)
+        time.sleep(4)
+        http("DELETE", "/api/override", port=HTTP)
+        time.sleep(1)
+        written = open(f"{SP}/m.log", encoding="utf-8", errors="replace").read()
+        check("the item was logged at all -- or this proves nothing",
+              "_username=kiosk" in written, written[-500:])
+        check("but not its password", "hunter2" not in written,
+              [line[:200] for line in written.splitlines() if "hunter2" in line][:3])
+        check("nor its token", "s3cr3t-t0ken" not in written,
+              [line[:200] for line in written.splitlines() if "s3cr3t" in line][:3])
 
 
 if __name__ == "__main__":

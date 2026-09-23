@@ -450,7 +450,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     "Showing item {} (keep_loaded: {}) at {} (Duration: {}s)",
                     item.id,
                     item.keep_loaded,
-                    target_url,
+                    redact_str(&target_url),
                     duration_secs
                 );
 
@@ -700,7 +700,7 @@ async fn ensure_single_control_page(browser: &mut Browser) -> Result<Page, chrom
 
 
     for stale in pages {
-        debug!("STALE PAGE: {}", stale.url().await.unwrap_or(None).unwrap_or("".into()));
+        debug!("STALE PAGE: {}", redact_str(&stale.url().await.unwrap_or(None).unwrap_or_default()));
         if let Err(e) = stale.close().await {
             warn!("Failed to close stale tab: {}", e);
         }
@@ -723,7 +723,7 @@ async fn run_override_loop(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let target_url = override_target_url(state, &override_item);
-        info!("Override active. Navigating to: {}", target_url);
+        info!("Override active. Navigating to: {}", redact_str(&target_url));
 
         let _ = page.bring_to_front().await;
         let overlay = crate::settings::overlay_payload(state, display, None).await;
@@ -977,13 +977,34 @@ fn internal_pdf_viewer_url(
 
 /// Strip credentials from a URL that is about to leave the process.
 ///
-/// A playlist URL can carry them exactly like a guest page URL can, and a
-/// webhook is somewhere they must not go. Anything unparseable is passed
-/// through: it is not a URL with credentials in it either.
+/// A playlist URL can carry them exactly like a guest page URL can, and neither
+/// a webhook nor the journal is somewhere they may go. **Every log line in this
+/// file that prints a URL goes through this** -- the control loop logs each
+/// item it shows at `info`, and a dashboard that logs in through its query
+/// string put a real password in a real journal before it did.
+///
+/// Anything unparseable is passed through: it is not a URL with credentials in
+/// it either.
 pub(crate) fn redact_str(url: &str) -> String {
     match url::Url::parse(url) {
         Ok(parsed) => crate::guest_page::redact(&parsed),
         Err(_) => url.to_string(),
+    }
+}
+
+/// `redact_str` applied to every string in `value` that is a URL, however deep.
+///
+/// For a diagnostic blob that is about to be logged: walking it is the only way
+/// to be sure, because the scroll runtime repeats the page's address in every
+/// entry of its log buffer and a field-by-field fix would miss the next one.
+fn redact_urls_in(value: &mut Value) {
+    match value {
+        Value::String(text) if text.starts_with("http://") || text.starts_with("https://") => {
+            *text = redact_str(text);
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_urls_in),
+        Value::Object(fields) => fields.values_mut().for_each(redact_urls_in),
+        _ => {}
     }
 }
 
@@ -1111,14 +1132,14 @@ async fn navigate_page(page: &Page, target_url: &str) -> Result<(), CdpError> {
     let response = match navigate {
         Ok(Ok(response)) => response,
         Ok(Err(CdpError::Timeout)) | Err(_) => {
-            warn!("Navigate command timed out for '{}', continuing (navigation may still succeed)", target_url);
+            warn!("Navigate command timed out for '{}', continuing (navigation may still succeed)", redact_str(target_url));
             return Ok(());
         }
         Ok(Err(e)) => return Err(e),
     };
     if let Some(err_text) = response.result.error_text {
         if err_text.to_lowercase().contains("timed out") {
-            warn!("Navigation reported timeout for '{}', continuing", target_url);
+            warn!("Navigation reported timeout for '{}', continuing", redact_str(target_url));
             return Ok(());
         }
         return Err(CdpError::ChromeMessage(err_text));
@@ -1402,7 +1423,10 @@ async fn log_scroll_runtime_snapshot(
 
     let snapshot = page.evaluate(script).await?;
     let snapshot_json: String = snapshot.into_value()?;
-    let parsed: Value = serde_json::from_str(&snapshot_json)?;
+    let mut parsed: Value = serde_json::from_str(&snapshot_json)?;
+    // The page's own address is the playlist URL, secrets included -- and not
+    // only in `href`: every entry of the runtime's log buffer carries it too.
+    redact_urls_in(&mut parsed);
     info!("scroll runtime snapshot [{}]: {}", label, parsed);
     Ok(())
 }
@@ -1668,6 +1692,20 @@ mod tests {
         let unknown = asset_target_url(3000, "blob", None, &ScrollMode::None,
                                        FitMode::Contain, "#000000");
         assert!(unknown.contains("/uploads/blob"), "{unknown}");
+    }
+
+    #[test]
+    fn a_logged_diagnostic_blob_loses_every_secret_in_it() {
+        let mut blob = serde_json::json!({
+            "href": "https://a.test/?password=hunter2",
+            "tail": [[1, "https://a.test/?password=hunter2", "setMode", "auto"]],
+            "metrics": { "element": "root" },
+        });
+        redact_urls_in(&mut blob);
+        let text = blob.to_string();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(text.contains("password=***"), "{text}");
+        assert!(text.contains("setMode"), "{text}");
     }
 
     #[test]

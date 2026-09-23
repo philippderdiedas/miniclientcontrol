@@ -567,10 +567,20 @@ A guest may put a web page on the display instead of casting, when
 - `activate_display`/`deactivate_display` take what they install. The
   still-ours check on teardown compares against `session.showing`, not against
   the cast page.
-- **Credentials in a guest URL reach the browser and nothing else.** Everything
-  that logs or displays one goes through `guest_page::redact`. Refusing them
-  outright would be theatre (`?token=` is equivalent) and would break the
-  internal-dashboard case that allowing LAN targets exists for.
+- **Credentials in a URL reach the browser and nothing else** — a guest's or a
+  playlist item's. Everything that logs or displays one goes through
+  `guest_page::redact`, which drops the userinfo *and* masks the value of every
+  query or fragment parameter whose name looks like a secret (`_password=***`).
+  The second half exists because checkmk's kiosk login carries its password in
+  the query and the loop logged every item URL at `info`: it sat in the prod
+  journal in plain text. **Every log line in `browser.rs` that prints a URL goes
+  through `redact_str`**, and a logged diagnostic blob goes through
+  `redact_urls_in` — the scroll runtime repeats the page address in every entry
+  of its buffer. Case `[109]` of `tests/cast/test_media.py` reads the real log
+  back. The query is rewritten piece by piece, never reparsed, so everything else
+  in the URL stays byte for byte. Refusing credentials outright would be theatre
+  and would break the internal-dashboard case that allowing LAN targets exists
+  for.
 - The grace period follows what is showing: `PAGE_GRACE`, not `SENDER_GRACE`.
   The keepalive is a protocol-level ping, so backgrounding a tab does not end a
   session; discarding it does.
