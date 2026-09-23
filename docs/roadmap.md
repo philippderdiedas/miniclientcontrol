@@ -27,9 +27,11 @@ basic auth, a role check per route alongside `is_display_path` and
 `cast::is_cast_public_path`, and a model for **pending changes** — an edit that
 is stored but not live, shown to a manager as a diff.
 
-Still open: whether an editor's proposal is per field or per card, and whether
-the CLI password stays as the admin's recovery path (it should — see
-[deployment.md](deployment.md#runtime-settings-versus-flags)).
+Decided: proposals are recorded requests replayed on approval (not a new write
+layer), collected in bundles, never applied when stale; open until the first
+account; scripts use HTTP Basic against the accounts; the CLI credential stays the
+recovery path. Designed in
+[the users-and-roles spec](superpowers/specs/2026-09-24-users-and-roles-design.md).
 
 ## Later
 
