@@ -18,9 +18,10 @@ real length as the asset duration, read when it is uploaded (`ffprobe`, or the
 browser's `loadedmetadata` in the admin page, which needs no new dependency on the
 device).
 
-Still open: whether an item may end *with* its video rather than on a timer. That
-needs the loop to wait on a page event instead of a sleep, which is a larger
-change to `browser.rs` than reading the length.
+Decided: the browser measures at upload, the add form prefills an item's duration
+from it, and the video starts together with the item's clock — which makes "end
+with the video" fall out of "duration = length". Designed in
+[the video-length spec](superpowers/specs/2026-09-23-video-length-design.md).
 
 ### Asset preview on hover
 
