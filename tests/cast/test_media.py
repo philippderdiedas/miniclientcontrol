@@ -195,6 +195,44 @@ MEDIA = """(() => {
 })()"""
 
 
+PDF = """(() => {
+  const canvases = [...document.querySelectorAll('#pages canvas')];
+  const root = document.scrollingElement || document.documentElement;
+  return JSON.stringify({
+    href: location.href,
+    pages: canvases.length,
+    vw: window.innerWidth,
+    vh: window.innerHeight,
+    rects: canvases.map((c) => {
+      const r = c.getBoundingClientRect();
+      return [Math.round(r.width), Math.round(r.height)];
+    }),
+    fit: canvases.length ? getComputedStyle(canvases[0]).objectFit : null,
+    background: getComputedStyle(document.body).backgroundColor,
+    scrollHeight: root.scrollHeight,
+  });
+})()"""
+
+
+async def on_pdf(page, predicate, timeout=40):
+    """Poll the display until the PDF viewer has drawn both pages and `predicate` agrees."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            last = json.loads(await page.eval(PDF))
+            if "/pdf_viewer.html?" in last["href"] and last["pages"] == 2 and predicate(last):
+                return last
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+    return last
+
+
+def near(a, b, slack=2):
+    return abs(a - b) <= slack
+
+
 async def on_media(page, predicate, timeout=40):
     """Poll the display until the media viewer shows something `predicate` likes."""
     deadline = time.time() + timeout
@@ -263,6 +301,16 @@ async def browser_flow():
         check("the page is taller than the screen",
               tall and tall["scrollable"] is True, tall)
 
+        print("\n[104b] `height` fills the height and scrolls nothing")
+        http("PUT", f"/api/playlist/{image_item}", {"fit_mode": "height"}, port=HTTP)
+        high = await on_media(page, lambda m: "fit=height" in m["href"])
+        size = json.loads(await page.eval(
+            "JSON.stringify((() => { const r = document.getElementById('media')"
+            ".getBoundingClientRect(); return [r.width, r.height, innerHeight]; })())"))
+        check("the square image is exactly as tall as the screen, and as wide",
+              near(size[1], size[2]) and near(size[0], size[2]), size)
+        check("and the page does not scroll", high and high["scrollable"] is False, high)
+
         print("\n[105] a video has no control bar, and loops")
         status, _ = http("POST", "/api/override", {"asset_id": video, "fit_mode": "fill"}, port=HTTP)
         check("the override is up", status == 200, status)
@@ -271,6 +319,34 @@ async def browser_flow():
         check("without controls", clip and clip["controls"] is False, clip)
         check("looping and autoplaying", clip and clip["loop"] and clip["autoplay"], clip)
         check("and the override's own fit", clip and clip["objectFit"] == "fill", clip)
+
+        print("\n[106] a PDF with `contain` is one screen per page")
+        pdf = upload("slides.pdf", pdf_bytes(), "application/pdf", port=HTTP)
+        http("POST", "/api/override",
+             {"asset_id": pdf, "fit_mode": "contain", "fit_background": "#00ff00"}, port=HTTP)
+        slides = await on_pdf(page, lambda d: "fit=contain" in d["href"])
+        check("both pages are drawn", slides and slides["pages"] == 2, slides)
+        check("each one the size of the screen",
+              slides and all(near(w, slides["vw"]) and near(h, slides["vh"])
+                             for w, h in slides["rects"]), slides)
+        check("with the page contained in it", slides and slides["fit"] == "contain", slides)
+        check("so a step of one screen height is one page",
+              slides and near(slides["scrollHeight"], 2 * slides["vh"]), slides)
+        check("on the item's background", slides and slides["background"] == "rgb(0, 255, 0)",
+              slides)
+
+        print("\n[107] `height` makes a portrait page exactly as tall as the screen")
+        http("POST", "/api/override", {"asset_id": pdf, "fit_mode": "height"}, port=HTTP)
+        high = await on_pdf(page, lambda d: "fit=height" in d["href"])
+        check("each page is screen height, and as wide as its aspect ratio makes it",
+              high and all(near(h, high["vh"]) and near(w, high["vh"] * 595 / 842)
+                           for w, h in high["rects"]), high)
+
+        print("\n[108] a PDF that names no fit looks the way PDFs always have")
+        http("POST", "/api/override", {"asset_id": pdf}, port=HTTP)
+        wide = await on_pdf(page, lambda d: "fit=width" in d["href"])
+        check("full width less the viewer's margin, one page after another",
+              wide and all(near(w, wide["vw"] - 24) for w, _ in wide["rects"]), wide)
         http("DELETE", "/api/override", port=HTTP)
 
 

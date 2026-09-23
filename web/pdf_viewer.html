@@ -9,6 +9,15 @@
     #app { min-height: 100vh; }
     #pages { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0 24px; }
     canvas { background: #fff; max-width: 100%; height: auto; }
+    /* Every fit but `width` draws one screen per page: the pages sit edge to
+       edge, so a step of one screen height is exactly one page. */
+    body.slides { overflow-x: hidden; }
+    body.slides #pages { gap: 0; padding: 0; }
+    body.slides .slide { width: 100vw; height: 100vh; overflow: hidden;
+                         display: flex; justify-content: center; align-items: center; }
+    /* Transparent, not white: with object-fit the canvas box is the whole screen
+       and its own background would paint the bars. The page itself is opaque. */
+    body.slides canvas { display: block; max-width: none; background: transparent; flex: none; }
     #status { position: fixed; top: 8px; left: 8px; z-index: 10; background: rgba(0,0,0,0.65); color: #eee; font: 12px/1.3 sans-serif; padding: 6px 8px; border-radius: 6px; }
   </style>
   <script src="/pdf.min.js"></script>
@@ -30,6 +39,20 @@
       const stepPx = Number(params.get('step_px') || window.innerHeight);
       const stepDelay = Number(params.get('step_delay') || 2000);
       const stepTime = Number(params.get('step_time') || 0);
+
+      // How a page sits on the screen. `width` is what this viewer has always
+      // done and stays the fallback, so a URL without the parameter -- or an
+      // unknown value -- looks the way PDFs always have.
+      const FITS = ['contain', 'cover', 'fill', 'none', 'width', 'height'];
+      const fit = FITS.includes(params.get('fit')) ? params.get('fit') : 'width';
+      if (fit !== 'width') document.body.classList.add('slides');
+
+      // Validated here as well as on write, like the media viewer.
+      const bg = params.get('bg') || '';
+      if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(bg)) {
+        document.documentElement.style.background = bg;
+        document.body.style.background = bg;
+      }
 
       const statusEl = document.getElementById('status');
       const pagesEl = document.getElementById('pages');
@@ -53,10 +76,26 @@
         return;
       }
 
+      // The resolution a page is rendered at. For the object-fit modes it is the
+      // one the page ends up displayed at -- the larger ratio for cover and
+      // fill, so neither is drawn blurry and then stretched.
+      const scaleFor = (w, h) => {
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        switch (fit) {
+          case 'contain': return Math.min(W / w, H / h);
+          case 'cover':
+          case 'fill': return Math.max(W / w, H / h);
+          case 'none': return 1;
+          case 'height': return H / h;
+          default: return Math.max(0.5, (W - 24) / w);
+        }
+      };
+
       const renderPage = async (num) => {
         const page = await pdf.getPage(num);
         const unscaled = page.getViewport({ scale: 1 });
-        const scale = Math.max(0.5, (window.innerWidth - 24) / unscaled.width);
+        const scale = scaleFor(unscaled.width, unscaled.height);
         const viewport = page.getViewport({ scale });
 
         const canvas = document.createElement('canvas');
@@ -65,7 +104,24 @@
         canvas.height = viewport.height;
 
         await page.render({ canvasContext: ctx, viewport }).promise;
-        pagesEl.appendChild(canvas);
+
+        if (fit === 'width') {
+          pagesEl.appendChild(canvas);
+        } else if (fit === 'height') {
+          canvas.style.height = '100vh';
+          canvas.style.width = 'auto';
+          const slide = document.createElement('div');
+          slide.className = 'slide';
+          slide.appendChild(canvas);
+          pagesEl.appendChild(slide);
+        } else {
+          // The four object-fit modes: the canvas box is the screen, and the
+          // page is placed inside it exactly as an image would be.
+          canvas.style.width = '100vw';
+          canvas.style.height = '100vh';
+          canvas.style.objectFit = fit;
+          pagesEl.appendChild(canvas);
+        }
       };
 
       for (let i = 1; i <= pdf.numPages; i++) {

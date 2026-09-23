@@ -6,13 +6,19 @@
   <title>Media</title>
   <style>
     html, body { margin: 0; padding: 0; background: #000; }
-    /* Every mode but `scroll` fills the window exactly and never scrolls. */
+    /* The object-fit modes fill the window exactly and never scroll. */
     body.fixed { width: 100vw; height: 100vh; overflow: hidden; }
     body.fixed #media { display: block; width: 100vw; height: 100vh; }
-    /* `scroll`: full width, natural height. The document scrolls, and the scroll
+    /* `width`: full width, natural height. The document scrolls, and the scroll
        runtime the controller injects is what moves it -- which is why this page,
        unlike the PDF viewer, is not exempt from start_scrolling. */
-    body.scroll #media { display: block; width: 100%; height: auto; }
+    body.width #media { display: block; width: 100%; height: auto; }
+    /* `height`: full height, natural width, centred. Wider than the screen is
+       cut off at both sides rather than scrolled: the scroll runtime only moves
+       vertically. A centred flex item overflows evenly in both directions. */
+    body.height { width: 100vw; height: 100vh; overflow: hidden;
+                  display: flex; justify-content: center; align-items: center; }
+    body.height #media { display: block; height: 100vh; width: auto; max-width: none; flex: none; }
   </style>
 </head>
 <body>
@@ -25,11 +31,11 @@
       const asset = params.get('asset');
       const kind = params.get('kind') === 'video' ? 'video' : 'image';
 
-      // An unknown fit falls back rather than drawing nothing, and `scroll` on a
+      // An unknown fit falls back rather than drawing nothing, and `width` on a
       // video has no overflow worth scrolling -- both land on contain.
-      const FITS = ['contain', 'cover', 'fill', 'none', 'scroll'];
+      const FITS = ['contain', 'cover', 'fill', 'none', 'width', 'height'];
       let fit = FITS.includes(params.get('fit')) ? params.get('fit') : 'contain';
-      if (kind === 'video' && fit === 'scroll') fit = 'contain';
+      if (kind === 'video' && fit === 'width') fit = 'contain';
 
       // Validated here as well as on write: a row from an older binary, or one
       // edited by hand, must not paint an undefined colour.
@@ -45,8 +51,8 @@
       media.id = 'media';
       media.src = '/uploads/' + encodeURIComponent(asset);
 
-      if (fit === 'scroll') {
-        document.body.className = 'scroll';
+      if (fit === 'width' || fit === 'height') {
+        document.body.className = fit;
       } else {
         document.body.className = 'fixed';
         media.style.objectFit = fit;
