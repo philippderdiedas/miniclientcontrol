@@ -255,6 +255,8 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     p.start_date, p.end_date,
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
+                    COALESCE(p.fit_mode, 'contain') as fit_mode,
+                    COALESCE(p.fit_background, '#000000') as fit_background,
                     a.local_path, a.mimetype, a.duration as asset_duration, a.filename
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id

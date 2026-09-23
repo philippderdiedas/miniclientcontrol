@@ -251,7 +251,7 @@ impl ItemOverlay {
     }
 }
 
-fn is_hex_colour(value: &str) -> bool {
+pub(crate) fn is_hex_colour(value: &str) -> bool {
     let Some(digits) = value.strip_prefix('#') else {
         return false;
     };

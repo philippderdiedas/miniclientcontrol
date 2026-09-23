@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use tracing::error;
-use crate::models::{AppState, Asset, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Asset, Display, FitMode, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Distinguishes "field absent" from "field explicitly null".
@@ -43,6 +43,12 @@ pub struct AddToPlaylistRequest {
     pub scroll_config: Option<ScrollMode>,
     /// This item's own overlay, on top of the global one.
     pub overlay: Option<crate::settings::ItemOverlay>,
+    /// How an image or video sits on the screen, by name. A string rather than
+    /// `FitMode` so an unknown name falls back instead of failing the whole
+    /// request at deserialisation.
+    pub fit_mode: Option<String>,
+    /// What fills the bars around a contained asset. Must be a hex colour.
+    pub fit_background: Option<String>,
     /// Which playlist the item joins. Required: an item with no playlist is one
     /// no screen will ever play, and nothing would say so.
     pub playlist_id: i64,
@@ -62,6 +68,12 @@ pub struct UpdatePlaylistRequest {
     pub scroll_config: Option<ScrollMode>,
     /// This item's own overlay, on top of the global one.
     pub overlay: Option<crate::settings::ItemOverlay>,
+    /// How an image or video sits on the screen, by name. A string rather than
+    /// `FitMode` so an unknown name falls back instead of failing the whole
+    /// request at deserialisation.
+    pub fit_mode: Option<String>,
+    /// What fills the bars around a contained asset. Must be a hex colour.
+    pub fit_background: Option<String>,
     /// Replacement URL. Only accepted for items that already are URL-backed.
     pub url: Option<String>,
     /// Replacement asset. Only accepted for items that already are asset-backed.
@@ -98,6 +110,8 @@ impl UpdatePlaylistRequest {
             end_date,
             scroll_config,
             overlay,
+            fit_mode,
+            fit_background,
             url,
             asset_id,
             playlist_id: _,
@@ -112,6 +126,8 @@ impl UpdatePlaylistRequest {
             || end_date.is_some()
             || scroll_config.is_some()
             || overlay.is_some()
+            || fit_mode.is_some()
+            || fit_background.is_some()
             || url.is_some()
             || asset_id.is_some()
     }
@@ -136,6 +152,27 @@ fn bad_request(message: impl Into<String>) -> axum::response::Response {
         }),
     )
         .into_response()
+}
+
+/// A background colour as the operator sent it, or the refusal that tells them.
+///
+/// Refused rather than clamped, unlike the fit itself: this is typed by someone
+/// looking at the page, who can be told, and a colour that silently became
+/// black would read as the setting not working. The same check as the
+/// overlay's colours, so the two colour fields on one card accept the same
+/// thing.
+fn checked_fit_background(raw: Option<String>) -> Result<Option<String>, axum::response::Response> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    let value = value.trim().to_string();
+    if crate::settings::is_hex_colour(&value) {
+        Ok(Some(value))
+    } else {
+        Err(bad_request(
+            "Hintergrundfarbe muss eine Hex-Farbe sein, zum Beispiel #000000.",
+        ))
+    }
 }
 
 #[derive(Deserialize)]
@@ -163,6 +200,8 @@ pub struct SetOverrideRequest {
     pub asset_id: Option<i64>,
     pub url: Option<String>,
     pub scroll_config: Option<ScrollMode>,
+    pub fit_mode: Option<String>,
+    pub fit_background: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -384,6 +423,8 @@ pub async fn get_playlist(
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.overlay_config, 'null') as overlay_config,
+            COALESCE(p.fit_mode, 'contain') as fit_mode,
+            COALESCE(p.fit_background, '#000000') as fit_background,
             a.local_path, a.mimetype, a.duration as asset_duration, a.filename
         FROM playlist_items p
         LEFT JOIN assets a ON p.asset_id = a.id
@@ -405,11 +446,22 @@ pub async fn get_playlist(
 pub async fn add_to_playlist(
     State(state): State<AppState>,
     Json(payload): Json<AddToPlaylistRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     // An item with neither source silently renders as "no content" forever.
     if payload.asset_id.is_none() && payload.url.as_deref().unwrap_or("").trim().is_empty() {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
+
+    // Checked before anything is read or written, so a refusal leaves no trace.
+    let fit_background = match checked_fit_background(payload.fit_background) {
+        Ok(value) => value.unwrap_or_else(|| crate::models::DEFAULT_FIT_BACKGROUND.to_string()),
+        Err(response) => return response,
+    };
+    let fit_mode = payload
+        .fit_mode
+        .as_deref()
+        .map(FitMode::from_value)
+        .unwrap_or_default();
 
     // Scoped to the target playlist: an unscoped max would give a new
     // playlist's first item a high order borrowed from an unrelated screen's
@@ -436,7 +488,7 @@ pub async fn add_to_playlist(
         .map(sqlx::types::Json);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
@@ -449,16 +501,18 @@ pub async fn add_to_playlist(
     .bind(sqlx::types::Json(scroll_config))
     .bind(overlay)
     .bind(payload.playlist_id)
+    .bind(fit_mode.as_str())
+    .bind(fit_background)
     .execute(&state.pool)
     .await
     {
         error!("Failed to add playlist item: {}", e);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     state.notify_playlist_changed();
 
-    StatusCode::CREATED
+    StatusCode::CREATED.into_response()
 }
 
 pub async fn update_playlist_item(
@@ -523,6 +577,13 @@ pub async fn update_playlist_item(
             }
         };
     }
+
+    // Refused before the source edit below writes anything, so a 400 here is not
+    // sitting on top of a half-applied request.
+    let fit_background = match checked_fit_background(payload.fit_background.clone()) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
     // A source edit may only swap like for like: a URL item gets a different URL, an
     // asset item a different asset. Allowing a kind change would need the other column
@@ -634,6 +695,20 @@ pub async fn update_playlist_item(
     }
     if let Some(val) = payload.scroll_config {
         let _ = sqlx::query("UPDATE playlist_items SET scroll_config = ? WHERE id = ?").bind(sqlx::types::Json(val)).bind(id).execute(&state.pool).await;
+    }
+    if let Some(raw) = payload.fit_mode.as_deref() {
+        let _ = sqlx::query("UPDATE playlist_items SET fit_mode = ? WHERE id = ?")
+            .bind(FitMode::from_value(raw).as_str())
+            .bind(id)
+            .execute(&state.pool)
+            .await;
+    }
+    if let Some(value) = fit_background {
+        let _ = sqlx::query("UPDATE playlist_items SET fit_background = ? WHERE id = ?")
+            .bind(value)
+            .bind(id)
+            .execute(&state.pool)
+            .await;
     }
     let mut overlay_changed = false;
     if let Some(overlay) = payload.overlay {
@@ -1047,6 +1122,11 @@ async fn set_override_of(
         return (StatusCode::BAD_REQUEST, Json(OverrideResponse { active: false })).into_response();
     }
 
+    let fit_background = match checked_fit_background(payload.fit_background) {
+        Ok(value) => value.unwrap_or_else(|| crate::models::DEFAULT_FIT_BACKGROUND.to_string()),
+        Err(response) => return response,
+    };
+
     let mut local_path: Option<String> = None;
     let mut mimetype: Option<String> = None;
 
@@ -1074,8 +1154,8 @@ async fn set_override_of(
         local_path,
         mimetype,
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
-        fit_mode: crate::models::FitMode::default(),
-        fit_background: crate::models::DEFAULT_FIT_BACKGROUND.to_string(),
+        fit_mode: payload.fit_mode.as_deref().map(FitMode::from_value).unwrap_or_default(),
+        fit_background,
     };
 
     {
