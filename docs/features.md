@@ -131,6 +131,11 @@ its real length, measured when it is uploaded, and picking it for a playlist ite
 fills that in. The video starts together with the item's clock, so an item as long
 as its video ends with it. *Länge ermitteln* re-measures a video uploaded before.
 
+Hovering an asset's name — in the asset list, on a playlist card — shows it: the
+image, a video's first frame, a PDF's first page. Every asset picker shows a
+thumbnail of its choice. It is rendered in the page from the file; nothing is
+generated or stored on the device.
+
 ## Scrolling
 
 A page taller than the screen can be scrolled while it is displayed, in one of

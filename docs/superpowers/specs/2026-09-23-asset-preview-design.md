@@ -1,6 +1,6 @@
 # Asset preview on hover
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-23
 
 ## What and why
@@ -77,3 +77,11 @@ In `tests/cast/test_media.py`'s browser half, in the operator pages' own Chrome
 - Previews while a `<select>` is open (the browser offers no hook).
 - The status line in `admin.html` (decision 3).
 - Thumbnail files, a thumbnail route, server-side rendering.
+
+## Found while implementing
+
+The global overlay's image picker in `admin.html` could lose its value: the page
+loaded the image list and the settings side by side, and a settings answer that
+came first set a value with no option to match, dropped without a word — so the
+next save of the overlay cleared its image. The images now load first; case
+`[113c]` guards it.

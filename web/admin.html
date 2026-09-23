@@ -294,6 +294,7 @@
 
 
   <script src="/audio.js"></script>
+  <script src="/preview.js"></script>
   <script>
     // Same node-building rule as the other operator pages: a display label, a
     // playlist name and an item URL are all operator- or guest-supplied, so
@@ -769,6 +770,8 @@
       document.getElementById('ovImage').value =
         overlay.image_asset_id === null || overlay.image_asset_id === undefined
           ? '' : String(overlay.image_asset_id);
+      // Set in code, which fires no `change`.
+      ovImageThumb.refresh();
 
       for (const [key, [slider]] of Object.entries(alphas)) {
         const value = overlay[key] === undefined || overlay[key] === null ? 1 : overlay[key];
@@ -785,6 +788,13 @@
 
     // Only images: offering a PDF here would produce a broken image on a screen
     // nobody is standing in front of.
+    // The global overlay's image picker shows its choice beside it.
+    let overlayImages = [];
+    const ovImageThumb = Preview.follow(
+      document.getElementById('ovImage'),
+      (v) => overlayImages.find((a) => String(a.id) === v));
+    document.getElementById('ovImage').after(ovImageThumb.element);
+
     async function loadOverlayImages() {
       const select = document.getElementById('ovImage');
       try {
@@ -792,12 +802,14 @@
         if (!res.ok) return;
         for (const asset of await res.json()) {
           if (!(asset.mimetype || '').startsWith('image/')) continue;
+          overlayImages.push(asset);
           const option = document.createElement('option');
           option.value = String(asset.id);
           option.textContent = asset.filename;
           select.appendChild(option);
         }
       } catch (_) { /* the status poll reports unreachability */ }
+      ovImageThumb.refresh();
     }
 
     function overlayFromForm() {

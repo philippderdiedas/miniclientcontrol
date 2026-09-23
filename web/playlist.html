@@ -220,6 +220,7 @@
   <p class="muted" id="emptyHint" hidden>Noch keine Items.</p>
   <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
+  <script src="/preview.js"></script>
   <script>
     // Every node here is built with createElement/textContent. Filenames and URLs are
     // operator- and upload-supplied, so string-interpolated innerHTML would be an
@@ -417,6 +418,7 @@
         image.append(el('option', { value: String(a.id), text: `#${a.id} – ${a.filename}` }));
       }
       image.value = cfg.image_asset_id ? String(cfg.image_asset_id) : '';
+      const imageThumb = Preview.follow(image, (v) => (assets || []).find((a) => String(a.id) === v));
 
       const position = el('select', {},
         el('option', { value: '', text: 'wie global (gleiche Box)' }),
@@ -441,7 +443,7 @@
       const rows = el('div', {},
         el('div', { class: 'grid' }, field('Text', text)),
         el('div', { class: 'grid' }, field('QR-Code für', qrText), field('QR-Beschriftung', qrLabel)),
-        el('div', { class: 'grid' }, field('Bild', image), field('Ecke', position)),
+        el('div', { class: 'grid' }, field('Bild', el('span', {}, image, imageThumb.element)), field('Ecke', position)),
         colorRow);
 
       const syncColor = () => { color.disabled = !ownColor.checked || rows.hidden; };
@@ -521,6 +523,11 @@
 
     // --- state ----------------------------------------------------------------
     let assets = [];
+    const assetById = (value) => assets.find((a) => String(a.id) === String(value));
+    // The add form's and the override's thumbnails, set up with the form below;
+    // `loadAssets` refreshes them after rebuilding the options.
+    let addThumb = null;
+    let ovThumb = null;
     let items = [];
     let currentItemId = null;
     const dirty = new Set();      // cards with unsaved edits, kept across reloads
@@ -824,6 +831,8 @@
         for (const a of assets) sel.append(el('option', { value: String(a.id), text: `#${a.id} – ${a.filename}` }));
         sel.value = keep;
       }
+      if (addThumb) addThumb.refresh();
+      if (ovThumb) ovThumb.refresh();
     }
 
     function assetSelect(selectedId) {
@@ -849,9 +858,16 @@
       const stateBadge = el('span', { class: 'badge off' });
       const dirtyBadge = el('span', { class: 'badge pending', text: 'ungespeichert', hidden: true });
 
+      const srcLabel = el('span', { class: 'src', text: sourceLabel(item), title: sourceLabel(item) });
+      if (item.asset_id !== null && item.asset_id !== undefined) {
+        Preview.hover(srcLabel, {
+          id: item.asset_id, local_path: item.local_path,
+          mimetype: item.mimetype, filename: item.filename,
+        });
+      }
       const head = el('div', { class: 'card-head' },
         el('span', { class: 'id', text: `#${item.id}` }),
-        el('span', { class: 'src', text: sourceLabel(item), title: sourceLabel(item) }),
+        srcLabel,
         liveBadge, stateBadge, dirtyBadge);
       card.append(head);
 
@@ -860,6 +876,7 @@
       const isAsset = item.asset_id !== null && item.asset_id !== undefined;
       const urlInput = isAsset ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
       const assetPicker = isAsset ? assetSelect(item.asset_id) : null;
+      const assetThumb = isAsset ? Preview.follow(assetPicker, assetById) : null;
 
       const duration = num(item.duration ?? item.asset_duration ?? 10, '90px', 1);
       const enabled = el('input', { type: 'checkbox', checked: !!(item.enabled ?? item.is_enabled) });
@@ -868,7 +885,7 @@
       const end = el('input', { type: 'datetime-local', value: toInputValue(item.end_date), style: 'width:200px' });
 
       card.append(el('div', { class: 'grid' },
-        isAsset ? field('Asset', assetPicker) : field('URL', urlInput),
+        isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput),
         field('Dauer (s)', duration),
         el('label', { class: 'inline' }, enabled, el('span', { text: 'Enabled' })),
         el('label', { class: 'inline' }, keep, el('span', { text: 'Keep loaded' })),
@@ -1199,6 +1216,10 @@
     }
 
     // --- add form -------------------------------------------------------------
+    addThumb = Preview.follow(document.getElementById('addAsset'), assetById);
+    document.getElementById('addAsset').after(addThumb.element);
+    ovThumb = Preview.follow(document.getElementById('ovAsset'), assetById);
+    document.getElementById('ovAsset').after(ovThumb.element);
     const addScroll = scrollEditor(null);
     document.getElementById('addScroll').append(addScroll.root);
 

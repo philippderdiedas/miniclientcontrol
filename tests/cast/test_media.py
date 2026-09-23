@@ -554,6 +554,102 @@ async def browser_flow():
         check("and it is playing from near the beginning", not playing["paused"] and playing["t"] < 5,
               playing)
 
+    print("\n[113] hovering an asset shows it")
+    assets_by_name = {a["filename"]: a for a in http("GET", "/api/assets", port=HTTP)[1]}
+    admin_ws, _ = cdp.page_ws(ADMIN_CDP)
+    async with cdp.Session(admin_ws) as admin:
+        await admin.call("Page.navigate", {"url": f"http://127.0.0.1:{HTTP}/assets.html"})
+        await asyncio.sleep(1.5)
+
+        async def hover_row(asset_id):
+            return json.loads(await admin.eval(f"""(() => {{
+                const row = [...document.querySelectorAll('#assetsBody tr')]
+                  .find((tr) => tr.firstChild && tr.firstChild.textContent === '{asset_id}');
+                const name = row && row.children[1];
+                if (!name) return JSON.stringify({{ found: false }});
+                name.dispatchEvent(new MouseEvent('mouseenter'));
+                const box = document.querySelector('.asset-preview');
+                const visual = box && box.firstElementChild;
+                return JSON.stringify({{
+                  found: true,
+                  shown: !!box && box.style.display === 'block',
+                  tag: visual ? visual.tagName.toLowerCase() : null,
+                  src: visual ? visual.getAttribute('src') : null,
+                }});
+            }})()"""))
+
+        image = await hover_row(assets_by_name["fit.png"]["id"])
+        check("an image's name shows the image",
+              image["shown"] and image["tag"] == "img"
+              and image["src"].startswith("/uploads/") and image["src"].endswith("fit.png"), image)
+        video = await hover_row(assets_by_name["recorded.webm"]["id"])
+        check("a video's name shows its first frame", video["shown"] and video["tag"] == "video",
+              video)
+
+        await hover_row(assets_by_name["slides.pdf"]["id"])
+        # The test PDF's first page carries a blue rectangle: finding its blue in
+        # the rendered picture says pdf.js drew the page, not just an empty box.
+        blue = None
+        for _ in range(40):
+            blue = json.loads(await admin.eval("""(() => {
+                const img = document.querySelector('.asset-preview img');
+                if (!img || img.dataset.pdf !== 'ready' || !img.naturalWidth)
+                  return JSON.stringify({ ready: false, state: img && img.dataset.pdf });
+                const c = document.createElement('canvas');
+                c.width = img.naturalWidth; c.height = img.naturalHeight;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0);
+                const data = ctx.getImageData(0, 0, c.width, c.height).data;
+                let found = false;
+                for (let i = 0; i < data.length; i += 4) {
+                  if (data[i + 2] > 200 && data[i] < 80 && data[i + 1] < 80) { found = true; break; }
+                }
+                return JSON.stringify({ ready: true, found, width: c.width });
+            })()"""))
+            if blue.get("ready"):
+                break
+            await asyncio.sleep(0.25)
+        check("a PDF's name shows its first page, drawn", blue.get("found") is True, blue)
+
+        print("\n[113b] a playlist card's head and the pickers show it too")
+        await admin.call("Page.navigate", {"url": f"http://127.0.0.1:{HTTP}/playlist.html"})
+        await asyncio.sleep(2)
+        head = json.loads(await admin.eval(f"""(() => {{
+            const src = [...document.querySelectorAll('.card .src')]
+              .find((s) => s.textContent.startsWith('Asset #{assets_by_name["fit.png"]["id"]} '));
+            if (!src) return JSON.stringify({{ found: false }});
+            src.dispatchEvent(new MouseEvent('mouseenter'));
+            const box = document.querySelector('.asset-preview');
+            return JSON.stringify({{ found: true, shown: !!box && box.style.display === 'block',
+              tag: box && box.firstElementChild ? box.firstElementChild.tagName.toLowerCase() : null }});
+        }})()"""))
+        check("an asset card's head shows the asset", head.get("shown") and head.get("tag") == "img",
+              head)
+        await admin.eval(f"""(() => {{
+            const pick = document.getElementById('addAsset');
+            // Opened and in view first: a thumbnail renders only once it is on
+            // screen, and the add form is a collapsed <details> -- exactly the
+            // case the lazy rendering is for.
+            document.getElementById('addBlock').open = true;
+            pick.scrollIntoView();
+            pick.value = '{assets_by_name["slides.pdf"]["id"]}';
+            pick.dispatchEvent(new Event('change', {{ bubbles: true }}));
+        }})()""")
+        thumb = None
+        for _ in range(40):
+            thumb = json.loads(await admin.eval("""(() => {
+                const pick = document.getElementById('addAsset');
+                const holder = pick.nextElementSibling;
+                const img = holder && holder.classList.contains('asset-thumb') && holder.querySelector('img');
+                return JSON.stringify({ holder: !!holder && holder.className,
+                                        state: img ? img.dataset.pdf : null });
+            })()"""))
+            if thumb.get("state") == "ready":
+                break
+            await asyncio.sleep(0.25)
+        check("the add form's picker shows the chosen PDF's first page beside it",
+              thumb.get("state") == "ready", thumb)
+
 
 if __name__ == "__main__":
     try:

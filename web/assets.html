@@ -64,6 +64,7 @@
     <tbody id="assetsBody"></tbody>
   </table>
 
+  <script src="/preview.js"></script>
   <script>
     // Rows are built with DOM calls rather than innerHTML: filenames come from
     // uploads and would otherwise be interpreted as markup.
@@ -102,8 +103,8 @@
 
       for (const asset of items) {
         const tr = document.createElement('tr');
-        cell(tr, asset.id);
-        cell(tr, asset.filename);
+        Preview.hover(cell(tr, asset.id), asset);
+        Preview.hover(cell(tr, asset.filename), asset);
         cell(tr, asset.mimetype);
 
         const durInput = document.createElement('input');

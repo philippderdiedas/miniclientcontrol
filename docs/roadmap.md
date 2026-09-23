@@ -11,13 +11,6 @@ and leaves this file when it ships.
 
 ## Next
 
-### Asset preview on hover
-
-Hovering an asset's name or id in the admin pages shows the picture in a hint box:
-the image itself, a video poster frame, the first page of a PDF. Thumbnails are
-generated on upload or rendered in the page from the file; which one is still
-open, and depends on whether the device should carry thumbnail files.
-
 ### Users and roles
 
 One set of basic-auth credentials covers everything today. Three roles instead:
@@ -48,6 +41,10 @@ A periodic `Page.captureScreenshot` compared with the previous one, or a frame
 counter in the page, would notice; the response is restarting that display's
 Chromium and a webhook event. Care is needed not to call a static dashboard
 frozen: an unchanged page is normal, an unchanged *clock in the overlay* is not.
+
+Its screenshots are also the preview the admin page's status line should show —
+deliberately left out of the asset preview, because what a screen shows is not
+its asset's file (an override, a page, the overlay on top).
 
 ### Zones, layouts and widgets
 

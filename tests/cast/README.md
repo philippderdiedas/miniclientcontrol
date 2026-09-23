@@ -21,7 +21,7 @@ python3 test_limits.py      # the frame size the display announces to the sender
 python3 test_managed.py     # the managed certificate (needs the network, else skips)
 python3 test_browser.py     # real WebRTC between two Chrome instances
 python3 test_overlay.py     # the settings, and the badge really on the page
-python3 test_media.py       # image fit, a video without controls, a video's length (needs Chrome)
+python3 test_media.py       # image fit, video, a video's length, asset previews (needs Chrome)
 python3 test_webhook.py     # outbound webhooks, end to end (~50s, needs Chrome)
 python3 test_display.py     # several screens at once (needs a Chrome per screen)
 python3 test_castscreens.py # two screens casting at once, independently (needs a Chrome per screen)
