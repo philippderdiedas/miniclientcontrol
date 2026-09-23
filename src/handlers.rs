@@ -1450,6 +1450,8 @@ mod tests {
             end_date: None,
             scroll_config: None,
             overlay: None,
+            fit_mode: None,
+            fit_background: None,
             url: None,
             asset_id: None,
             playlist_id: Some(Some(2)),
@@ -1464,6 +1466,10 @@ mod tests {
         request.url = None;
         // The one that contradicts the move outright: it decides the order.
         request.play_order = Some(1);
+        assert!(request.edits_besides_the_playlist());
+        request.play_order = None;
+        // Saving a card sends the fit along with everything else.
+        request.fit_mode = Some("cover".into());
         assert!(request.edits_besides_the_playlist());
     }
 }
