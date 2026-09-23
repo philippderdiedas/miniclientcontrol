@@ -13,6 +13,7 @@ share their screen to the display over WebRTC.
 | [deployment.md](deployment.md) | Building, shipping, service files, declaring the screens |
 | [raspberry-pi.md](raspberry-pi.md) | Device quirks, measurements, and what they cost |
 | [troubleshooting.md](troubleshooting.md) | Symptoms, what they mean, and how to tell them apart |
+| [roadmap.md](roadmap.md) | What is still missing, in order, and the decisions each item needs |
 
 `CLAUDE.md` in the repository root is a different kind of document: a list of
 traps and invariants for whoever edits the code next. It overlaps with these
