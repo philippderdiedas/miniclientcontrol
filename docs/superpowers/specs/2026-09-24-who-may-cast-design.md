@@ -54,13 +54,15 @@ the resolved `Arc<Display>`. It gains an `Option<&Identity>`.
 
 The cast routes are exempt from authentication on purpose, and must stay so.
 The middleware's cast branch gains one step before `next.run`: **if** the request
-carries a valid session cookie **and** an `Origin` of this host, the account is
-attached as the `Identity` extension; otherwise nothing is attached and the
+carries a valid session cookie — and, for anything but `GET`/`HEAD`, an `Origin`
+of this host — the account is attached as the `Identity` extension; otherwise nothing is attached and the
 request proceeds exactly as today. Never a `401` from this branch.
 
-- The `Origin` check is what stops another site from making a member's browser
-  claim a screen with the member's cookie (`SameSite=Strict` stops most of it;
-  this covers the rest, as it does for operator writes).
+- The `Origin` check on writes is what stops another site from making a
+  member's browser claim a screen with the member's cookie (`SameSite=Strict`
+  stops most of it; this covers the rest, as it does for operator writes). A
+  read needs none: browsers send no `Origin` on a same-origin `GET`, and a read
+  only tells the page who is signed in.
 - HTTP Basic is not considered here: guests are browsers, and a cached Basic
   credential should not silently turn a guest into an account.
 - A replayed proposal never reaches a cast route, so `ReplayIdentity` is not
@@ -68,11 +70,19 @@ request proceeds exactly as today. Never a `401` from this branch.
 
 `claim_session` takes `Option<Extension<Identity>>` and passes it down.
 
+**The socket checks the page mode again.** A guest's code check claims in cast
+mode and the page mode reuses that ticket, so the `present` frame — which
+already re-checks the venue's `guest_pages_enabled` — also applies the screen's
+`page_access`, against the account the session recorded at claim time.
+
 ## The guest page
 
-`GET /api/cast/info` lists screens per mode with their access, and **omits
-screens that are `off` for that mode** — a guest cannot use them, and listing
-them is the enumeration `info` already avoids when the venue switch is off. For
+`GET /api/cast/info` gives each screen its `cast_access` and `page_access`
+(already folded with the venue switches, so `off` means off for whatever
+reason), and **omits a screen that is `off` for both modes** — a guest cannot
+use it, and listing it is the enumeration `info` already avoids when the venue
+switches are off. The guest page has one screen list for both modes, which is
+why a screen off for one mode only stays listed and is refused at the claim. For
 `account` screens the page shows "Anmelden zum Casten", linking to
 `/login.html?next=/` on the same HTTPS host (the login page already honours a
 same-host `next`). `info` also says whether the caller is signed in and as
