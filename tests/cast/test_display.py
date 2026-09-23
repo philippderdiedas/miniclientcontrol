@@ -266,7 +266,7 @@ def add_item(playlist_id, url=None, duration=LONG):
     """
     url = url or f"http://127.0.0.1:9/{playlist_id}"
     status, _ = http("POST", "/api/playlist",
-                     {"url": url, "duration": duration, "playlist_id": playlist_id})
+                     {"url": url, "advance": {"on": "time", "seconds": duration}, "playlist_id": playlist_id})
     assert status in (200, 201), f"item refused: {status}"
     rows = http("GET", f"/api/playlist?playlist_id={playlist_id}")[1] or []
     return rows[-1]["id"]

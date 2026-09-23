@@ -1,4 +1,54 @@
 (() => {
+  // Counting passes for an item that moves on after N of them. One factory for
+  // all three runtimes (this one, the PDF viewer, the media viewer), so they
+  // count the same way; browser.rs reads `globalThis.__advance.state()`.
+  if (!globalThis.__advanceCounter) {
+    globalThis.__advanceCounter = (source) => ({
+      source,
+      target: 0,
+      passes: 0,
+      progressTs: performance.now(),
+      passStartTs: performance.now(),
+      state() {
+        return { passes: this.passes, idle_ms: Math.round(performance.now() - this.progressTs), source: this.source };
+      },
+      // Called by the controller when the item starts: counting begins now,
+      // and with a target the content stops at the end of the last pass
+      // instead of starting over -- the controller polls, and would otherwise
+      // catch the top of the page flashing past.
+      reset(count) {
+        this.target = Number(count) > 0 ? Number(count) : 0;
+        this.passes = 0;
+        this.progressTs = this.passStartTs = performance.now();
+      },
+      done() {
+        return this.target > 0 && this.passes >= this.target;
+      },
+      // The content is moving, or holding on purpose. A deliberate pause is
+      // progress; only a stuck one is not.
+      alive(ts) {
+        this.progressTs = ts;
+      },
+      // At the end of the content. True: stay where you are (the pass is not
+      // long enough yet, or the last one is complete). False: this pass is
+      // counted, go back to the start for the next.
+      atEnd(ts, minMs) {
+        this.progressTs = ts;
+        if (this.done()) return true;
+        if (ts - this.passStartTs < minMs) return true;
+        this.passes += 1;
+        if (this.done()) return true;
+        this.passStartTs = ts;
+        return false;
+      },
+    });
+  }
+  const MIN_PASS_MS = 3000;
+  // Installed only when the page has none: a viewer that counts for itself (a
+  // video, a paged PDF) installs its own after this first run, and the
+  // controller's re-evaluation after navigation must not take it back.
+  if (!globalThis.__advance) globalThis.__advance = globalThis.__advanceCounter('scroll');
+
   if (!globalThis.__asLog) {
     globalThis.__asLog = (...args) => {
       try {
@@ -91,6 +141,25 @@
     nextStepTs: 0,
     scrollEl: null,
     repickCounter: 0,
+
+    // The page's pass counter while it is ours: a viewer that counts for
+    // itself (a video, a paged PDF) owns `__advance` instead.
+    adv() {
+      const a = globalThis.__advance;
+      return a && a.source === 'scroll' ? a : null;
+    },
+
+    // Nothing to scroll at all -- the page fits the screen. Not the same as a
+    // taller page that will not move: that one reports no progress and the
+    // controller's stall timeout moves it on.
+    nothingToScroll() {
+      const wm = this.windowMetrics();
+      if (Math.max(0, wm.height - wm.viewport) > 1) return false;
+      const el = this.scrollEl;
+      if (!el || this.isRoot(el)) return true;
+      const em = this.elementMetrics(el);
+      return Math.max(0, em.height - em.viewport) <= 1;
+    },
 
     isRoot(el) {
       return !el || el === window || el === document || el === document.documentElement || el === document.body || el === document.scrollingElement;
@@ -245,6 +314,8 @@
         if (this.returnDelayMs > 0 && ts < this.holdUntilTs) {
           return true;
         }
+        const a = this.adv();
+        if (a && a.atEnd(ts, MIN_PASS_MS)) return true;
         window.scrollTo(0, 0);
         this.holdUntilTs = ts + this.topDelayMs;
         return true;
@@ -263,6 +334,8 @@
         if (this.returnDelayMs > 0 && ts < this.holdUntilTs) {
           return true;
         }
+        const a = this.adv();
+        if (a && a.atEnd(ts, MIN_PASS_MS)) return true;
         el.scrollTop = 0;
         this.holdUntilTs = ts + this.topDelayMs;
         return true;
@@ -286,6 +359,8 @@
 
       if (!this.lastTs) this.lastTs = ts;
       if (this.holdUntilTs > ts) {
+        const held = this.adv();
+        if (held) held.alive(ts);
         this.raf = requestAnimationFrame((nextTs) => this.tick(nextTs));
         return;
       }
@@ -322,11 +397,26 @@
         this.repickCounter = 0;
       }
 
+      const a = this.adv();
+      if (a) {
+        if (moved) {
+          a.alive(ts);
+        } else if (this.nothingToScroll()) {
+          // A page that fits the screen is at its end at once: a pass per
+          // top-and-bottom delay, and never faster than MIN_PASS_MS.
+          a.atEnd(ts, Math.max(MIN_PASS_MS, this.topDelayMs + this.returnDelayMs));
+        }
+      }
+
       this.raf = requestAnimationFrame((nextTs) => this.tick(nextTs));
     },
 
     tickStep(ts) {
-      if (this.nextStepTs > ts) return;
+      if (this.nextStepTs > ts) {
+        const waiting = this.adv();
+        if (waiting) waiting.alive(ts);
+        return;
+      }
 
       const stepPx = Number.isFinite(this.stepPx) && this.stepPx > 0 ? this.stepPx : (window.innerHeight || 900);
       const stepTimeMs = Number.isFinite(this.stepTimeMs) && this.stepTimeMs > 0 ? this.stepTimeMs : 0;
@@ -338,6 +428,11 @@
         if (max <= 1) return false;
 
         if (wm.top >= max - 1) {
+          const a = this.adv();
+          if (a && a.atEnd(ts, MIN_PASS_MS)) {
+            this.nextStepTs = ts + 250;
+            return true;
+          }
           window.scrollTo({ top: 0, behavior: 'auto' });
           this.nextStepTs = ts + stepDelayMs;
           return true;
@@ -345,6 +440,8 @@
 
         const target = Math.min(max, wm.top + stepPx);
         window.scrollTo({ top: target, behavior: stepTimeMs > 0 ? 'smooth' : 'auto' });
+        const stepped = this.adv();
+        if (stepped) stepped.alive(ts);
         this.nextStepTs = ts + stepDelayMs + stepTimeMs;
         return true;
       };
@@ -358,6 +455,11 @@
         if (max <= 1) return false;
 
         if (em.top >= max - 1) {
+          const a = this.adv();
+          if (a && a.atEnd(ts, MIN_PASS_MS)) {
+            this.nextStepTs = ts + 250;
+            return true;
+          }
           el.scrollTo({ top: 0, behavior: 'auto' });
           this.nextStepTs = ts + stepDelayMs;
           return true;
@@ -365,6 +467,8 @@
 
         const target = Math.min(max, em.top + stepPx);
         el.scrollTo({ top: target, behavior: stepTimeMs > 0 ? 'smooth' : 'auto' });
+        const stepped = this.adv();
+        if (stepped) stepped.alive(ts);
         this.nextStepTs = ts + stepDelayMs + stepTimeMs;
         return true;
       };
@@ -382,6 +486,8 @@
       if (!moved) {
         this.scrollEl = this.pickScrollableElement();
         this.nextStepTs = ts + stepDelayMs;
+        const a = this.adv();
+        if (a && this.nothingToScroll()) a.atEnd(ts, Math.max(MIN_PASS_MS, stepDelayMs));
       }
     },
 

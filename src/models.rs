@@ -15,6 +15,12 @@ pub struct Args {
     #[arg(long, env, default_value_t = 3000)]
     pub port: u16,
 
+    /// How long a "passes" item may show content that has stopped moving --
+    /// a stuck video, a page whose runtime never arrived -- before the loop
+    /// moves on anyway. Fault handling, not a content choice, so a flag only.
+    #[arg(long, env, default_value_t = 120)]
+    pub advance_stall_timeout: u64,
+
     /// Address the plain-HTTP server binds to.
     ///
     /// Loopback by default: that listener exists for the display browser, which
@@ -357,7 +363,8 @@ pub struct PlaylistItemWithAsset {
     pub asset_id: Option<i64>,
     pub url: Option<String>,
     pub play_order: i64,
-    pub duration: Option<i64>,
+    /// When this item moves on. See `crate::advance`.
+    pub advance: sqlx::types::Json<crate::advance::Advance>,
     pub enabled: bool,
     #[sqlx(default)]
     pub is_enabled: bool,
@@ -398,8 +405,6 @@ pub struct PlaylistItemWithAsset {
     // Asset fields
     pub local_path: Option<String>,
     pub mimetype: Option<String>,
-    #[sqlx(default)]
-    pub asset_duration: Option<i64>,
 
     /// The asset's original upload name, which is what a webhook calls the item.
     /// `local_path` is a sanitised derivative and reads badly in a notification.

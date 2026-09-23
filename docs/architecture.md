@@ -37,7 +37,8 @@ settings and the webhook dispatcher. It is three nested loops:
   display's assigned playlist and its active items, reconcile keep-loaded tabs,
   and iterate them.
 - **per item** — navigate, wait for readiness, apply the overlay, start scrolling,
-  then `select!` on the duration timer against the skip, playlist and overlay
+  then `select!` on the item's timer — or, for an item counting passes, a
+  500 ms poll of the page's counter — against the skip, playlist and overlay
   signals.
 
 The loop **owns what is on screen**. The API never navigates; it writes state and

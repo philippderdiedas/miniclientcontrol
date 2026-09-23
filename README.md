@@ -65,7 +65,7 @@ something really needs the unencrypted API.
 
 - Upload files in **Asset Management**
 - Add assets/URLs in **Playlist Management**
-- Set order, duration, schedule window, and scroll mode
+- Set order, when an item moves on (time or runs of its content), schedule window, and scroll mode
 
 ### Protecting the operator UI
 
@@ -171,7 +171,8 @@ declaration.
   text field `duration` (seconds, decimal) applies to the file parts after it until
   the next one; rounded down to whole seconds, at least 1; anything else is the
   default 10. The upload page measures each video and sends it
-- `PUT /api/assets/{id}` — update asset metadata (currently duration)
+- `PUT /api/assets/{id}` — update asset metadata (currently `duration`, a video's
+  measured length; nothing plays by it)
 - `DELETE /api/assets/{id}` — delete file + DB row
 
 ### Playlists
@@ -190,12 +191,19 @@ declaration.
 - `POST /api/playlist` — add item (asset or URL). `playlist_id` is **required**:
   an item in no playlist is one no screen would ever play, and nothing would say
   so
-- `PUT /api/playlist/{id}` — update order/duration/enabled/schedule/scroll config,
+- `PUT /api/playlist/{id}` — update order/advance/enabled/schedule/scroll config,
   or move the item to another playlist with `playlist_id`. A move is sent on its
   own — combined with any other field it is a `400` — and lands the item at the
   end of the target playlist, renumbering both playlists `1..n`. An unknown
   `playlist_id` is refused, and so is `null`: an item in no playlist is the state
   this field exists to repair
+- `advance` says when an item moves on: `{ "on": "time", "seconds": N }` or
+  `{ "on": "passes", "count": N }` (runs of its content: a video's end, the bottom
+  of anything scrolled). Seconds are clamped to one second … seven days, a count
+  to 1 … 100. Passes need a video or a scroll mode — elsewhere, and when an
+  update would take that away from an existing count, it is a `400`. Absent on
+  create: the asset's measured length, else ten seconds. Both bodies refuse
+  unknown fields, so a script still sending `duration` gets a `422`
 - `POST` and `PUT` also take, for an image, video or PDF item:
   - `fit_mode`: `contain`, `cover`, `fill`, `none`, `width` or `height` — how the
     asset sits on the screen. Left out on `POST`, it is `width` for a PDF (how

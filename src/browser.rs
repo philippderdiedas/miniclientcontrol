@@ -249,13 +249,13 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 Some(playlist_id) => match sqlx::query_as::<_, PlaylistItemWithAsset>(
                     r#"
                 SELECT
-                    p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
+                    p.id, p.asset_id, p.url, p.play_order, COALESCE(p.advance, '{"on":"time","seconds":10}') as advance, p.is_enabled as enabled, p.is_enabled,
                     p.start_date, p.end_date,
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
                     COALESCE(p.fit_mode, 'contain') as fit_mode,
                     COALESCE(p.fit_background, '#000000') as fit_background,
-                    a.local_path, a.mimetype, a.duration as asset_duration, a.filename
+                    a.local_path, a.mimetype, a.filename
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
                                 WHERE p.is_enabled = 1
@@ -405,10 +405,12 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
 
                 // Clamp before the cast: a negative i64 wraps to a ~584-billion-year
                 // u64 and parks the playlist on this item forever; 0 spins the loop.
-                let duration_secs = crate::handlers::clamp_duration(
-                    item.duration.or(item.asset_duration).unwrap_or(10),
-                ) as u64;
-                let intended_duration = Duration::from_secs(duration_secs);
+                let advance = item.advance.0.clamped();
+                // A time runs out on its own; passes are counted by the page.
+                let (time_limit, pass_target) = match advance {
+                    crate::advance::Advance::Time { seconds } => (Some(Duration::from_secs(u64::from(seconds))), None),
+                    crate::advance::Advance::Passes { count } => (None, Some(count)),
+                };
 
                 // Something is playing again, so the next empty playlist is worth
                 // announcing afresh.
@@ -425,7 +427,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                         .or_else(|| item.url.as_deref().map(redact_str))
                         .unwrap_or_default(),
                     url: redact_str(&target_url),
-                    duration: duration_secs,
+                    advance,
                 });
 
                 let (active_page, do_navigate) = if item.keep_loaded {
@@ -439,11 +441,11 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 };
 
                 info!(
-                    "Showing item {} (keep_loaded: {}) at {} (Duration: {}s)",
+                    "Showing item {} (keep_loaded: {}) at {} (advance: {:?})",
                     item.id,
                     item.keep_loaded,
                     redact_str(&target_url),
-                    duration_secs
+                    advance
                 );
 
                 if let Err(e) = active_page.bring_to_front().await {
@@ -524,32 +526,89 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // consumed its whole duration loading and flashed past instantly.
                 // The video and the clock start together, so an item as long as
                 // its video ends with it instead of showing its start again.
+                // Also for a keep_loaded tab brought to front: counting starts
+                // when it is seen, not when it was loaded. Before `start_media`,
+                // so a counted video has stopped looping before it plays.
+                if let Some(count) = pass_target {
+                    reset_advance(&active_page, count).await;
+                }
                 start_media(&active_page).await;
                 let item_started_at = Instant::now();
-                let mut remaining = intended_duration;
+                let mut remaining = time_limit;
+                let stall = Duration::from_secs(state.args.advance_stall_timeout);
+                let mut missing_since: Option<Instant> = None;
+                // Recomputed after every wake but the pass poll, which comes
+                // twice a second and changes nothing about the timetable.
+                let mut boundary: Option<tokio::time::Instant> = None;
+                let mut boundary_stale = true;
 
                 let mut skip_requested = false;
                 let mut reload_before_next = false;
-                while !remaining.is_zero() {
-                    // Recomputed on every pass rather than once per item: an
-                    // edited timetable pokes `playlist_signal`, which lands here,
-                    // and a timer computed before the edit would fire at a
-                    // boundary that no longer exists -- or miss one that does.
-                    let boundary = match crate::schedule::load(&state.pool, &display_name).await {
-                        Ok((_, windows)) => {
-                            let now = crate::schedule::now();
-                            crate::schedule::next_boundary(&windows, now)
-                                .and_then(|at| (at - now).to_std().ok())
-                        }
-                        Err(e) => {
-                            debug!("Failed to read the timetable for the boundary timer: {}", e);
-                            None
-                        }
-                    };
+                loop {
+                    if matches!(remaining, Some(r) if r.is_zero()) {
+                        break;
+                    }
+                    if boundary_stale {
+                        // Not computed once per item: an edited timetable pokes
+                        // `playlist_signal`, which lands here, and a timer
+                        // computed before the edit would fire at a boundary that
+                        // no longer exists -- or miss one that does.
+                        boundary = match crate::schedule::load(&state.pool, &display_name).await {
+                            Ok((_, windows)) => {
+                                let now = crate::schedule::now();
+                                crate::schedule::next_boundary(&windows, now)
+                                    .and_then(|at| (at - now).to_std().ok())
+                                    .map(|wait| tokio::time::Instant::now() + wait)
+                            }
+                            Err(e) => {
+                                debug!("Failed to read the timetable for the boundary timer: {}", e);
+                                None
+                            }
+                        };
+                        boundary_stale = false;
+                    }
                     tokio::select! {
-                        _ = sleep(remaining) => {
+                        _ = async {
+                            match remaining {
+                                Some(wait) => sleep(wait).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {
                             info!("Duration ended.");
                             break;
+                        },
+                        _ = async {
+                            match pass_target {
+                                Some(_) => sleep(crate::advance::POLL).await,
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {
+                            let count = pass_target.unwrap_or(1);
+                            let report = match read_advance(&active_page).await {
+                                Ok(report) => report,
+                                Err(e) => {
+                                    error!("Lost the page while counting passes: {}", e);
+                                    reconnect_needed = true;
+                                    break;
+                                }
+                            };
+                            if report.is_some() {
+                                missing_since = None;
+                            } else if missing_since.is_none() {
+                                missing_since = Some(Instant::now());
+                            }
+                            let missing_for = missing_since.map(|t| t.elapsed()).unwrap_or_default();
+                            match crate::advance::verdict(report.as_ref(), count, missing_for, stall) {
+                                crate::advance::Verdict::Wait => {}
+                                crate::advance::Verdict::Done => {
+                                    info!("Item {} ran its {} pass(es).", item.id, count);
+                                    break;
+                                }
+                                crate::advance::Verdict::Stalled(why) => {
+                                    warn!("Item {} stalled ({}), moving on.", item.id, why);
+                                    break;
+                                }
+                            }
                         },
                         _ = display.skip_signal.notified() => {
                             info!("Skip signal received.");
@@ -561,6 +620,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                             break;
                         },
                         _ = display.overlay_signal.notified() => {
+                            boundary_stale = true;
                             // Applied to the page already on screen, and the
                             // remaining time is recomputed rather than restarted
                             // -- an overlay edit must not silently extend the
@@ -591,17 +651,15 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                                     break;
                                 }
                             }
-                            remaining = intended_duration
-                                .checked_sub(item_started_at.elapsed())
-                                .unwrap_or(Duration::from_secs(0));
+                            remaining = time_limit.map(|t| t.saturating_sub(item_started_at.elapsed()));
                         },
                         _ = display.playlist_signal.notified() => {
+                            boundary_stale = true;
                             let still_active =
                                 is_playlist_item_active_now(&state, &display_name, item.id).await;
                             if still_active {
                                 reload_before_next = true;
-                                let elapsed_now = item_started_at.elapsed();
-                                remaining = intended_duration.checked_sub(elapsed_now).unwrap_or(Duration::from_secs(0));
+                                remaining = time_limit.map(|t| t.saturating_sub(item_started_at.elapsed()));
                             } else {
                                 info!("Current item {} became inactive or was removed, skipping now.", item.id);
                                 reload_before_next = true;
@@ -610,10 +668,11 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                         }
                         _ = async {
                             match boundary {
-                                Some(wait) => sleep(wait).await,
+                                Some(at) => tokio::time::sleep_until(at).await,
                                 None => std::future::pending::<()>().await,
                             }
                         } => {
+                            boundary_stale = true;
                             // A window opened or closed. Switching is immediate,
                             // like a reassignment; two adjacent windows naming the
                             // same playlist are not a switch, and the item carries
@@ -626,11 +685,13 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                                 reload_before_next = true;
                                 break;
                             }
-                            remaining = intended_duration
-                                .checked_sub(item_started_at.elapsed())
-                                .unwrap_or(Duration::from_secs(0));
+                            remaining = time_limit.map(|t| t.saturating_sub(item_started_at.elapsed()));
                         },
                     }
+                }
+
+                if reconnect_needed {
+                    break;
                 }
 
                 let override_active = {
@@ -1608,6 +1669,35 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
 /// viewer `__media` does not exist and this does nothing, which is why it is
 /// called for every item rather than only for video URLs. A failure is not
 /// worth a log above debug -- the page starts itself after 20 s.
+/// Start counting passes on `page`, with the target, right where the item's
+/// clock would start. Probed, never assumed, like the other runtimes: a page
+/// without the counter is the stall case the loop handles.
+async fn reset_advance(page: &Page, count: u16) {
+    let script = format!(
+        "(() => {{ if (globalThis.__advance && globalThis.__advance.reset) globalThis.__advance.reset({count}); }})()"
+    );
+    if let Err(e) = page.evaluate(script).await {
+        debug!("Could not reset the pass counter on this page: {}", e);
+    }
+}
+
+/// What the page's counter says, or `None` when it has none. A navigation
+/// under the evaluate is `None` as well; a lost connection is the error.
+async fn read_advance(page: &Page) -> Result<Option<crate::advance::RuntimeState>, chromiumoxide::error::CdpError> {
+    let raw = page
+        .evaluate("JSON.stringify(globalThis.__advance && globalThis.__advance.state ? globalThis.__advance.state() : null)")
+        .await;
+    match raw {
+        Ok(result) => Ok(result
+            .into_value::<String>()
+            .ok()
+            .and_then(|text| serde_json::from_str::<Option<crate::advance::RuntimeState>>(&text).ok())
+            .flatten()),
+        Err(e) if is_connection_lost(&e) => Err(e),
+        Err(_) => Ok(None),
+    }
+}
+
 async fn start_media(page: &Page) {
     if let Err(e) = page
         .evaluate("(() => { if (globalThis.__media) globalThis.__media.start(); })()")

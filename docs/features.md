@@ -26,7 +26,7 @@ played the day before.
 ## Items
 
 The unit of work is a **playlist item**: either an uploaded asset or a URL, with
-a duration, an optional date window, and an enable switch. The controller walks
+a rule for when it moves on, an optional date window, and an enable switch. The controller walks
 the active items of its display's playlist in `play_order`, navigating one
 Chromium page from one to the next.
 
@@ -119,17 +119,34 @@ the screen**: *Einpassen* (whole picture, with bars), *Füllen* (fills, crops),
 *Strecken* (fills, distorts), *Original* (1:1), *Breite füllen* (full width, the
 height follows — what a tall image or a PDF scrolls through) or *Höhe füllen*
 (full height, centred). The colour of the bars is the item's too. A video loops
-until its item's duration is up.
+until its item moves on.
 
 A PDF defaults to *Breite füllen*, which is how PDFs have always been shown: one
 long page after another. Any other choice makes every page one screen, edge to
 edge, so the **Step** scroll mode with its default step (one screen height) pages
 through the document like a slide show.
 
-Each asset carries a default duration, which an item may override. A video's is
-its real length, measured when it is uploaded, and picking it for a playlist item
-fills that in. The video starts together with the item's clock, so an item as long
-as its video ends with it. *Länge ermitteln* re-measures a video uploaded before.
+### When an item moves on
+
+Each item says **Weiter nach**: either *Zeit* — a number of seconds — or
+*Durchläufen* — how many times its content runs through. What one run is follows
+from the content: a video played to its end; a page, an image or a PDF with a
+scroll mode reached the bottom (a PDF stepping page by page, its last page) and
+held there for its bottom delay. After the last run the content stays where it
+is — at the bottom, on the last frame — until the next item replaces it. Runs
+need something that ends, so they are offered only for a video or with a scroll
+mode.
+
+A page that fits the screen is at its end at once; it counts a run per top and
+bottom delay, and never faster than three seconds, so a count cannot flash past.
+If the content stops moving — a video that stalls, a page whose script never
+arrived — the controller moves on after `--advance-stall-timeout` (two minutes by
+default) and says so in the log.
+
+A video's real length is measured when it is uploaded and shown on the assets
+page; picking the video for a playlist item with *Zeit* fills it in. The video
+starts together with the item's clock. *Länge ermitteln* re-measures a video
+uploaded before.
 
 Hovering an asset's name — in the asset list, on a playlist card — shows it: the
 image, a video's first frame, a PDF's first page. Every asset picker shows a
@@ -315,7 +332,7 @@ Ten events, in four families:
 
 | Event | Carries |
 |---|---|
-| `playback.item_changed` | `item_id`, `kind` (`asset`/`url`), `title`, `url`, `duration` |
+| `playback.item_changed` | `item_id`, `kind` (`asset`/`url`), `title`, `url`, `advance` (`{on: "time", seconds}` or `{on: "passes", count}`) |
 | `playback.playlist_empty` | — |
 | `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) |
 | `override.cleared` | `source` |

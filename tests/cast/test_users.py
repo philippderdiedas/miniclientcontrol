@@ -124,17 +124,17 @@ def accounts_flow():
         basic("PUT", f"/api/users/{ed_id}", "root", "longenough", {"disabled": False})
         pl = basic("POST", "/api/playlists", "mgr", "longenough", {"name": "Foyer"})[1]["id"]
         basic("POST", "/api/playlist", "mgr", "longenough",
-              {"url": "https://a.test/", "duration": 10, "playlist_id": pl})
+              {"url": "https://a.test/", "advance": {"on": "time", "seconds": 10}, "playlist_id": pl})
         item = basic("GET", f"/api/playlist?playlist_id={pl}", "mgr", "longenough")[1][0]["id"]
-        status, body = basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 42})
+        status, body = basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 42}})
         check("an editor's edit is accepted as a proposal", status == 202 and body.get("proposed"), (status, body))
         live = basic("GET", f"/api/playlist?playlist_id={pl}", "mgr", "longenough")[1][0]
-        check("and is not live", live["duration"] == 10, live)
+        check("and is not live", live["advance"]["seconds"] == 10, live)
         status, body = basic("POST", "/api/playlists", "ed", "longenough", {"name": "Neu"})
         new_pl = body.get("placeholder")
         check("a create gets a placeholder", status == 202 and new_pl and new_pl.startswith("new:"), body)
         status, body = basic("POST", "/api/playlist", "ed", "longenough",
-                             {"url": "https://b.test/", "duration": 5, "playlist_id": new_pl})
+                             {"url": "https://b.test/", "advance": {"on": "time", "seconds": 5}, "playlist_id": new_pl})
         check("which a later request may use", status == 202, (status, body))
         draft = basic("GET", "/api/changesets/draft", "ed", "longenough")[1]
         check("the draft holds all three, in order", len(draft["requests"]) == 3, draft)
@@ -149,7 +149,7 @@ def accounts_flow():
         status, body = basic("POST", f"/api/changesets/{bundle['id']}/approve", "mgr", "longenough")
         check("it applies", status == 200 and body.get("state") == "applied", (status, body))
         live = basic("GET", f"/api/playlist?playlist_id={pl}", "mgr", "longenough")[1][0]
-        check("the edit is live", live["duration"] == 42, live)
+        check("the edit is live", live["advance"]["seconds"] == 42, live)
         made = next((p for p in basic("GET", "/api/playlists", "mgr", "longenough")[1] if p["name"] == "Neu"), None)
         check("the new playlist exists", made is not None, None)
         items = basic("GET", f"/api/playlist?playlist_id={made['id']}", "mgr", "longenough")[1]
@@ -157,14 +157,14 @@ def accounts_flow():
               len(items) == 1 and items[0]["url"] == "https://b.test/", items)
 
         print("\n[129] a stale bundle is not applied")
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 7})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 7}})
         basic("POST", "/api/changesets/draft/submit", "ed", "longenough")
-        basic("PUT", f"/api/playlist/{item}", "mgr", "longenough", {"duration": 99})
+        basic("PUT", f"/api/playlist/{item}", "mgr", "longenough", {"advance": {"on": "time", "seconds": 99}})
         stale = next(c for c in basic("GET", "/api/changesets?state=submitted", "mgr", "longenough")[1])
         status, body = basic("POST", f"/api/changesets/{stale['id']}/approve", "mgr", "longenough")
         check("approving a bundle whose object changed is a 409", status == 409, (status, body))
         live = basic("GET", f"/api/playlist?playlist_id={pl}", "mgr", "longenough")[1][0]
-        check("and the manager's change stands", live["duration"] == 99, live)
+        check("and the manager's change stands", live["advance"]["seconds"] == 99, live)
         status, _ = basic("POST", f"/api/changesets/{stale['id']}/reject", "mgr", "longenough", {"note": "veraltet"})
         check("it can still be rejected", status == 200, status)
 
@@ -199,7 +199,7 @@ def accounts_flow():
               all(a["filename"] != "vorschlag.png" for a in basic("GET", "/api/assets", "ed", "longenough")[1]), None)
 
         print("\n[131] a replay that fails stops the bundle and says how far it got")
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 11})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 11}})
         # A second object -- two changes to one object merge into one request --
         # and valid JSON the handler refuses only when it runs: an empty name.
         basic("PUT", f"/api/playlists/{pl}", "ed", "longenough", {"name": ""})
@@ -211,7 +211,7 @@ def accounts_flow():
         applied = [r["applied"] for r in after["requests"]]
         check("the first request is marked applied, the second not", applied == [True, False], after)
         live = basic("GET", f"/api/playlist?playlist_id={pl}", "mgr", "longenough")[1][0]
-        check("and what was applied is live", live["duration"] == 11, live)
+        check("and what was applied is live", live["advance"]["seconds"] == 11, live)
 
         print("\n[132] an editor sees what became of their proposals, with the manager's note")
         status, mine = basic("GET", "/api/changesets/mine", "ed", "longenough")
@@ -226,7 +226,7 @@ def accounts_flow():
         check("once looked at, nothing is unseen",
               basic("GET", "/api/changesets/mine", "ed", "longenough")[1]["unseen"] == 0, None)
 
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 12})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 12}})
         basic("POST", "/api/changesets/draft/submit", "ed", "longenough")
         latest = next(c for c in basic("GET", "/api/changesets?state=submitted", "mgr", "longenough")[1])
         status, _ = basic("POST", f"/api/changesets/{latest['id']}/approve", "mgr", "longenough",
@@ -242,13 +242,13 @@ def accounts_flow():
 
         print("\n[132a] a bundle names what it touches, not just ids")
         basic("POST", "/api/playlist", "ed", "longenough",
-              {"url": "https://named.test/", "duration": 5, "playlist_id": pl})
+              {"url": "https://named.test/", "advance": {"on": "time", "seconds": 5}, "playlist_id": pl})
         draft = basic("GET", "/api/changesets/draft", "ed", "longenough")[1]
         refs = draft.get("refs", {})
         names = {p["id"]: p["name"] for p in basic("GET", "/api/playlists", "mgr", "longenough")[1]}
         check("the playlist a new item goes into is named",
               refs.get("playlists", {}).get(str(pl)) == names[pl], refs)
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 7})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 7}})
         refs = basic("GET", "/api/changesets/draft", "ed", "longenough")[1].get("refs", {})
         check("an edited item comes with what it shows",
               refs.get("items", {}).get(str(item), {}).get("playlist_id") == pl, refs)
@@ -256,11 +256,11 @@ def accounts_flow():
 
         print("\n[133] two changes to one object become one line in the draft")
         basic("DELETE", "/api/changesets/draft", "ed", "longenough")
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 21})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 21}})
         basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"fit_mode": "cover"})
         reqs = basic("GET", "/api/changesets/draft", "ed", "longenough")[1]["requests"]
         check("one request for the item", len(reqs) == 1, reqs)
-        check("carrying both changes", reqs[0]["body"] == {"duration": 21, "fit_mode": "cover"}, reqs)
+        check("carrying both changes", reqs[0]["body"] == {"advance": {"on": "time", "seconds": 21}, "fit_mode": "cover"}, reqs)
         basic("DELETE", f"/api/playlist/{item}", "ed", "longenough")
         reqs = basic("GET", "/api/changesets/draft", "ed", "longenough")[1]["requests"]
         check("deleting it afterwards replaces the edit",
@@ -274,16 +274,16 @@ def accounts_flow():
         basic("DELETE", "/api/changesets/draft", "ed", "longenough")
 
         print("\n[134] editing an object of one's own open bundle brings the bundle back")
-        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 31})
+        basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 31}})
         basic("POST", "/api/changesets/draft/submit", "ed", "longenough")
         open_ids = [c["id"] for c in basic("GET", "/api/changesets?state=submitted", "mgr", "longenough")[1]]
-        status, body = basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"duration": 32})
+        status, body = basic("PUT", f"/api/playlist/{item}", "ed", "longenough", {"advance": {"on": "time", "seconds": 32}})
         check("the answer says the bundle came back", status == 202 and body.get("reopened") in open_ids, body)
         check("it is off the approvals list",
               basic("GET", "/api/changesets?state=submitted", "mgr", "longenough")[1] == [], None)
         reqs = basic("GET", "/api/changesets/draft", "ed", "longenough")[1]["requests"]
         check("and in the draft as one merged change",
-              len(reqs) == 1 and reqs[0]["body"] == {"duration": 32}, reqs)
+              len(reqs) == 1 and reqs[0]["body"] == {"advance": {"on": "time", "seconds": 32}}, reqs)
 
         print("\n[135] withdrawing, and hiding what is decided")
         basic("POST", "/api/changesets/draft/submit", "ed", "longenough")

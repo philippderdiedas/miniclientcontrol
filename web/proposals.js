@@ -69,6 +69,9 @@
       if (k === 'playlist_id' || k === 'default_playlist_id') return playlistName(v);
       if (k === 'asset_id') return (refs.assets[String(v)] || {}).filename || `#${v}`;
       if (k === 'duration') return `${v} s`;
+      if (k === 'advance' && v && typeof v === 'object') {
+        return v.on === 'passes' ? `${v.count} ${v.count === 1 ? 'Durchlauf' : 'Durchläufe'}` : `${v.seconds} s`;
+      }
       if (typeof v === 'boolean') return v ? 'ja' : 'nein';
       return typeof v === 'object' ? JSON.stringify(v) : String(v);
     };
@@ -82,7 +85,7 @@
       return draws ? v : null;
     };
     const LABELS = {
-      duration: 'Dauer', enabled: 'aktiv', start_date: 'ab', end_date: 'bis', keep_loaded: 'geladen halten',
+      advance: 'Weiter', enabled: 'aktiv', start_date: 'ab', end_date: 'bis', keep_loaded: 'geladen halten',
       play_order: 'Position', playlist_id: 'Playlist', asset_id: 'Datei', url: 'URL', name: 'Name',
       fit_mode: 'Einpassen', fit_background: 'Hintergrund', overlay: 'Overlay', scroll_config: 'Scrollen',
     };
@@ -111,7 +114,7 @@
       text(`Neues Item in ${playlistName(body.playlist_id)}: `);
       const node = content(body);
       if (node) out.append(node); else text('(ohne Inhalt)');
-      if (body.duration) text(`, ${body.duration} s`);
+      if (body.advance) text(`, ${shown('advance', body.advance)}`);
     } else if (request.path.endsWith('/move')) {
       item(id);
       inPlaylist(itemSource(id));

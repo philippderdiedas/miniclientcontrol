@@ -42,11 +42,9 @@
   </div>
 
   <p class="muted">
-    Die <strong>Dauer</strong> hier ist die Voreinstellung des Assets. Ein
-    Playlist-Eintrag mit eigener Dauer hat Vorrang — dieser Wert greift also nur,
-    wenn dort keine gesetzt ist, und ersetzt sonst nur das Standardmaß von 10
-    Sekunden. Sinn: ein PDF bringt seine passende Standzeit selbst mit, auch wenn
-    es mehrfach eingeplant wird.
+    Die <strong>Länge</strong> eines Videos wird beim Hochladen gemessen. Sie ist
+    nur ein Vorschlag: wählt man das Video in der Playlist mit „Weiter nach: Zeit“,
+    ist sie vorbelegt. Wie lange ein Eintrag steht, entscheidet der Eintrag selbst.
   </p>
 
   <table>
@@ -55,7 +53,7 @@
         <th>ID</th>
         <th>Filename</th>
         <th>MIME</th>
-        <th>Dauer (s)<span class="hint" title="Voreinstellung dieses Assets: gilt nur, wenn der Playlist-Eintrag keine eigene Dauer hat.">?</span></th>
+        <th>Länge</th>
         <th>In Playlist</th>
         <th>Vorschau</th>
         <th>Aktionen</th>
@@ -109,13 +107,8 @@
         Preview.hover(cell(tr, asset.filename), asset);
         cell(tr, asset.mimetype);
 
-        const durInput = document.createElement('input');
-        durInput.id = `dur-${asset.id}`;
-        durInput.type = 'number';
-        durInput.min = '1';
-        durInput.value = asset.duration ?? 10;
-        durInput.style.width = '90px';
-        cell(tr).appendChild(durInput);
+        const isVideo = (asset.mimetype || '').startsWith('video/');
+        cell(tr, isVideo && asset.duration ? `${asset.duration} s` : '–');
 
         const uses = usage.get(asset.id) || 0;
         const useCell = cell(tr, uses === 0 ? '–' : `${uses}×`);
@@ -132,10 +125,6 @@
         const actions = cell(tr);
         const feedback = document.createElement('span');
         feedback.className = 'feedback';
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'primary';
-        saveBtn.textContent = 'Speichern';
-        saveBtn.addEventListener('click', () => updateDuration(asset.id, feedback));
         const delBtn = document.createElement('button');
         delBtn.className = 'danger';
         delBtn.textContent = 'Löschen';
@@ -147,7 +136,7 @@
           measureBtn.addEventListener('click', () => remeasure(asset, feedback));
           extra.push(' ', measureBtn);
         }
-        actions.append(saveBtn, ' ', delBtn, ...extra, feedback);
+        actions.append(delBtn, ...extra, feedback);
 
         body.appendChild(tr);
       }
@@ -198,22 +187,6 @@
       });
       if (!res.ok) { flash(feedback, `Speichern fehlgeschlagen (HTTP ${res.status})`, true); return; }
       flash(feedback, `${duration} s ✓`);
-      await loadAssets();
-    }
-
-    async function updateDuration(id, feedback) {
-      const duration = Number(document.getElementById(`dur-${id}`).value);
-      if (!Number.isFinite(duration) || duration < 1) {
-        flash(feedback, 'Dauer muss mindestens 1 Sekunde sein.', true);
-        return;
-      }
-      const res = await fetch(`/api/assets/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration })
-      });
-      if (!res.ok) { flash(feedback, `Speichern fehlgeschlagen (HTTP ${res.status})`, true); return; }
-      flash(feedback, 'gespeichert ✓');
       await loadAssets();
     }
 

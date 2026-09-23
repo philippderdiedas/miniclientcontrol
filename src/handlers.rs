@@ -44,10 +44,13 @@ pub(crate) fn seconds_from_measured(raw: &str) -> Option<i64> {
 
 // --- Models for Request Bodies ---
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddToPlaylistRequest {
     pub asset_id: Option<i64>,
     pub url: Option<String>,
-    pub duration: Option<i64>,
+    /// When the item moves on. Absent: the asset's length or ten seconds
+    /// (`Advance::default_for`).
+    pub advance: Option<crate::advance::Advance>,
     pub enabled: Option<bool>,
     pub keep_loaded: Option<bool>,
     pub start_date: Option<String>,
@@ -67,9 +70,11 @@ pub struct AddToPlaylistRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePlaylistRequest {
     pub play_order: Option<i64>,
-    pub duration: Option<i64>,
+    /// When the item moves on.
+    pub advance: Option<crate::advance::Advance>,
     pub enabled: Option<bool>,
     pub is_enabled: Option<bool>,
     pub keep_loaded: Option<bool>,
@@ -114,7 +119,7 @@ impl UpdatePlaylistRequest {
     fn edits_besides_the_playlist(&self) -> bool {
         let Self {
             play_order,
-            duration,
+            advance,
             enabled,
             is_enabled,
             keep_loaded,
@@ -130,7 +135,7 @@ impl UpdatePlaylistRequest {
         } = self;
 
         play_order.is_some()
-            || duration.is_some()
+            || advance.is_some()
             || enabled.is_some()
             || is_enabled.is_some()
             || keep_loaded.is_some()
@@ -394,6 +399,8 @@ pub async fn update_asset(
     Path(id): Path<i64>,
     Json(payload): Json<UpdateAssetRequest>,
 ) -> impl IntoResponse {
+    // The measured length of a video. Nothing plays by it; the playlist page
+    // prefills a time from it.
     if let Some(duration) = payload.duration {
         if let Err(e) = sqlx::query("UPDATE assets SET duration = ? WHERE id = ?")
             .bind(clamp_duration(duration))
@@ -403,8 +410,6 @@ pub async fn update_asset(
         {
             error!("Failed to update asset {}: {}", id, e);
         }
-        // Playlist items without their own duration fall back to the asset duration.
-        state.notify_playlist_changed();
     }
     StatusCode::OK
 }
@@ -464,14 +469,14 @@ pub async fn get_playlist(
     let items = sqlx::query_as::<_, PlaylistItemWithAsset>(
         r#"
         SELECT
-            p.id, p.asset_id, p.url, p.play_order, p.duration, p.is_enabled as enabled, p.is_enabled,
+            p.id, p.asset_id, p.url, p.play_order, COALESCE(p.advance, '{"on":"time","seconds":10}') as advance, p.is_enabled as enabled, p.is_enabled,
             p.start_date, p.end_date, p.playlist_id,
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.overlay_config, 'null') as overlay_config,
             COALESCE(p.fit_mode, 'contain') as fit_mode,
             COALESCE(p.fit_background, '#000000') as fit_background,
-            a.local_path, a.mimetype, a.duration as asset_duration, a.filename
+            a.local_path, a.mimetype, a.filename
         FROM playlist_items p
         LEFT JOIN assets a ON p.asset_id = a.id
         WHERE (?1 IS NULL OR p.playlist_id = ?1)
@@ -503,28 +508,35 @@ pub async fn add_to_playlist(
         Ok(value) => value.unwrap_or_else(|| crate::models::DEFAULT_FIT_BACKGROUND.to_string()),
         Err(response) => return response,
     };
+    // The asset's type and length, read once: the fit default, the advance
+    // default and the advance check all depend on them.
+    let asset: Option<(String, Option<i64>)> = match payload.asset_id {
+        Some(asset_id) => sqlx::query_as("SELECT mimetype, duration FROM assets WHERE id = ?")
+            .bind(asset_id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or_else(|e| {
+                error!("Failed to read asset {}: {}", asset_id, e);
+                None
+            }),
+        None => None,
+    };
+    let mimetype = asset.as_ref().map(|(m, _)| m.as_str());
     // Named or not, an item always stores a concrete fit. When it names none,
     // the default follows what it plays: a PDF keeps the full-width layout it
     // has always had.
     let fit_mode = match payload.fit_mode.as_deref() {
         Some(raw) => FitMode::from_value(raw),
-        None => {
-            let mimetype = match payload.asset_id {
-                Some(asset_id) => sqlx::query_scalar::<_, String>(
-                    "SELECT mimetype FROM assets WHERE id = ?",
-                )
-                .bind(asset_id)
-                .fetch_optional(&state.pool)
-                .await
-                .unwrap_or_else(|e| {
-                    error!("Failed to read the mimetype of asset {}: {}", asset_id, e);
-                    None
-                }),
-                None => None,
-            };
-            FitMode::default_for(mimetype.as_deref())
-        }
+        None => FitMode::default_for(mimetype),
     };
+    let scroll_config = payload.scroll_config.unwrap_or(ScrollMode::None);
+    let advance = payload
+        .advance
+        .map(crate::advance::Advance::clamped)
+        .unwrap_or_else(|| crate::advance::Advance::default_for(asset.as_ref().and_then(|(_, d)| *d)));
+    if let Err(message) = crate::advance::check(&advance, mimetype, &scroll_config) {
+        return bad_request(message);
+    }
 
     // Scoped to the target playlist: an unscoped max would give a new
     // playlist's first item a high order borrowed from an unrelated screen's
@@ -539,7 +551,6 @@ pub async fn add_to_playlist(
     .unwrap_or((0,));
     let next_order = row.0 + 1;
 
-    let scroll_config = payload.scroll_config.unwrap_or(ScrollMode::None);
     let keep_loaded = payload.keep_loaded.unwrap_or(false);
     let enabled = payload.enabled.unwrap_or(true);
     // `null` unless it would draw something *or* recolour the box it lands in,
@@ -551,12 +562,12 @@ pub async fn add_to_playlist(
         .map(sqlx::types::Json);
 
     let inserted = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, duration, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, advance, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
     .bind(next_order)
-    .bind(payload.duration.map(clamp_duration))
+    .bind(sqlx::types::Json(advance))
     .bind(enabled)
     .bind(keep_loaded)
     .bind(payload.start_date)
@@ -653,6 +664,35 @@ pub async fn update_playlist_item(
         Err(response) => return response,
     };
 
+    // Checked against the item as it will be after this request -- a new scroll
+    // mode or asset can pull the ground from under an existing `Passes` just as
+    // a new advance can -- and before anything is written.
+    if payload.advance.is_some() || payload.scroll_config.is_some() || payload.asset_id.is_some() {
+        let current: Option<(sqlx::types::Json<crate::advance::Advance>, sqlx::types::Json<ScrollMode>, Option<String>)> =
+            sqlx::query_as(
+                r#"SELECT COALESCE(p.advance, '{"on":"time","seconds":10}'),
+                          COALESCE(p.scroll_config, '{"type":"None","options":null}'),
+                          a.mimetype
+                   FROM playlist_items p LEFT JOIN assets a ON a.id = COALESCE(?, p.asset_id)
+                   WHERE p.id = ?"#,
+            )
+            .bind(payload.asset_id)
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await
+            .unwrap_or_else(|e| {
+                error!("Failed to read playlist item {} before an advance check: {}", id, e);
+                None
+            });
+        if let Some((advance, scroll, mimetype)) = current {
+            let advance = payload.advance.map(crate::advance::Advance::clamped).unwrap_or(advance.0);
+            let scroll = payload.scroll_config.clone().unwrap_or(scroll.0);
+            if let Err(message) = crate::advance::check(&advance, mimetype.as_deref(), &scroll) {
+                return bad_request(message);
+            }
+        }
+    }
+
     // A source edit may only swap like for like: a URL item gets a different URL, an
     // asset item a different asset. Allowing a kind change would need the other column
     // cleared in the same write, and `playlist_target_url` silently prefers one column
@@ -743,8 +783,12 @@ pub async fn update_playlist_item(
     if let Some(val) = payload.play_order {
         let _ = sqlx::query("UPDATE playlist_items SET play_order = ? WHERE id = ?").bind(val).bind(id).execute(&state.pool).await;
     }
-    if let Some(val) = payload.duration {
-        let _ = sqlx::query("UPDATE playlist_items SET duration = ? WHERE id = ?").bind(clamp_duration(val)).bind(id).execute(&state.pool).await;
+    if let Some(val) = payload.advance {
+        let _ = sqlx::query("UPDATE playlist_items SET advance = ? WHERE id = ?")
+            .bind(sqlx::types::Json(val.clamped()))
+            .bind(id)
+            .execute(&state.pool)
+            .await;
     }
     if let Some(val) = payload.enabled {
         let _ = sqlx::query("UPDATE playlist_items SET is_enabled = ? WHERE id = ?").bind(val).bind(id).execute(&state.pool).await;
@@ -1529,7 +1573,7 @@ mod tests {
     fn a_move_travelling_with_any_other_edit_is_recognised() {
         let mut request = UpdatePlaylistRequest {
             play_order: None,
-            duration: None,
+            advance: None,
             enabled: None,
             is_enabled: None,
             keep_loaded: None,

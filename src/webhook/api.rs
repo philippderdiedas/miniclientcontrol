@@ -108,7 +108,7 @@ pub fn catalogue() -> Vec<Value> {
         entry(
             "playback.item_changed",
             "Ein Playlist-Element beginnt.",
-            &["item_id", "kind", "title", "url", "duration"],
+            &["item_id", "kind", "title", "url", "advance"],
             true,
         ),
         entry(
@@ -502,7 +502,7 @@ fn sample_event(name: &str) -> Event {
             kind: "asset",
             title: "beispiel.jpg".into(),
             url: "http://127.0.0.1:3000/uploads/beispiel.jpg".into(),
-            duration: 10,
+            advance: crate::advance::Advance::Time { seconds: 10 },
         },
     }
 }

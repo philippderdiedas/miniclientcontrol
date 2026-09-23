@@ -142,20 +142,35 @@
       }
 
       if (mode === 'step') {
+        // This mode scrolls without the runtime, so it counts for itself -- the
+        // same counter, installed over the scroll runtime's.
+        const adv = globalThis.__advanceCounter ? globalThis.__advanceCounter('pdf') : null;
+        if (adv) globalThis.__advance = adv;
+        const MIN_PASS_MS = 3000;
+
         const doStep = () => {
+          const now = performance.now();
           // Nothing to scroll (PDF shorter than the viewport): without this the
-          // timer keeps firing scrollTo(0) forever.
+          // timer keeps firing scrollTo(0) forever. One screen is a pass per
+          // step delay.
           if (maxScroll() <= 1) {
+            if (adv) adv.atEnd(now, Math.max(MIN_PASS_MS, stepDelay));
             setTimeout(doStep, Math.max(1000, stepDelay));
             return;
           }
 
           if (atBottom()) {
+            // The last page: a pass. After the last one it stays there.
+            if (adv && adv.atEnd(now, MIN_PASS_MS)) {
+              setTimeout(doStep, 250);
+              return;
+            }
             window.scrollTo({ top: 0, behavior: 'auto' });
             setTimeout(doStep, stepDelay);
             return;
           }
 
+          if (adv) adv.alive(now);
           const target = window.scrollY + (Number.isFinite(stepPx) && stepPx > 0 ? stepPx : window.innerHeight);
           if (Number.isFinite(stepTime) && stepTime > 0) {
             window.scrollTo({ top: target, behavior: 'smooth' });

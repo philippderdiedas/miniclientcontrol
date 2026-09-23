@@ -11,14 +11,6 @@ and leaves this file when it ships.
 
 ## Next
 
-### An item advances when its content ends
-
-Besides a fixed time, an item may move on when its content is done: a video has
-ended, a page is scrolled to the bottom, a PDF shows its last page. One mode
-"end of content" whose meaning follows the content, not a list of trigger
-types, and always with the duration as an upper bound, so a page that never
-reports an end cannot hold the screen. In progress.
-
 ### Who may cast
 
 Now that there are accounts, casting can ask *who*, not only *whether in the

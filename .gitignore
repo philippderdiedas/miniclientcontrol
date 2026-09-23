@@ -11,6 +11,10 @@ tests/cast/*-profile/
 # test_overlay.py names its profile `overlay-display`, which the pattern above
 # does not match; a killed run leaves it behind otherwise.
 tests/cast/overlay-display/
+# The same for the other suites' own browsers (media-, advance-display and
+# -admin): a killed run, or a Chrome still writing as it is removed, leaves them.
+tests/cast/*-display/
+tests/cast/*-admin/
 # A controller's log, kept by test_display.py's one case that asserts nothing
 # was logged. Scratch, and a SIGKILLed run does not get to remove it.
 tests/cast/*-stderr.log

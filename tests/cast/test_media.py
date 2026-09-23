@@ -170,12 +170,12 @@ def api_flow():
               item(row["id"])["fit_mode"] == "contain", item(row["id"]))
 
         status, body = http("PUT", f"/api/playlist/{row['id']}",
-                            {"fit_background": "red; display:none", "duration": 42})
+                            {"fit_background": "red; display:none", "advance": {"on": "time", "seconds": 42}})
         check("a background that is not a hex colour is a 400",
               status == 400 and "error" in (body or {}), (status, body))
         after = item(row["id"])
         check("and nothing else in that request was written",
-              after["duration"] != 42 and after["fit_background"] == "#00ff00", after)
+              after["advance"]["seconds"] != 42 and after["fit_background"] == "#00ff00", after)
 
         status, body = http("POST", "/api/playlist",
                             {"asset_id": asset, "playlist_id": playlist, "fit_background": "blue"})
@@ -370,7 +370,7 @@ async def browser_flow():
     video = upload("clip.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4", port=HTTP)
     playlist = a_playlist(port=HTTP)
     http("POST", "/api/playlist",
-         {"asset_id": image, "playlist_id": playlist, "duration": 3,
+         {"asset_id": image, "playlist_id": playlist, "advance": {"on": "time", "seconds": 3},
           "fit_mode": "cover", "fit_background": "#00ff00"}, port=HTTP)
     image_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
 
@@ -452,7 +452,7 @@ async def browser_flow():
         secret_url = (f"http://127.0.0.1:{HTTP}/empty_playlist.html"
                       "?_username=kiosk&_password=hunter2&token=s3cr3t-t0ken")
         http("POST", "/api/playlist",
-             {"url": secret_url, "duration": 600, "playlist_id": playlist}, port=HTTP)
+             {"url": secret_url, "advance": {"on": "time", "seconds": 600}, "playlist_id": playlist}, port=HTTP)
         secret_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
         http("POST", "/api/control/current", {"item_id": secret_item}, port=HTTP)
         on_it = wait_for(lambda: http("GET", "/api/control/current", port=HTTP)[1]
@@ -520,14 +520,18 @@ async def browser_flow():
             const pick = document.getElementById('addAsset');
             pick.value = '{recorded['id']}';
             pick.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return document.getElementById('addDuration').value;
+            // The time input is the first number input of the "Weiter nach" editor.
+            return document.querySelector('#addAdvance input[type=number]').value;
         }})()""")
-        check("Dauer shows the asset's length", filled in ("2", "3"), filled)
+        check("the time to move on shows the asset's length", filled in ("2", "3"), filled)
+        passes = await admin.eval(
+            "!document.querySelector('#addAdvance option[value=passes]').disabled")
+        check("and a video may count passes", passes is True, passes)
 
     print("\n[112] a video item starts with the item's clock, not at load")
     playlist = a_playlist(port=HTTP)
     http("POST", "/api/playlist", {"asset_id": recorded["id"], "playlist_id": playlist,
-                                   "duration": 30}, port=HTTP)
+                                   "advance": {"on": "time", "seconds": 30}}, port=HTTP)
     video_item = http("GET", "/api/playlist", port=HTTP)[1][-1]["id"]
     http("POST", "/api/control/current", {"item_id": video_item}, port=HTTP)
     ws_url, _ = cdp.page_ws(CDP)

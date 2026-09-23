@@ -189,9 +189,7 @@
         <label class="f"><span>oder URL</span>
           <input id="addUrl" placeholder="https://..." style="width:280px" />
         </label>
-        <label class="f"><span>Dauer (s)</span>
-          <input id="addDuration" type="number" min="1" value="10" style="width:90px" />
-        </label>
+        <label class="f"><span>Weiter nach</span><span id="addAdvance"></span></label>
         <label class="inline"><input id="addEnabled" type="checkbox" checked /> Enabled</label>
         <label class="inline"><input id="addKeep" type="checkbox" /> Keep loaded</label>
         <label class="f"><span>Start</span>
@@ -270,6 +268,44 @@
     // --- scroll config editor -------------------------------------------------
     // One builder for the add form, the override form and every card, so all three
     // stay in sync and every row carries its own values.
+    // "Weiter nach": a time, or a number of passes of the content. Passes are
+    // offered only where something ends -- a video, or a scroll mode -- and the
+    // server refuses them anywhere else.
+    function advanceEditor(initial) {
+      const cfg = initial || { on: 'time', seconds: 10 };
+      const on = el('select', {},
+        el('option', { value: 'time', text: 'Zeit' }),
+        el('option', { value: 'passes', text: 'Durchläufen' }));
+      on.value = cfg.on === 'passes' ? 'passes' : 'time';
+      const seconds = num(cfg.on === 'time' ? cfg.seconds : 10, '90px', 1);
+      const count = num(cfg.on === 'passes' ? cfg.count : 1, '70px', 1);
+      const unitS = el('span', { text: 's' });
+      const unitX = el('span', { text: '×' });
+      const hint = el('span', { class: 'muted', text: '' });
+      const sync = () => {
+        const passes = on.value === 'passes';
+        seconds.hidden = unitS.hidden = passes;
+        count.hidden = unitX.hidden = !passes;
+      };
+      on.addEventListener('change', sync);
+      sync();
+      return {
+        root: el('span', {}, on, ' ', seconds, count, ' ', unitS, unitX, ' ', hint),
+        read() {
+          return on.value === 'passes'
+            ? { on: 'passes', count: Math.max(1, Math.round(Number(count.value) || 1)) }
+            : { on: 'time', seconds: Math.max(1, Math.round(Number(seconds.value) || 10)) };
+        },
+        // Durchläufe need something that ends; say why when there is none.
+        setCountable(countable) {
+          on.querySelector('option[value="passes"]').disabled = !countable;
+          if (!countable && on.value === 'passes') { on.value = 'time'; sync(); }
+          hint.textContent = countable ? '' : 'Durchläufe: nur mit Video oder Scroll-Modus';
+        },
+        setSeconds(value) { seconds.value = value; },
+      };
+    }
+
     function scrollEditor(initial) {
       const cfg = initial || { type: 'None' };
       const o = cfg.options || {};
@@ -880,7 +916,7 @@
       const assetPicker = isAsset ? assetSelect(item.asset_id) : null;
       const assetThumb = isAsset ? Preview.follow(assetPicker, assetById) : null;
 
-      const duration = num(item.duration ?? item.asset_duration ?? 10, '90px', 1);
+      const advance = advanceEditor(item.advance);
       const enabled = el('input', { type: 'checkbox', checked: !!(item.enabled ?? item.is_enabled) });
       const keep = el('input', { type: 'checkbox', checked: !!item.keep_loaded });
       const start = el('input', { type: 'datetime-local', value: toInputValue(item.start_date), style: 'width:200px' });
@@ -888,7 +924,7 @@
 
       card.append(el('div', { class: 'grid' },
         isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput),
-        field('Dauer (s)', duration),
+        field('Weiter nach', advance.root),
         el('label', { class: 'inline' }, enabled, el('span', { text: 'Enabled' })),
         el('label', { class: 'inline' }, keep, el('span', { text: 'Keep loaded' })),
         field('Start', start),
@@ -896,6 +932,10 @@
 
       const scroll = scrollEditor(item.scroll_config);
       card.append(scroll.root);
+      const isVideo = (item.mimetype || '').toLowerCase().startsWith('video/');
+      const recheck = () => advance.setCountable(isVideo || scroll.read().type !== 'None');
+      scroll.onInput(recheck);
+      recheck();
 
       const mimetype = (item.mimetype || '').toLowerCase();
       const isImage = mimetype.startsWith('image/');
@@ -958,13 +998,8 @@
       card.addEventListener('change', markDirty);
 
       saveBtn.addEventListener('click', async () => {
-        const durationValue = Number(duration.value);
-        if (!Number.isFinite(durationValue) || durationValue < 1) {
-          flash(feedback, 'Dauer muss mindestens 1 Sekunde sein.', true);
-          return;
-        }
         const payload = {
-          duration: durationValue,
+          advance: advance.read(),
           enabled: enabled.checked,
           keep_loaded: keep.checked,
           start_date: toIso(start.value),
@@ -1226,13 +1261,22 @@
     document.getElementById('ovAsset').after(ovThumb.element);
     const addScroll = scrollEditor(null);
     document.getElementById('addScroll').append(addScroll.root);
+    const addAdvance = advanceEditor(null);
+    document.getElementById('addAdvance').append(addAdvance.root);
+    const addCountable = () => {
+      const asset = (assets || []).find((a) => String(a.id) === document.getElementById('addAsset').value);
+      const video = !!asset && (asset.mimetype || '').toLowerCase().startsWith('video/');
+      addAdvance.setCountable(video || addScroll.read().type !== 'None');
+    };
+    addScroll.onInput(addCountable);
+    addCountable();
 
-    // Picking an asset fills in its length -- a video's is measured when it is
-    // uploaded -- and the operator may still change it before adding. Stored on
-    // the item as typed, like every duration.
+    // Picking an asset fills in its length as the time -- a video's is measured
+    // when it is uploaded -- and the operator may still change it before adding.
     document.getElementById('addAsset').addEventListener('change', (e) => {
       const asset = assets.find((a) => String(a.id) === e.target.value);
-      if (asset && asset.duration) document.getElementById('addDuration').value = asset.duration;
+      if (asset && asset.duration) addAdvance.setSeconds(asset.duration);
+      addCountable();
     });
 
     document.getElementById('addBtn').addEventListener('click', async () => {
@@ -1246,7 +1290,7 @@
       const payload = {
         asset_id: assetVal ? Number(assetVal) : null,
         url: urlVal || null,
-        duration: Number(document.getElementById('addDuration').value || 10),
+        advance: addAdvance.read(),
         enabled: document.getElementById('addEnabled').checked,
         keep_loaded: document.getElementById('addKeep').checked,
         start_date: toIso(document.getElementById('addStart').value),

@@ -22,6 +22,7 @@
   </style>
 </head>
 <body>
+  <script src="/autoscroll.js"></script>
   <script>
     // Chromium's own image and media documents are what this page replaces:
     // navigated to directly, an asset gets a layout no setting can reach and a
@@ -62,19 +63,6 @@
       // anybody reading the page's state over CDP.
       let started = null;
 
-      if (kind === 'video') {
-        // No `controls`: the bar is the complaint this page exists for. `loop`
-        // unconditionally -- the item's duration ends it either way. No
-        // `autoplay`: the video waits on its first frame for the controller,
-        // which starts it the moment the item's clock starts -- otherwise it has
-        // been playing for the seconds the readiness wait takes, and an item as
-        // long as the video would show its beginning again at the end.
-        media.controls = false;
-        media.loop = true;
-        media.playsInline = true;
-        media.preload = 'auto';
-      }
-
       // Unmuted first, muted only if the browser refuses. The controller starts
       // Chromium with --autoplay-policy=no-user-gesture-required, but a browser
       // started outside it may not have the flag, and a silent video is better
@@ -90,6 +78,39 @@
           });
         }
       };
+
+      if (kind === 'video') {
+        // No `controls`: the bar is the complaint this page exists for. `loop`
+        // unless the item counts plays (the counter below turns it off). No
+        // `autoplay`: the video waits on its first frame for the controller,
+        // which starts it the moment the item's clock starts -- otherwise it has
+        // been playing for the seconds the readiness wait takes, and an item as
+        // long as the video would show its beginning again at the end.
+        media.controls = false;
+        media.loop = true;
+        media.playsInline = true;
+        media.preload = 'auto';
+
+        // Counting ends for an item that moves on after N plays. With a target
+        // (set by the controller's reset) the video stops looping and restarts
+        // itself until the last end, where it stays on its final frame.
+        const adv = globalThis.__advanceCounter ? globalThis.__advanceCounter('video') : null;
+        if (adv) {
+          const reset = adv.reset.bind(adv);
+          adv.reset = (count) => {
+            reset(count);
+            media.loop = !(adv.target > 0);
+          };
+          media.addEventListener('timeupdate', () => adv.alive(performance.now()));
+          media.addEventListener('ended', () => {
+            if (!adv.atEnd(performance.now(), 0)) {
+              media.currentTime = 0;
+              play();
+            }
+          });
+          globalThis.__advance = adv;
+        }
+      }
 
       const start = (by) => {
         if (kind !== 'video') return false;

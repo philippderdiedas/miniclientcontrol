@@ -49,7 +49,7 @@ pub enum Event {
         kind: &'static str,
         title: String,
         url: String,
-        duration: u64,
+        advance: crate::advance::Advance,
     },
     PlaylistEmpty,
     OverrideSet {
@@ -101,12 +101,12 @@ impl Event {
 
     pub fn data(&self) -> Value {
         match self {
-            Event::ItemChanged { item_id, kind, title, url, duration } => json!({
+            Event::ItemChanged { item_id, kind, title, url, advance } => json!({
                 "item_id": item_id,
                 "kind": kind,
                 "title": title,
                 "url": url,
-                "duration": duration,
+                "advance": advance,
             }),
             Event::PlaylistEmpty => json!({}),
             Event::OverrideSet { url, source } => json!({ "url": url, "source": source }),

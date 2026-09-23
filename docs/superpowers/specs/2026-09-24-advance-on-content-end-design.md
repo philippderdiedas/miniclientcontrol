@@ -1,6 +1,6 @@
 # An item advances when its content ends
 
-Status: design, approved in conversation on 2026-09-24.
+Status: implemented (designed and approved in conversation on 2026-09-24).
 
 ## What and why
 
@@ -35,7 +35,7 @@ than `none`. Anything else is a `400` naming the reason — on create, on update
 and when an update changes the scroll mode or the source out from under an
 existing `Passes`.
 
-Bounds: `seconds` is clamped to `1..=86400` like `duration` was (a negative
+Bounds: `seconds` is clamped to `1..=604800` (seven days) like `duration` was (a negative
 value once froze a playlist for 584 billion years); `count` to `1..=100`.
 
 ## API and storage

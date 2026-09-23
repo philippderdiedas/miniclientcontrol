@@ -266,7 +266,7 @@ async def settings_flow():
 
         print("\n[41b] a playlist item can add a layer of its own")
         http("POST", "/api/playlist",
-             {"url": "http://127.0.0.1:1/x", "duration": 60, "playlist_id": a_playlist()})
+             {"url": "http://127.0.0.1:1/x", "advance": {"on": "time", "seconds": 60}, "playlist_id": a_playlist()})
         items = http("GET", "/api/playlist")[1]
         item_id = items[-1]["id"]
         status, _ = http("PUT", f"/api/playlist/{item_id}",
@@ -553,7 +553,7 @@ async def browser_flow():
         # that needs the internet fails for the wrong reason.
         page_url = f"http://127.0.0.1:{HTTP}/empty_playlist.html"
         http("POST", "/api/playlist",
-             {"url": page_url, "duration": 600, "playlist_id": a_playlist(port=HTTP)},
+             {"url": page_url, "advance": {"on": "time", "seconds": 600}, "playlist_id": a_playlist(port=HTTP)},
              port=HTTP)
         item = wait_for(lambda: http("GET", "/api/control/current", port=HTTP)[1].get("item_id"), 40)
         check("the loop picked the item up", item is not None)
@@ -905,7 +905,7 @@ async def browser_flow():
     for screen in ("a", "b"):
         http("POST", "/api/playlist",
              {"url": f"http://127.0.0.1:{HTTP}/empty_playlist.html?screen=seed-{screen}",
-              "duration": 2, "playlist_id": playlist}, port=HTTP)
+              "advance": {"on": "time", "seconds": 2}, "playlist_id": playlist}, port=HTTP)
 
     seen = {}
     live_ws, _ = cdp.page_ws(9232)

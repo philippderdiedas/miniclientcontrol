@@ -1,5 +1,14 @@
 use sqlx::{Pool, Sqlite, Row};
 
+async fn playlist_items_has(pool: &Pool<Sqlite>, column: &str) -> bool {
+    sqlx::query("SELECT count(*) FROM pragma_table_info('playlist_items') WHERE name = ?")
+        .bind(column)
+        .fetch_one(pool)
+        .await
+        .map(|row| row.get::<i32, _>(0) > 0)
+        .unwrap_or(false)
+}
+
 pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // 1. Ensure assets table exists
     sqlx::query(
@@ -24,7 +33,7 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             asset_id      INTEGER,
             url           TEXT,
             play_order    INTEGER NOT NULL,
-            duration      INTEGER,
+            advance       TEXT NOT NULL DEFAULT '{"on":"time","seconds":10}',
             is_enabled    BOOLEAN DEFAULT 1,
             start_date    TEXT,
             end_date      TEXT,
@@ -35,6 +44,35 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // `advance` replaced `duration`: a time *or* a number of passes. The old
+    // value becomes a time, resolved exactly as the loop used to resolve it
+    // (the item's own, else its asset's, else ten seconds) so every playlist
+    // plays as before. One transaction, so a failure cannot leave the column
+    // dropped with nothing backfilled -- and a failure is an error, because
+    // every read selects `advance` and a half-migrated table blanks the screen.
+    let has_advance = playlist_items_has(pool, "advance").await;
+    if playlist_items_has(pool, "duration").await {
+        let mut tx = pool.begin().await?;
+        if !has_advance {
+            sqlx::query(r#"ALTER TABLE playlist_items ADD COLUMN advance TEXT NOT NULL DEFAULT '{"on":"time","seconds":10}'"#)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query(
+                "UPDATE playlist_items SET advance = json_object('on', 'time', 'seconds',
+                    MAX(1, MIN(604800, COALESCE(duration,
+                        (SELECT a.duration FROM assets a WHERE a.id = playlist_items.asset_id), 10))))",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("ALTER TABLE playlist_items DROP COLUMN duration").execute(&mut *tx).await?;
+        tx.commit().await?;
+    } else if !has_advance {
+        sqlx::query(r#"ALTER TABLE playlist_items ADD COLUMN advance TEXT NOT NULL DEFAULT '{"on":"time","seconds":10}'"#)
+            .execute(pool)
+            .await?;
+    }
 
     // 3. Migration: Check for 'scroll_config' column
     // This allows upgrading databases created before this field existed.
@@ -572,7 +610,9 @@ mod tests {
             .await
             .unwrap();
         sqlx::query(
-            "CREATE TRIGGER stop_the_backfill BEFORE UPDATE ON playlist_items
+            // `OF playlist_id`: the backfill under test, not the `advance`
+            // migration, which updates the same table earlier on.
+            "CREATE TRIGGER stop_the_backfill BEFORE UPDATE OF playlist_id ON playlist_items
              BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
         )
         .execute(&pool)
@@ -655,6 +695,40 @@ mod tests {
                 .unwrap();
         assert_eq!(fit, "contain");
         assert_eq!(background, "#000000");
+    }
+
+    #[tokio::test]
+    async fn duration_becomes_a_time_to_advance() {
+        // One connection: each connection to a bare `sqlite::memory:` is its own
+        // database, and the migration's transaction must see the same one.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE assets (id INTEGER PRIMARY KEY, filename TEXT NOT NULL,
+                     local_path TEXT NOT NULL UNIQUE, mimetype TEXT NOT NULL,
+                     duration INTEGER DEFAULT 10, created_at DATETIME)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE playlist_items (id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER,
+                     url TEXT, play_order INTEGER NOT NULL, duration INTEGER, is_enabled BOOLEAN DEFAULT 1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO assets (id, filename, local_path, mimetype, duration)
+                     VALUES (1, 'v.mp4', 'v.mp4', 'video/mp4', 37)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO playlist_items (id, asset_id, url, play_order, duration) VALUES
+                     (1, NULL, 'https://own.test', 1, 25),
+                     (2, 1, NULL, 2, NULL),
+                     (3, NULL, 'https://none.test', 3, NULL),
+                     (4, NULL, 'https://neg.test', 4, -3)")
+            .execute(&pool).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let rows: Vec<(i64, String)> = sqlx::query_as("SELECT id, advance FROM playlist_items ORDER BY id")
+            .fetch_all(&pool).await.unwrap();
+        let parsed: Vec<(i64, crate::advance::Advance)> =
+            rows.into_iter().map(|(id, raw)| (id, serde_json::from_str(&raw).unwrap())).collect();
+        use crate::advance::Advance::Time;
+        assert_eq!(parsed, vec![(1, Time { seconds: 25 }), (2, Time { seconds: 37 }),
+                                (3, Time { seconds: 10 }), (4, Time { seconds: 1 })]);
+        assert!(!playlist_items_has(&pool, "duration").await, "the old column is gone");
+        run_migrations(&pool).await.unwrap(); // idempotent
     }
 
     #[tokio::test]

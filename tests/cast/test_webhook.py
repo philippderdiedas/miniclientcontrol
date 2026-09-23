@@ -242,7 +242,7 @@ def add_item(url="http://127.0.0.1:9/x", duration=LONG):
     which is enough -- `item_changed` fires before the navigation.
     """
     http("POST", "/api/playlist",
-         {"url": url, "duration": duration, "playlist_id": a_playlist()})
+         {"url": url, "advance": {"on": "time", "seconds": duration}, "playlist_id": a_playlist()})
     rows = http("GET", "/api/playlist")[1] or []
     return rows[-1]["id"] if rows else None
 
@@ -391,7 +391,7 @@ async def case_53():
     with Receiver() as plain, Receiver() as shaped, Display():
         add_hook(plain.url, ["playback.item_changed"], name="Plain")
         add_hook(shaped.url, ["playback.item_changed"], name="Shaped",
-                 body='{"text": {{ data.url | tojson }}, "n": {{ data.duration }}}',
+                 body='{"text": {{ data.url | tojson }}, "n": {{ data.advance.seconds }}}',
                  # Header values are templates too, and an unfiltered one is the
                  # only place auto-escaping would show: `tojson` escapes `&` to
                  # `\u0026` on its own, so the body cannot prove anything here.

@@ -260,8 +260,31 @@ reflect an edit made *during* the current item has to be re-read, not taken from
 it. Two things already depend on this: `pending_jump` above, and
 `db::load_item_overlay`.
 
-`item.duration.or(item.asset_duration).unwrap_or(10)` — the entry wins, the asset
-is the fallback, ten seconds is the last resort.
+**An item moves on by its `advance`** (`src/advance.rs`): `Time` runs out on its
+own; `Passes` is counted by the page. Three rules:
+
+- **What a pass is follows from the content and is not stored** — a video's
+  end, the bottom of anything scrolled, a paged PDF's last page — so no stored
+  kind can contradict the content. `advance::check` refuses `Passes` where
+  nothing ends, on create *and* when an update changes the scroll mode or the
+  asset under it.
+- **The runtime stops at the end of the last pass** (`reset(count)` hands it the
+  target, before `start_media`, so a counted video stops looping before it
+  plays). The loop polls every 500 ms; a runtime that started over would flash
+  the top of the page first.
+- **Every runtime publishes `globalThis.__advance`, built by
+  `__advanceCounter` in `autoscroll.js`**. A viewer that counts for itself (a
+  video, the PDF viewer's step mode) installs its own over the scroll one, and
+  the scroll runtime installs only when there is none, so its re-evaluation
+  after navigation never takes it back. A deliberate hold is progress; only a
+  stuck one is not — that is what `--advance-stall-timeout` (default 120 s)
+  measures, moving a stuck page on with a `warn!`. A flag, not a setting: fault
+  handling, not content. A page that fits the screen counts a pass per
+  `max(3 s, top + return delay)`, so a count cannot flash past.
+
+The pass poll does not recompute the timetable boundary: it comes twice a
+second, and the boundary is recomputed after every *other* wake of the per-item
+`select!`, which is where an edit lands.
 
 ## Injected runtimes
 
@@ -910,6 +933,12 @@ decision. Filling the `displays` table is *not* schema and is not here: it depen
 on what the command line declared, which is `display::register`, called from
 `main.rs` after the migration and before any loop reads an assignment.
 
+`playlist_items.duration` was replaced by `advance` (JSON, `COALESCE`d on
+read) in **one transaction** that adds the column, backfills it with the loop's
+old fallback (item, else asset, else 10 s) and drops `duration` — a failure there
+is a startup error, because every read selects `advance`. `assets.duration` stays,
+as a video's measured length; nothing plays by it.
+
 `PRAGMA foreign_keys` is enabled per connection via `SqliteConnectOptions`. It is
 off by default in SQLite, which made `ON DELETE CASCADE` a no-op and left orphaned
 playlist rows behind.
@@ -982,6 +1011,7 @@ The endpoint list is in [README.md](README.md#api-overview). The traps behind it
   Skipping the whole reload while one card is dirty would hide a display losing
   its `declared` status — the screen-was-removed case that page exists to carry
   out — for as long as an edit sits open elsewhere.
-- **Clamp `duration` before casting `i64` to `u64`.** A negative value became
-  about 584 billion years of `Duration` and froze the playlist on one item.
+- **Clamp every time before it becomes a `Duration`** (`Advance::clamped`). A
+  negative duration once became about 584 billion years and froze the playlist
+  on one item.
 - Sizes that reach the screen are in `vmin`/`vw`, not pixels.
