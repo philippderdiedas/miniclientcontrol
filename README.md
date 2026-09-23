@@ -193,6 +193,12 @@ declaration.
   end of the target playlist, renumbering both playlists `1..n`. An unknown
   `playlist_id` is refused, and so is `null`: an item in no playlist is the state
   this field exists to repair
+- `POST` and `PUT` also take, for an image or video item:
+  - `fit_mode`: `contain` (default), `cover`, `fill`, `none` or `scroll` — how the
+    asset sits on the screen. An unknown value is stored as `contain`. Ignored for
+    URL and PDF items
+  - `fit_background`: hex colour behind a contained asset (default `#000000`);
+    anything that is not a hex colour is a `400`
 - `POST /api/playlist/{id}/move` — renumber within the item's own playlist
 - `DELETE /api/playlist/{id}` — remove playlist item
 
@@ -238,6 +244,7 @@ declaration.
 - `POST /api/override` — activate override playback
   - body supports either `asset_id` or `url`
   - optional `scroll_config`
+  - optional `fit_mode` and `fit_background`, as for a playlist item
 - `GET /api/override` — the override currently up, if any
 - `DELETE /api/override` — clear override and return to playlist loop
 - `GET`/`POST`/`DELETE /api/displays/{name}/override` — the same, for one named
@@ -507,6 +514,12 @@ If the browser is started outside the controller, use the managed policy instead
 - `{"type":"Continuous","options":{"speed":1.0,"top_delay":2000,"return_delay":2000}}`
 
 PDFs are rendered through the internal viewer (`/pdf_viewer.html`) and support both step and continuous scrolling.
+
+Images and videos are rendered through `/media_viewer.html`, which applies the
+item's `fit_mode` and `fit_background` and plays videos without controls, on a
+loop, unmuted. `fit_mode: "scroll"` draws an image at full width so the scroll
+modes above have something to scroll; with any other fit the whole image is on
+screen and there is nothing to scroll.
 
 ## Project Layout
 

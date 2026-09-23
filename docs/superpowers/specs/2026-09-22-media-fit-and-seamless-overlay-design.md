@@ -1,6 +1,6 @@
 # Media fit, silent video, and an overlay that does not blink
 
-**Status:** designed
+**Status:** implemented
 **Date:** 2026-09-22
 
 ## What and why
