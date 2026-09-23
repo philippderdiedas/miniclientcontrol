@@ -93,9 +93,24 @@ can cast to two screens at once. See
 
 ## Assets
 
-Uploads land in `--assets-dir` and are served from `/uploads/`. Images and PDFs
-are what the feature exists for; a PDF is rendered by a bundled pdf.js viewer
-rather than handed to Chromium's own, so scrolling can be driven.
+Uploads land in `--assets-dir` and are served from `/uploads/`. Images, videos
+and PDFs are what the feature exists for. A PDF is rendered by a bundled pdf.js
+viewer rather than handed to Chromium's own, so scrolling can be driven; an image
+or a video is drawn by a small page of ours for the same kind of reason —
+Chromium's own image and video documents have a layout nothing can change and a
+video control bar nothing turns off.
+
+Each playlist item that plays an image, a video or a PDF says **how it sits on
+the screen**: *Einpassen* (whole picture, with bars), *Füllen* (fills, crops),
+*Strecken* (fills, distorts), *Original* (1:1), *Breite füllen* (full width, the
+height follows — what a tall image or a PDF scrolls through) or *Höhe füllen*
+(full height, centred). The colour of the bars is the item's too. A video loops
+until its item's duration is up.
+
+A PDF defaults to *Breite füllen*, which is how PDFs have always been shown: one
+long page after another. Any other choice makes every page one screen, edge to
+edge, so the **Step** scroll mode with its default step (one screen height) pages
+through the document like a slide show.
 
 Each asset carries a default duration, which an item may override.
 
@@ -123,6 +138,12 @@ There are two layers. A **global** overlay applies to everything, and a playlist
 item may add **its own** on top of it. The item's layer is deliberately smaller in
 scope (text, image, QR, position) so a display does not change character item by
 item while the playlist runs.
+
+The badge does not disappear between items. The controller hands the next page
+its overlay before navigating to it, so the badge is there from the page's first
+frame — and stays through a page that reloads itself. A page with a strict
+content-security policy can refuse that, and on such a page the badge comes back
+a moment after the page does, as it always has.
 
 An item may also **override the text colour**, which is the one piece of the look
 it can reach. The case is a single bright page in an otherwise dark playlist:

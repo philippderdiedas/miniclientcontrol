@@ -229,6 +229,77 @@ impl Default for ScrollMode {
     }
 }
 
+/// How an image, video or PDF asset sits on the screen. Stored per playlist
+/// item by name; `web/media_viewer.html` and `web/pdf_viewer.html` are what
+/// turn it into a layout.
+///
+/// This is the layout axis only. Whether anything then moves is `ScrollMode`'s
+/// business, and the two combine: `Width` on a tall image or a PDF gives the
+/// scroll runtime a document to scroll, `Contain` or `Height` on a PDF gives one
+/// screen per page, which a step scroll then turns into paging.
+///
+/// Four of these are CSS `object-fit`. `Width` and `Height` are not: they fill
+/// one dimension and let the other follow the asset's aspect ratio.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FitMode {
+    #[default]
+    Contain,
+    Cover,
+    Fill,
+    None,
+    Width,
+    Height,
+}
+
+impl FitMode {
+    /// Total on purpose. The value ends up on a screen nobody is standing in
+    /// front of, so an unknown one falls back rather than failing -- the same
+    /// rule the overlay applies to an unknown corner.
+    ///
+    /// `scroll` is what `width` was called before the rename. It is read, never
+    /// written, so a row stored under the old name keeps its layout.
+    pub fn from_value(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "cover" => Self::Cover,
+            "fill" => Self::Fill,
+            "none" => Self::None,
+            "width" | "scroll" => Self::Width,
+            "height" => Self::Height,
+            _ => Self::Contain,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Contain => "contain",
+            Self::Cover => "cover",
+            Self::Fill => "fill",
+            Self::None => "none",
+            Self::Width => "width",
+            Self::Height => "height",
+        }
+    }
+
+    /// The fit an item gets when nobody chose one, which depends on what it
+    /// plays. A PDF has always been drawn at full width, so that is its default;
+    /// `Contain` there would repaginate every PDF a venue already has.
+    pub fn default_for(mimetype: Option<&str>) -> Self {
+        if mimetype.is_some_and(|m| m.eq_ignore_ascii_case("application/pdf")) {
+            Self::Width
+        } else {
+            Self::Contain
+        }
+    }
+}
+
+/// What fills the bars around a contained asset when its item names nothing.
+pub const DEFAULT_FIT_BACKGROUND: &str = "#000000";
+
+fn default_fit_background() -> String {
+    DEFAULT_FIT_BACKGROUND.to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OverrideItem {
     pub asset_id: Option<i64>,
@@ -236,6 +307,14 @@ pub struct OverrideItem {
     pub local_path: Option<String>,
     pub mimetype: Option<String>,
     pub scroll_config: ScrollMode,
+    /// How an image or video override sits on the screen. Defaulted rather than
+    /// optional, so two overrides compare equal exactly when they would draw the
+    /// same thing -- `run_override_loop` relies on that comparison to not
+    /// re-navigate a live cast.
+    #[serde(default)]
+    pub fit_mode: FitMode,
+    #[serde(default = "default_fit_background")]
+    pub fit_background: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -305,6 +384,16 @@ pub struct PlaylistItemWithAsset {
     /// whole item duration out of date.
     #[sqlx(default)]
     pub overlay_config: sqlx::types::Json<Option<crate::settings::ItemOverlay>>,
+
+    /// `FitMode` by name. A `String` rather than the enum, which would need a
+    /// `sqlx::Type` impl to decode; parsed with `FitMode::from_value` where it is
+    /// used, and that parse is total anyway.
+    #[sqlx(default)]
+    pub fit_mode: String,
+
+    /// What fills the bars around a contained asset.
+    #[sqlx(default)]
+    pub fit_background: String,
 
     // Asset fields
     pub local_path: Option<String>,
@@ -482,5 +571,43 @@ mod tests {
         assert_eq!(display.name, "foyer");
         assert!(display.current_item_id.try_lock().unwrap().is_none());
         assert!(display.override_item.try_lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn fit_mode_parses_its_six_names_and_falls_back_on_anything_else() {
+        use super::FitMode;
+        assert_eq!(FitMode::from_value("contain"), FitMode::Contain);
+        assert_eq!(FitMode::from_value("cover"), FitMode::Cover);
+        assert_eq!(FitMode::from_value("fill"), FitMode::Fill);
+        assert_eq!(FitMode::from_value("none"), FitMode::None);
+        assert_eq!(FitMode::from_value("width"), FitMode::Width);
+        assert_eq!(FitMode::from_value("height"), FitMode::Height);
+        assert_eq!(FitMode::from_value(" COVER "), FitMode::Cover);
+        for junk in ["", "stretch", "object-fit: cover", "width;"] {
+            assert_eq!(FitMode::from_value(junk), FitMode::Contain, "{junk:?}");
+        }
+        for mode in [FitMode::Contain, FitMode::Cover, FitMode::Fill, FitMode::None,
+                     FitMode::Width, FitMode::Height] {
+            assert_eq!(FitMode::from_value(mode.as_str()), mode);
+        }
+    }
+
+    #[test]
+    fn scroll_is_still_read_as_width() {
+        // What `width` was called before it was renamed; a row written then must
+        // keep its layout rather than fall back.
+        assert_eq!(super::FitMode::from_value("scroll"), super::FitMode::Width);
+    }
+
+    #[test]
+    fn a_pdf_defaults_to_full_width_and_everything_else_to_contain() {
+        use super::FitMode;
+        // Full width is how a PDF has always been drawn; anything else would
+        // change every existing PDF item on upgrade.
+        assert_eq!(FitMode::default_for(Some("application/pdf")), FitMode::Width);
+        assert_eq!(FitMode::default_for(Some("Application/PDF")), FitMode::Width);
+        assert_eq!(FitMode::default_for(Some("image/png")), FitMode::Contain);
+        assert_eq!(FitMode::default_for(Some("video/mp4")), FitMode::Contain);
+        assert_eq!(FitMode::default_for(None), FitMode::Contain);
     }
 }

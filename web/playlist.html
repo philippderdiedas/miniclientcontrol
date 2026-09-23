@@ -330,6 +330,61 @@
       };
     }
 
+    // --- fit editor -----------------------------------------------------------
+    // Image, video and PDF items only. A URL item has no page of ours whose
+    // layout this could reach, so offering it there would be a setting that
+    // does nothing.
+    const FIT_CHOICES = [
+      ['contain', 'Einpassen – ganz sichtbar, mit Rand'],
+      ['cover', 'Füllen – beschneidet, was übersteht'],
+      ['fill', 'Strecken – verzerrt'],
+      ['none', 'Original – 1:1, mittig'],
+      ['width', 'Breite füllen – Höhe folgt, scrollbar'],
+      ['height', 'Höhe füllen – Breite folgt, mittig'],
+    ];
+
+    // `scroll` is what `width` was called before; the server reads it the same way.
+    const fitName = (value) => (value === 'scroll' ? 'width' : value);
+
+    function fitEditor(fitMode, background, withHint) {
+      const mode = el('select', {},
+        ...FIT_CHOICES.map(([value, text]) => el('option', { value, text })));
+      mode.value = FIT_CHOICES.some(([value]) => value === fitName(fitMode)) ? fitName(fitMode) : 'contain';
+
+      // A colour input only takes #rrggbb; anything else the server accepts
+      // (#rgb, #rrggbbaa) shows as black here and is written back as black on save.
+      const bg = el('input', {
+        type: 'color',
+        value: /^#[0-9a-f]{6}$/i.test(background || '') ? background : '#000000',
+      });
+
+      // Fit and scroll are two fields that must agree, and on an image only full
+      // width leaves anything to scroll. The one combination that silently does
+      // nothing gets a hint; the reverse (full width, no scrolling) is a
+      // legitimate fit-to-width. Not on a PDF: its pages stack, so every fit
+      // there gives a scroll something to move through.
+      const hint = el('p', {
+        class: 'muted',
+        hidden: true,
+        text: 'Bildlauf ist eingestellt, aber die Anpassung ist nicht „Breite füllen“ – '
+          + 'das Bild passt auf den Schirm, es gibt nichts zu scrollen.',
+      });
+
+      const root = el('fieldset', {},
+        el('legend', { text: 'Darstellung' }),
+        el('div', { class: 'grid' }, field('Anpassung', mode), field('Hintergrund', bg)),
+        hint);
+
+      return {
+        root,
+        onChange(handler) { mode.addEventListener('change', handler); },
+        hintFor(scrollType) {
+          hint.hidden = !(withHint && scrollType !== 'None' && mode.value !== 'width');
+        },
+        read() { return { fit_mode: mode.value, fit_background: bg.value }; },
+      };
+    }
+
     // --- per-item overlay editor ---------------------------------------------
     // Content, a corner, and the text colour. Sizes and opacity come from the
     // global overlay in the admin page, so a display keeps one look across items
@@ -816,6 +871,19 @@
       const scroll = scrollEditor(item.scroll_config);
       card.append(scroll.root);
 
+      const mimetype = (item.mimetype || '').toLowerCase();
+      const isImage = mimetype.startsWith('image/');
+      const takesFit = isAsset
+        && (isImage || mimetype.startsWith('video/') || mimetype === 'application/pdf');
+      const fit = takesFit ? fitEditor(item.fit_mode, item.fit_background, isImage) : null;
+      if (fit) {
+        card.append(fit.root);
+        const syncHint = () => fit.hintFor(scroll.read().type);
+        scroll.onInput(syncHint);
+        fit.onChange(syncHint);
+        syncHint();
+      }
+
       const overlay = overlayEditor(item.overlay_config, assets);
       card.append(overlay.root);
 
@@ -878,6 +946,7 @@
           scroll_config: scroll.read(),
           overlay: overlay.read(),
         };
+        if (fit) Object.assign(payload, fit.read());
         if (isAsset) payload.asset_id = Number(assetPicker.value);
         else payload.url = urlInput.value.trim();
 

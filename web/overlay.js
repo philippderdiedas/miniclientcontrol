@@ -68,6 +68,7 @@
   const boxes = new Map();
   let ticker = null;
   let observer = null;
+  let seededAt = null;
 
   function ensureHost(position) {
     const id = HOST_PREFIX + '_' + position;
@@ -478,6 +479,13 @@
       return {
         installed: true,
         suspended,
+        // How many seeded registrations ran in this document, and when the seed
+        // was applied (ms since the document started), or null. The first is how
+        // a leaked registration shows up -- each would run again on every
+        // navigation -- and the second is how "the badge was there before the
+        // controller got to it" is told apart from "the controller was quick".
+        seeds: Number(globalThis.__ovSeeds) || 0,
+        seededAt,
         boxes: boxes.size,
         positions: [...boxes.keys()],
         layers: layers().length,
@@ -489,4 +497,37 @@
       };
     },
   };
+
+  // The controller registers this runtime for the *next* document with the
+  // payload it should start from, so the badge is drawn before that document's
+  // first paint instead of after the readiness waits -- which is what made it
+  // blink at every item change. Same shape as `__ovSuspend`: a value that
+  // exists before this runtime does.
+  //
+  // Top frame only: the registered script runs in every frame, and an iframe
+  // drawing its own copy is a second clock in the middle of a dashboard.
+  //
+  // And not before there is a root element. The registration runs on document
+  // creation, which comes before the parser's `<html>`, and both `appendChild`
+  // and `MutationObserver.observe` throw on a null root -- which would take the
+  // runtime down before `__ov` could be used by anybody.
+  if (globalThis.__ovSeed && window.top === window) {
+    const seed = globalThis.__ovSeed;
+    const applySeed = () => {
+      // The controller may have applied a newer payload in the meantime.
+      if (payload) return;
+      globalThis.__ov.apply(seed);
+      seededAt = Math.round(performance.now());
+    };
+    if (document.documentElement) {
+      applySeed();
+    } else {
+      const rootWatch = new MutationObserver(() => {
+        if (!document.documentElement) return;
+        rootWatch.disconnect();
+        applySeed();
+      });
+      rootWatch.observe(document, { childList: true });
+    }
+  }
 })();

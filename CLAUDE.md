@@ -36,8 +36,8 @@ its parent, which is what `src/cast/api.rs` and `src/webhook/api.rs` use it for.
 
 **Stop any locally running instance before the Python suite.** `test_port.py`
 needs the default `3443` free to test the fallback, and
-`test_browser.py`/`test_overlay.py`/`test_webhook.py`/`test_display.py`/`test_castscreens.py`
-launch their own Chrome on `9222`+`9223`/`9232`/`9242`/`9242`+`9243`/`9242`+`9243`.
+`test_browser.py`/`test_overlay.py`/`test_media.py`/`test_webhook.py`/`test_display.py`/`test_castscreens.py`
+launch their own Chrome on `9222`+`9223`/`9232`/`9252`/`9242`/`9242`+`9243`/`9242`+`9243`.
 A dev instance holding those makes them fail in a way that reads exactly like a
 code regression — they pass again the moment it is stopped. `test_display.py`,
 `test_webhook.py` and `test_castscreens.py` all use `9242`, so no two of the three
@@ -68,6 +68,10 @@ the rules that break it:
 
 - **`is_display_path`** is loopback-scoped. The display browser is driven over CDP
   and cannot present credentials, so requiring them there blanks the signage.
+- **Every page the display browser loads must be in `is_display_path`** —
+  `pdf_viewer.html`, `media_viewer.html`, `empty_playlist.html`. A page missing
+  from it works on a device with no credentials and is a `401` on every screen
+  the moment basic auth is switched on.
 - **`cast::is_cast_public_path`** is exempt **regardless of address**, because the
   guest is by definition not loopback.
 - **Keep the two separate.** Widening `is_display_path` exposes display-only paths
@@ -224,7 +228,26 @@ Both the scroll runtime and the overlay runtime are registered with
 `Page.addScriptToEvaluateOnNewDocument` **and** re-evaluated after navigation.
 That is not belt-and-braces: a strict CSP can block the registered copy. Both are
 probed rather than assumed — `apply_scroll_settings` checks `!!globalThis.__as`,
-`apply_overlay` checks `!!globalThis.__ov`, and both no-op when it is missing.
+`apply_overlay_payload` checks `!!globalThis.__ov`, and both no-op when it is missing.
+
+**The overlay's registration carries its payload** (`globalThis.__ovSeed`), so
+the badge is drawn when the next document is created instead of after the
+readiness waits — that gap was the blink at every item change. Three rules:
+
+- **Seed before every navigation of the control page**, and on every overlay
+  change. `seed_overlay_runtime` skips an unchanged payload, so calling it too
+  often is free; calling it too rarely leaves a self-reloading page with a stale
+  badge that nothing corrects.
+- **Replace the registration, never add beside it.** Each one runs on every
+  navigation for the life of the session. `__ov.state().seeds` counts them, and
+  case `[48]` of `tests/cast/test_overlay.py` asserts it is 1.
+- **The seed applies in the top frame only, and only once a root element
+  exists.** The registered script runs in every frame, and on document creation,
+  before `<html>`. Case `[48b]` catches a missing top-frame guard.
+
+`keep_loaded` tabs are not seeded: they are brought to front, not navigated, so
+their document and its badge persist between showings. The after-navigation
+`apply_overlay_payload` stays — it is the CSP fallback.
 
 `web/autoscroll.js` is served over HTTP *and* `include_str!`-ed into the binary
 (`scroll_runtime_script()`). Same for `web/overlay.js`. Editing one copy is

@@ -52,6 +52,24 @@ def assign(playlist_id, port=None):
         if row.get("playlist_id") != playlist_id:
             http("PUT", f"/api/displays/{row['name']}", {"playlist_id": playlist_id}, port=port)
 
+def upload_html(name, html, port=None):
+    """Upload a page as an asset. Served by the controller itself, so it is
+    same-origin with the display and its iframe can be inspected."""
+    import uuid
+    boundary = "----mcc" + uuid.uuid4().hex
+    body = (f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n"
+            "Content-Type: text/html\r\n\r\n").encode() + html.encode() \
+        + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port or CAST_HTTP}/api/assets", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    with urllib.request.urlopen(req, timeout=10) as res:
+        json.load(res)
+    return next(row["id"] for row in http("GET", "/api/assets", port=port)[1]
+                if row["filename"] == name)
+
+
 def spawn(cmd):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     procs.append(p)
@@ -872,6 +890,79 @@ async def browser_flow():
                 break
             await asyncio.sleep(0.5)
         check("every box is removed from the page", gone is True)
+
+    print("\n[48] the badge is already there when the next item's page appears")
+    # Two items taking turns, so the loop navigates every two seconds. The
+    # controller's own apply comes after the attached-target drain (700 ms) and
+    # the readiness wait (at least ~1 s of network idle), so a box that is up
+    # within a few hundred milliseconds of the document starting can only have
+    # come from the seed.
+    put({"enabled": True, "text": "nahtlos", "position": "top-left"}, port=HTTP)
+    for row in http("GET", "/api/playlist", port=HTTP)[1]:
+        http("PUT", f"/api/playlist/{row['id']}", {"enabled": False}, port=HTTP)
+    playlist = a_playlist(port=HTTP)
+    for screen in ("a", "b"):
+        http("POST", "/api/playlist",
+             {"url": f"http://127.0.0.1:{HTTP}/empty_playlist.html?screen=seed-{screen}",
+              "duration": 2, "playlist_id": playlist}, port=HTTP)
+
+    seen = {}
+    live_ws, _ = cdp.page_ws(9232)
+    async with cdp.Session(live_ws) as live:
+        deadline = time.time() + 40
+        while time.time() < deadline and len(seen) < 4:
+            try:
+                raw = await live.eval("""(() => JSON.stringify({
+                    href: location.href,
+                    origin: performance.timeOrigin,
+                    st: globalThis.__ov ? globalThis.__ov.state() : null,
+                }))()""")
+                row = json.loads(raw)
+            except Exception:
+                await asyncio.sleep(0.05)
+                continue  # the document went away under the evaluate
+            if "seed-" in row["href"] and row["origin"] not in seen and row["st"]:
+                seen[row["origin"]] = row["st"]
+            await asyncio.sleep(0.05)
+
+        check("several navigations were observed", len(seen) >= 3, len(seen))
+        states = list(seen.values())
+        check("every one of them was seeded",
+              all(s.get("seededAt") is not None for s in states), states)
+        check("within the first half second of the document -- before the controller's apply",
+              all((s.get("seededAt") or 1e9) < 500 for s in states), states)
+        check("and nothing threw on the way in: the runtime is installed",
+              all(s.get("installed") for s in states), states)
+        check("one registration per document, not one per item change",
+              all(s.get("seeds") == 1 for s in states), states)
+
+        print("\n[48b] an iframe does not get a badge of its own")
+        framed = upload_html(
+            "framed.html",
+            "<!doctype html><html><body><p>aussen</p>"
+            "<iframe srcdoc='<p>innen</p>' style='width:400px;height:200px'></iframe>"
+            "</body></html>", port=HTTP)
+        http("POST", "/api/override", {"asset_id": framed}, port=HTTP)
+        counts = None
+        for _ in range(60):
+            try:
+                counts = json.loads(await live.eval("""(() => {
+                    const f = document.querySelector('iframe');
+                    const inner = f && f.contentDocument;
+                    return JSON.stringify({
+                      framed: !!f,
+                      top: document.querySelectorAll('[id^="__mcc_overlay"]').length,
+                      inner: inner ? inner.querySelectorAll('[id^="__mcc_overlay"]').length : null,
+                    });
+                })()"""))
+                if counts["framed"] and counts["top"] == 1 and counts["inner"] is not None:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+        check("the page has its one badge", counts and counts["top"] == 1, counts)
+        check("and the iframe inside it has none", counts and counts["inner"] == 0, counts)
+        http("DELETE", "/api/override", port=HTTP)
 
 
 async def main():

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
 use chromiumoxide::cdp::browser_protocol::browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams};
-use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams};
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier};
 use chromiumoxide::cdp::browser_protocol::target::{EventAttachedToTarget, SetAutoAttachParams, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::EnableParams as RuntimeEnableParams;
 use chromiumoxide::error::CdpError;
@@ -12,7 +12,7 @@ use chromiumoxide::listeners::EventStream;
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use crate::models::{AppState, Display, OverrideItem, PlaylistItemWithAsset, ScrollMode};
+use crate::models::{AppState, Display, FitMode, OverrideItem, PlaylistItemWithAsset, ScrollMode};
 use urlencoding::encode;
 
 /// Drive one screen.
@@ -140,8 +140,14 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             }
         };
 
-        if let Err(e) = register_overlay_runtime_script(&page).await {
-            debug!("Failed to register overlay runtime script: {}", e);
+        // The payload a page with no item-specific layer gets. Every navigation
+        // below re-seeds with its own before it navigates.
+        let mut overlay_seed = OverlaySeed::default();
+        {
+            let payload = crate::settings::overlay_payload(&state, &display, None).await;
+            if let Err(e) = seed_overlay_runtime(&page, &mut overlay_seed, &payload).await {
+                debug!("Failed to register overlay runtime script: {}", e);
+            }
         }
 
         if let Err(e) = register_scroll_runtime_script(&page).await {
@@ -200,7 +206,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             };
 
             if let Some(override_item) = active_override {
-                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, override_item).await {
+                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, &mut overlay_seed, override_item).await {
                     error!("Override playback failed: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -255,6 +261,8 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     p.start_date, p.end_date,
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
+                    COALESCE(p.fit_mode, 'contain') as fit_mode,
+                    COALESCE(p.fit_background, '#000000') as fit_background,
                     a.local_path, a.mimetype, a.duration as asset_duration, a.filename
                 FROM playlist_items p
                 LEFT JOIN assets a ON p.asset_id = a.id
@@ -299,6 +307,18 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                 // This branch re-runs every 5s while the playlist stays empty. Only
                 // navigate if we are not already on the placeholder, otherwise the
                 // idle screen reloads itself every 5 seconds.
+                //
+                // Seeded before the navigation, so the idle page is born with
+                // the badge. The idle screen is a page like any other, and the
+                // one most likely to be up when somebody sets a notice.
+                let overlay = crate::settings::overlay_payload(&state, &display, None).await;
+                if let Err(e) = seed_overlay_runtime(&page, &mut overlay_seed, &overlay).await {
+                    debug!("Failed to seed the overlay for the idle page: {}", e);
+                    if is_connection_lost(&e) {
+                        reconnect_needed = true;
+                        break;
+                    }
+                }
                 let empty_url = empty_playlist_url(state.args.port, &display_name);
                 let already_showing = match page.url().await {
                     Ok(Some(current)) => current == empty_url,
@@ -325,9 +345,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     state.webhooks.fire(&display_name, crate::webhook::Event::PlaylistEmpty);
                 }
 
-                // The idle screen is a page like any other. It is also the one
-                // most likely to be up when somebody sets a notice.
-                if let Err(e) = apply_overlay(&state, &display, &page, None).await {
+                if let Err(e) = apply_overlay_payload(&page, &overlay).await {
                     debug!("Failed to apply overlay on the idle page: {}", e);
                 }
 
@@ -444,7 +462,25 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     }
                 }
 
+                // Built before the navigation rather than after it: the control
+                // page is seeded with it so the next document is born with the
+                // badge. Read fresh rather than taken from the playlist
+                // snapshot: that snapshot is read once per inner-loop pass and
+                // can be a whole item duration old, so an overlay edited while
+                // the previous item was up would otherwise appear one full
+                // rotation late.
+                let item_overlay = crate::db::load_item_overlay(&state.pool, item.id).await;
+                let overlay =
+                    crate::settings::overlay_payload(&state, &display, item_overlay.as_ref()).await;
+
                 if do_navigate {
+                    if let Err(e) = seed_overlay_runtime(&dynamic_page, &mut overlay_seed, &overlay).await {
+                        debug!("Failed to seed the overlay: {}", e);
+                        if is_connection_lost(&e) {
+                            reconnect_needed = true;
+                            break;
+                        }
+                    }
                     if let Err(e) = navigate_page(&active_page, &target_url).await {
                         error!("Navigation failed: {}", e);
                         if is_connection_lost(&e) {
@@ -478,14 +514,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     }
                 }
 
-                // Read fresh rather than taken from the playlist snapshot: that
-                // snapshot is read once per inner-loop pass and can be a whole
-                // item duration old, so an overlay edited while the previous item
-                // was up would otherwise appear one full rotation late.
-                let item_overlay = crate::db::load_item_overlay(&state.pool, item.id).await;
-                if let Err(e) =
-                    apply_overlay(&state, &display, &active_page, item_overlay.as_ref()).await
-                {
+                if let Err(e) = apply_overlay_payload(&active_page, &overlay).await {
                     error!("Failed to apply overlay: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -531,9 +560,20 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                             // item's own layer.
                             let fresh =
                                 crate::db::load_item_overlay(&state.pool, item.id).await;
-                            if let Err(e) =
-                                apply_overlay(&state, &display, &active_page, fresh.as_ref())
-                                    .await
+                            let payload = crate::settings::overlay_payload(
+                                &state, &display, fresh.as_ref()).await;
+                            // Re-seeded too, when the item is on the control
+                            // page: the page may navigate itself before the loop
+                            // does, and it must come back with this badge, not
+                            // the one from before the edit.
+                            if do_navigate {
+                                if let Err(e) = seed_overlay_runtime(
+                                    &dynamic_page, &mut overlay_seed, &payload).await
+                                {
+                                    debug!("Failed to re-seed the overlay: {}", e);
+                                }
+                            }
+                            if let Err(e) = apply_overlay_payload(&active_page, &payload).await
                             {
                                 error!("Failed to re-apply overlay: {}", e);
                                 if is_connection_lost(e.as_ref()) {
@@ -678,6 +718,7 @@ async fn run_override_loop(
     browser: &Browser,
     attached_events: &mut EventStream<EventAttachedToTarget>,
     page: &Page,
+    overlay_seed: &mut OverlaySeed,
     mut override_item: OverrideItem,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
@@ -685,6 +726,8 @@ async fn run_override_loop(
         info!("Override active. Navigating to: {}", target_url);
 
         let _ = page.bring_to_front().await;
+        let overlay = crate::settings::overlay_payload(state, display, None).await;
+        seed_overlay_runtime(page, overlay_seed, &overlay).await?;
         navigate_page(page, &target_url).await?;
         let _ = drain_attached_target_events(browser, attached_events, Duration::from_millis(700)).await;
         let _ = install_runtime_for_known_pages(browser).await;
@@ -693,7 +736,7 @@ async fn run_override_loop(
         if !uses_internal_viewer {
             start_scrolling(page, &override_item.scroll_config).await?;
         }
-        if let Err(e) = apply_overlay(state, display, page, None).await {
+        if let Err(e) = apply_overlay_payload(page, &overlay).await {
             error!("Failed to apply overlay on the override page: {}", e);
         }
 
@@ -708,7 +751,13 @@ async fn run_override_loop(
                 _ = display.override_signal.notified() => {},
                 _ = display.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
-                    if let Err(e) = apply_overlay(state, display, page, None).await {
+                    let payload = crate::settings::overlay_payload(state, display, None).await;
+                    if let Err(e) = seed_overlay_runtime(page, overlay_seed, &payload).await {
+                        debug!("Failed to re-seed the overlay: {}", e);
+                    }
+                    // Touches nothing but the badge, so a live RTCPeerConnection
+                    // survives it.
+                    if let Err(e) = apply_overlay_payload(page, &payload).await {
                         error!("Failed to re-apply overlay: {}", e);
                     }
                     continue;
@@ -801,11 +850,14 @@ fn playlist_target_url(state: &AppState, item: &PlaylistItemWithAsset) -> String
         if !full_path.exists() {
             return no_content_url(state.args.port);
         }
-
-        if is_internal_pdf_mimetype(item.mimetype.as_deref()) {
-            return internal_pdf_viewer_url(state.args.port, path, &item.scroll_config.0);
-        }
-        return format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", state.args.port, path);
+        return asset_target_url(
+            state.args.port,
+            path,
+            item.mimetype.as_deref(),
+            &item.scroll_config.0,
+            FitMode::from_value(&item.fit_mode),
+            &item.fit_background,
+        );
     }
 
     no_content_url(state.args.port)
@@ -817,13 +869,60 @@ fn override_target_url(state: &AppState, item: &OverrideItem) -> String {
     }
 
     if let Some(path) = &item.local_path {
-        if is_internal_pdf_mimetype(item.mimetype.as_deref()) {
-            return internal_pdf_viewer_url(state.args.port, path, &item.scroll_config);
-        }
-        return format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", state.args.port, path);
+        return asset_target_url(
+            state.args.port,
+            path,
+            item.mimetype.as_deref(),
+            &item.scroll_config,
+            item.fit_mode,
+            &item.fit_background,
+        );
     }
 
     "about:blank".to_string()
+}
+
+/// Where an asset is shown, given what it is and how its item wants it to sit.
+///
+/// Images and videos go through `media_viewer.html` rather than to `/uploads/`
+/// directly: navigated to directly, Chromium builds its own image or media
+/// document, whose layout no setting of ours can reach and whose video comes
+/// with a control bar nothing turns off. PDFs keep their own viewer; anything
+/// else is navigated to as before. The existence check stays with the caller,
+/// so this is testable without an `AppState`.
+fn asset_target_url(
+    port: u16,
+    local_path: &str,
+    mimetype: Option<&str>,
+    scroll: &ScrollMode,
+    fit: FitMode,
+    background: &str,
+) -> String {
+    if is_internal_pdf_mimetype(mimetype) {
+        return internal_pdf_viewer_url(port, local_path, scroll, fit, background);
+    }
+    if let Some(kind) = media_kind(mimetype) {
+        return format!(
+            "http://127.0.0.1:{}/media_viewer.html?asset={}&kind={}&fit={}&bg={}",
+            port,
+            encode(local_path),
+            kind,
+            fit.as_str(),
+            encode(background)
+        );
+    }
+    format!("http://127.0.0.1:{}/uploads/{}#toolbar=0&navpanes=0&view=FitH", port, local_path)
+}
+
+fn media_kind(mimetype: Option<&str>) -> Option<&'static str> {
+    let m = mimetype.unwrap_or_default().to_ascii_lowercase();
+    if m.starts_with("image/") {
+        Some("image")
+    } else if m.starts_with("video/") {
+        Some("video")
+    } else {
+        None
+    }
 }
 
 fn is_internal_pdf_mimetype(mimetype: Option<&str>) -> bool {
@@ -835,7 +934,13 @@ fn is_internal_pdf_viewer_url(url: &str) -> bool {
     url.contains("/pdf_viewer.html?")
 }
 
-fn internal_pdf_viewer_url(port: u16, local_path: &str, mode: &ScrollMode) -> String {
+fn internal_pdf_viewer_url(
+    port: u16,
+    local_path: &str,
+    mode: &ScrollMode,
+    fit: FitMode,
+    background: &str,
+) -> String {
     let mut query = vec![format!("asset={}", encode(local_path))];
     match mode {
         ScrollMode::None => {
@@ -859,6 +964,9 @@ fn internal_pdf_viewer_url(port: u16, local_path: &str, mode: &ScrollMode) -> St
             }
         }
     }
+
+    query.push(format!("fit={}", fit.as_str()));
+    query.push(format!("bg={}", encode(background)));
 
     format!(
         "http://127.0.0.1:{}/pdf_viewer.html?{}",
@@ -1431,23 +1539,73 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
     Ok(())
 }
 
-/// Put the operator's badge on the page, or take it off again.
+/// The overlay registration the control page carries for its next document.
+///
+/// Held per CDP connection: a registration belongs to the session that made
+/// it, so a reconnect starts from nothing.
+#[derive(Default)]
+struct OverlaySeed {
+    id: Option<ScriptIdentifier>,
+    payload: Option<Value>,
+}
+
+/// Register the overlay runtime for `page`'s next document, carrying `payload`,
+/// so the badge is drawn the moment that document exists rather than after the
+/// readiness waits -- the gap that made it blink at every item change. It also
+/// covers a page that navigates itself (a dashboard on a meta refresh), which
+/// the controller never re-applies to.
+///
+/// Replaces the registration `seed` holds rather than adding beside it: every
+/// registration runs on every navigation for as long as the session lives, so
+/// one per item change is a leak that also runs N copies of the runtime.
+/// Unchanged payloads are skipped, so the idle branch calling this every five
+/// seconds costs nothing.
+async fn seed_overlay_runtime(
+    page: &Page,
+    seed: &mut OverlaySeed,
+    payload: &Value,
+) -> Result<(), CdpError> {
+    if seed.id.is_some() && seed.payload.as_ref() == Some(payload) {
+        return Ok(());
+    }
+    if let Some(previous) = seed.id.take() {
+        // Not fatal on its own: a registration that is already gone is exactly
+        // the state we want. A lost connection fails the add below as well.
+        if let Err(e) = page
+            .execute(RemoveScriptToEvaluateOnNewDocumentParams::new(previous))
+            .await
+        {
+            debug!("Could not remove the previous overlay registration: {}", e);
+        }
+    }
+    let script = format!(
+        "globalThis.__ovSeeds = (globalThis.__ovSeeds || 0) + 1;\nglobalThis.__ovSeed = {};\n{}",
+        serde_json::to_string(payload).unwrap_or_else(|_| "null".to_string()),
+        overlay_runtime_script()
+    );
+    let added = page
+        .execute(AddScriptToEvaluateOnNewDocumentParams::new(script))
+        .await?;
+    seed.id = Some(added.result.identifier);
+    seed.payload = Some(payload.clone());
+    Ok(())
+}
+
+/// Put the operator's badge on the page on screen, or take it off again.
+///
+/// Evaluated after navigation as well as seeded before it, because a strict
+/// CSP can block the registered copy -- on such a page this is the only thing
+/// that draws the badge, and it blinks there exactly as before. With the seed
+/// in place the payload is identical and re-applying it is invisible.
 ///
 /// No-ops when the runtime is missing, the same way `apply_scroll_settings`
 /// does: a page that blocked the injection must not stall the playlist. The
-/// configuration is resolved by `settings::overlay_payload`, so the display and
-/// the operator's preview cannot render different things.
-async fn apply_overlay(
-    state: &AppState,
-    // The screen this page belongs to. Passed rather than resolved: the cast
-    // session `overlay_payload` consults is that display's own, so resolving
-    // here would let a cast on one panel hide the notice on another.
-    display: &Display,
+/// payload comes from `settings::overlay_payload`, so the display and the
+/// operator's preview cannot render different things.
+async fn apply_overlay_payload(
     page: &Page,
-    item: Option<&crate::settings::ItemOverlay>,
+    payload: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let payload = crate::settings::overlay_payload(state, display, item).await;
-
     let _ = page.evaluate(overlay_runtime_script()).await;
     let has_api: bool = page
         .evaluate("(() => !!globalThis.__ov)()")
@@ -1461,9 +1619,63 @@ async fn apply_overlay(
 
     let script = format!(
         "(() => globalThis.__ov.apply({}))()",
-        serde_json::to_string(&payload).unwrap_or_else(|_| "null".to_string())
+        serde_json::to_string(payload).unwrap_or_else(|_| "null".to_string())
     );
     let shown: bool = page.evaluate(script).await?.into_value().unwrap_or(false);
     debug!("Overlay applied (visible: {})", shown);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::FitMode;
+
+    #[test]
+    fn an_image_goes_through_the_media_viewer_with_its_fit() {
+        let url = asset_target_url(3000, "a b.png", Some("image/png"), &ScrollMode::None,
+                                   FitMode::Cover, "#00ff00");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:3000/media_viewer.html?asset=a%20b.png&kind=image&fit=cover&bg=%2300ff00"
+        );
+    }
+
+    #[test]
+    fn a_video_goes_through_the_media_viewer_as_a_video() {
+        let url = asset_target_url(3000, "clip.mp4", Some("video/mp4"), &ScrollMode::None,
+                                   FitMode::Contain, "#000000");
+        assert!(url.contains("/media_viewer.html?"), "{url}");
+        assert!(url.contains("kind=video"), "{url}");
+    }
+
+    #[test]
+    fn a_pdf_keeps_its_own_viewer_and_is_told_its_fit() {
+        let url = asset_target_url(3000, "doc.pdf", Some("application/pdf"), &ScrollMode::None,
+                                   FitMode::Height, "#112233");
+        assert!(url.contains("/pdf_viewer.html?"), "{url}");
+        assert!(url.contains("&fit=height"), "{url}");
+        assert!(url.contains("&bg=%23112233"), "{url}");
+        // Still exempt from start_scrolling: it drives its own scrolling.
+        assert!(is_internal_pdf_viewer_url(&url), "{url}");
+    }
+
+    #[test]
+    fn anything_else_is_navigated_to_directly() {
+        let url = asset_target_url(3000, "page.html", Some("text/html"), &ScrollMode::None,
+                                   FitMode::Cover, "#000000");
+        assert!(url.starts_with("http://127.0.0.1:3000/uploads/page.html"), "{url}");
+        let unknown = asset_target_url(3000, "blob", None, &ScrollMode::None,
+                                       FitMode::Contain, "#000000");
+        assert!(unknown.contains("/uploads/blob"), "{unknown}");
+    }
+
+    #[test]
+    fn the_media_viewer_is_not_exempt_from_scrolling() {
+        // `scroll` depends on the scroll runtime driving this page. Only the PDF
+        // viewer scrolls itself and is skipped by `start_scrolling`.
+        let url = asset_target_url(3000, "tall.png", Some("image/png"), &ScrollMode::None,
+                                   FitMode::Width, "#000000");
+        assert!(!is_internal_pdf_viewer_url(&url), "{url}");
+    }
 }
