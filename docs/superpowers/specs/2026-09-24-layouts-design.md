@@ -72,12 +72,18 @@ operator pick which screen to preview and says the layout stretches.
 - The overlay (global and the item's own), the freeze heartbeat and the
   screenshot all belong to the layout page itself — the top frame — and work
   unchanged.
+- **`keep_loaded` stays an item setting.** A layout item kept loaded keeps the
+  whole layout page in its tab, every widget frame with it: all its dashboards
+  stay signed in and live, and the next showing is instant. There is no per-widget
+  `keep_loaded`: a frame belongs to one page and cannot move between layouts, so
+  keeping a widget loaded could only mean keeping its layout loaded.
 - **Scroll per widget:** a cross-site frame is its own renderer and its own CDP
   target, and the registered runtimes do not reach it. The controller
   auto-attaches to the layout page's frame targets, installs the scroll runtime
   in each, and applies that widget's `scroll_config` (a frame knows its widget by
   its URL; the layout page gives each iframe a `name` of its widget index, which
-  the frame target reports).
+  the frame target reports). In a kept layout the runtime is installed once, when
+  it loads, and stays — as in a kept page today.
 
 ## Making framed pages work
 
@@ -95,9 +101,11 @@ Measured in a local lab (a page that forbids framing and logs in with a
 
 So, while a layout is on screen:
 
-- **Interception is scoped to frames of our layout page, not to a host list.**
+- **Interception is scoped to frames of our layout pages, not to a host list.**
   `Fetch.enable` on the browser session for `Document` responses; a response is
-  touched only when its frame is a descendant of the layout page's main frame.
+  touched only when its frame is a descendant of a layout page's main frame —
+  the one on screen *and* every kept-loaded one, so a dashboard renewing its
+  session in a background tab gets its cookie too.
   A short link, an SSO redirect to an identity provider, a dashboard's own
   redirect all land in that frame and work. The layout page itself and every
   top-level page — a playlist URL, a guest's page — are never touched.
@@ -139,8 +147,9 @@ Built with `createElement`, like every operator page.
 ## Cost
 
 Every cross-site widget is its own Chromium renderer process. Four dashboards
-side by side are nothing on kiosk2 and a lot for a Raspberry Pi 3; there is no
-artificial limit — the docs say what a layout costs.
+side by side are nothing on kiosk2 and a lot for a Raspberry Pi 3, and a kept
+layout holds its renderers permanently; there is no artificial limit — the docs
+say what a layout costs.
 
 ## Tests
 
