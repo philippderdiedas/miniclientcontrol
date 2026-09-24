@@ -38,6 +38,14 @@ impl Role {
     }
 }
 
+/// Who is casting, as the cast routes see it: a signed-in account or a cast
+/// session. Deliberately not an `Identity` -- it carries no role, so nothing
+/// that checks roles can be handed one.
+#[derive(Debug, Clone)]
+pub struct Caster {
+    pub name: String,
+}
+
 /// Who a request is. `user_id` is `None` for the command-line recovery admin
 /// and in open mode, where `open` says no account exists at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,7 +102,7 @@ impl AccountError {
 const MIN_PASSWORD: usize = 8;
 const SESSION_LIFETIME: &str = "+12 hours";
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     let digest = ring::digest::digest(&ring::digest::SHA256, text.as_bytes());
     digest.as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }

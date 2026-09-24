@@ -266,6 +266,14 @@ declaration.
   enabled admin cannot be removed, disabled or demoted
 - Scripts use HTTP Basic against the same accounts. With no account and no
   `--basic-auth-*` flags the operator API is open, as before.
+- Single sign-on: `GET /api/oidc/info` (open) → `{ configured, label,
+  local_passwords }`; `GET`/`PUT /api/oidc/config` (admin) — `{ issuer,
+  client_id, client_secret?, groups_claim, label, mapping: [{ group, target:
+  admin|manager|editor|cast }], everyone_casts, local_passwords }`; the secret is
+  write-only (`secret_set` on read), and the read adds `redirect_uri` and
+  `redirect_stable`. `GET /api/oidc/start?next=` and `GET /api/oidc/callback` are
+  the flow. With `local_passwords` off, `POST /api/login` and Basic refuse local
+  accounts; the command-line credential still works over Basic
 - An editor's content writes answer `202 { proposed, change, placeholder? }` and
   wait in a draft: `GET`/`DELETE /api/changesets/draft`,
   `DELETE /api/changesets/draft/requests/{id}`, `POST /api/changesets/draft/submit`.

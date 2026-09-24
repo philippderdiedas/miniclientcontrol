@@ -314,6 +314,18 @@ Managers keep the full history. Scripts
 sign in with HTTP Basic against the same accounts; the command-line credential is
 always the way back in.
 
+## Single sign-on
+
+With a provider configured on the admin page (any OpenID Connect provider:
+Nextcloud, Keycloak, Authentik, …) the login page offers "Mit ‹Anbieter›
+anmelden". The provider's groups decide what the person is here: a group mapped
+to Admin, Manager or Redakteur gives an account with that role — created on the
+first sign-in, updated on every later one, disabled when no mapped group is left.
+A group mapped to *Nur Casten* (or "alle vom Anbieter dürfen casten") gives no
+account at all, only a signed-in session for casting to screens set to *nur
+angemeldet*. Local passwords can be switched off once an admin has signed in
+through the provider; the command-line credential keeps working either way.
+
 ## Webhooks
 
 The controller knows things nobody else does: a cast started, the display browser

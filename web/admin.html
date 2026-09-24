@@ -57,6 +57,11 @@
        between them once there is more than one to tell apart. */
     .castscreen { margin-bottom: .8rem; }
     .castscreen:last-child { margin-bottom: 0; }
+    /* The single sign-on card: labelled fields in a grid, like the other operator pages. */
+    #ssoCard .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: .6rem 1rem; margin-bottom: .6rem; }
+    #ssoCard label.f { display: flex; flex-direction: column; gap: .2rem; font-size: .9rem; color: #555; margin: 0; }
+    #ssoCard input:not([type=checkbox]), #ssoCard select { font: inherit; padding: .3rem .4rem; }
+    #ssoCard .row { margin-bottom: .4rem; }
     .castscreen p { margin: .25rem 0; }
     .castscreen .screen { color: #0b6b3a; }
   </style>
@@ -147,6 +152,15 @@
       <a href="/users.html">Benutzer</a> verwaltet. Die Gästeseite bleibt offen —
       wer überträgt, wird über den Zugang oben geregelt.
     </p>
+  </div>
+
+  <div class="card" id="ssoCard">
+    <p class="status">Single Sign-on (OpenID Connect)</p>
+    <div id="ssoForm"></div>
+    <div class="row">
+      <button id="ssoSave" class="primary">SSO speichern</button>
+      <span class="muted" id="ssoFeedback"></span>
+    </div>
   </div>
   </div>
 
@@ -915,13 +929,105 @@
     setInterval(refreshCast, 2000);
   </script>
   <script>
+    // Single sign-on: the provider, what its groups mean here, and whether local
+    // passwords still work. The secret is write-only: an empty field keeps it.
+    (() => {
+      const make = (tag, props = {}, ...children) => {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(props)) {
+          if (k === 'text') node.textContent = v;
+          else node[k] = v;
+        }
+        for (const c of children) if (c) node.append(c);
+        return node;
+      };
+      const labelled = (text, input) => make('label', { className: 'f' }, make('span', { text }), input);
+      const TARGETS = [['editor', 'Redakteur'], ['manager', 'Manager'], ['admin', 'Admin'], ['cast', 'Nur Casten']];
+      const form = document.getElementById('ssoForm');
+      const feedback = document.getElementById('ssoFeedback');
+      const issuer = make('input', { placeholder: 'https://login.example.org/realms/fablab' });
+      const clientId = make('input');
+      const secret = make('input', { type: 'password', autocomplete: 'new-password' });
+      const claim = make('input');
+      const label = make('input');
+      const everyone = make('input', { type: 'checkbox' });
+      const local = make('input', { type: 'checkbox' });
+      const redirect = make('code');
+      const unstable = make('p', { className: 'bad', hidden: true,
+        text: 'Achtung: Diese Adresse ist die aktuelle LAN-Adresse und kann sich ändern. '
+            + 'Für SSO eine feste Adresse vergeben oder --public-url setzen, sonst lehnt der Anbieter '
+            + 'die Rückleitung nach einem Wechsel ab.' });
+      const rows = make('div');
+      const row = (group = '', target = 'editor') => {
+        const g = make('input', { value: group, placeholder: 'Gruppe', style: 'width:180px' });
+        const t = make('select', {}, ...TARGETS.map(([v, text]) => make('option', { value: v, text })));
+        t.value = target;
+        const remove = make('button', { type: 'button', text: '×', title: 'Zeile entfernen' });
+        const line = make('div', { className: 'row' }, g, ' → ', t, ' ', remove);
+        line._read = () => ({ group: g.value.trim(), target: t.value });
+        remove.addEventListener('click', () => line.remove());
+        rows.append(line);
+      };
+      const add = make('button', { type: 'button', text: '+ Gruppe' });
+      add.addEventListener('click', () => row());
+      form.append(
+        make('div', { className: 'grid' },
+          labelled('Anbieter (Issuer)', issuer), labelled('Client-ID', clientId),
+          labelled('Client-Secret', secret), labelled('Gruppen-Claim', claim), labelled('Button-Text', label)),
+        make('p', { className: 'muted', text: 'Gruppen und was sie hier bedeuten:' }),
+        rows, add,
+        make('p', {}, make('label', { className: 'inline' }, everyone, make('span', { text: ' Alle vom Anbieter dürfen casten' }))),
+        make('p', {}, make('label', { className: 'inline' }, local, make('span', { text: ' Lokale Passwörter erlaubt' }))),
+        make('p', { className: 'muted' }, make('span', { text: 'Redirect-URI beim Anbieter eintragen: ' }), redirect),
+        unstable);
+
+      async function load() {
+        const res = await fetch('/api/oidc/config');
+        if (!res.ok) return;
+        const c = await res.json();
+        issuer.value = c.issuer || '';
+        clientId.value = c.client_id || '';
+        secret.value = '';
+        secret.placeholder = c.secret_set ? 'gesetzt' : '';
+        claim.value = c.groups_claim || 'groups';
+        label.value = c.label || '';
+        everyone.checked = !!c.everyone_casts;
+        local.checked = c.local_passwords !== false;
+        redirect.textContent = c.redirect_uri || '';
+        unstable.hidden = c.redirect_stable !== false;
+        rows.replaceChildren();
+        for (const m of c.mapping || []) row(m.group, m.target);
+      }
+
+      document.getElementById('ssoSave').addEventListener('click', async () => {
+        const body = {
+          issuer: issuer.value.trim(),
+          client_id: clientId.value.trim(),
+          groups_claim: claim.value.trim(),
+          label: label.value.trim(),
+          mapping: [...rows.children].map((line) => line._read()).filter((m) => m.group),
+          everyone_casts: everyone.checked,
+          local_passwords: local.checked,
+        };
+        if (secret.value) body.client_secret = secret.value;
+        const res = await fetch('/api/oidc/config', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const answer = await res.json().catch(() => ({}));
+        feedback.textContent = res.ok ? 'Gespeichert.' : (answer.error || `Fehler (HTTP ${res.status})`);
+        if (res.ok) load();
+      });
+      load();
+    })();
+  </script>
+  <script>
     // Settings, casting, audio and the credential card are an admin's; the
     // server refuses them to other roles anyway, so a manager or editor is not
     // shown controls that could only fail.
     Me.bar();
     Me.load().then((me) => {
       if (!me || Me.atLeast('admin')) return;
-      for (const id of ['castCard', 'audioCard', 'authCard', 'localeCard', 'overlayCard']) {
+      for (const id of ['castCard', 'audioCard', 'authCard', 'ssoCard', 'localeCard', 'overlayCard']) {
         // Hidden by style, not removed: the page's own code still fills these
         // cards, and toggles `hidden` on some of them.
         const node = document.getElementById(id);

@@ -290,6 +290,8 @@ mod tests {
             locks: Default::default(),
             login_attempts: Default::default(),
             basic_cache: Default::default(),
+            oidc: Default::default(),
+            oidc_pending: Default::default(),
             rescue: None,
             router: Default::default(),
             audio: Arc::new(crate::audio::Backend::Unavailable),

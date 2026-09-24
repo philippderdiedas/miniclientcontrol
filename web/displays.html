@@ -228,7 +228,7 @@
 
       // Who may use this screen, per mode. Below the venue's switches: with a
       // mode off everywhere the choice here is kept but cannot apply.
-      const ACCESS = [['anyone', 'jeder'], ['account', 'nur Konto'], ['off', 'aus']];
+      const ACCESS = [['anyone', 'jeder'], ['account', 'nur angemeldet'], ['off', 'aus']];
       const accessSelect = (value, venueOn, what) => {
         const select = el('select', { onchange: markDirty },
           ...ACCESS.map(([v, text]) => el('option', { value: v, text })));

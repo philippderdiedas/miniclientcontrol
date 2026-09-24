@@ -11,10 +11,15 @@
     input { font: inherit; padding: .45rem .5rem; }
     button { font: inherit; padding: .5rem 1rem; background: #0b6b3a; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
     .err { color: #a11; min-height: 1.4em; }
+    a.sso { display: block; text-align: center; padding: .55rem 1rem; margin: 1rem 0; border: 1px solid #0b6b3a;
+            border-radius: 4px; color: #0b6b3a; text-decoration: none; }
+    a.sso[hidden] { display: none; }
   </style>
 </head>
 <body>
   <h1>Mini Client Control</h1>
+  <p class="err" id="ssoError"></p>
+  <a class="sso" id="sso" hidden></a>
   <form id="form">
     <label>Name <input id="name" autocomplete="username" required autofocus /></label>
     <label>Passwort <input id="password" type="password" autocomplete="current-password" required /></label>
@@ -26,6 +31,25 @@
     // turn the login page into a redirect to wherever a link says.
     const wanted = new URLSearchParams(location.search).get('next') || '/admin.html';
     const next = wanted.startsWith('/') && !wanted.startsWith('//') ? wanted : '/admin.html';
+
+    // Single sign-on, when the venue set it up: a button through the provider,
+    // carrying `next`, and no password form when local passwords are off.
+    const SSO_MESSAGES = {
+      off: 'Single Sign-on ist nicht eingerichtet.',
+      unreachable: 'Der Anmelde-Anbieter ist gerade nicht erreichbar.',
+    };
+    const ssoState = new URLSearchParams(location.search).get('sso');
+    if (SSO_MESSAGES[ssoState]) document.getElementById('ssoError').textContent = SSO_MESSAGES[ssoState];
+    fetch('/api/oidc/info').then((res) => (res.ok ? res.json() : null)).then((info) => {
+      if (!info) return;
+      if (info.configured) {
+        const link = document.getElementById('sso');
+        link.textContent = `Mit ${info.label} anmelden`;
+        link.href = `/api/oidc/start?next=${encodeURIComponent(next)}`;
+        link.hidden = false;
+      }
+      if (info.local_passwords === false) document.getElementById('form').hidden = true;
+    }).catch(() => { /* the form still works */ });
 
     document.getElementById('form').addEventListener('submit', async (event) => {
       event.preventDefault();

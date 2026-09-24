@@ -35,7 +35,7 @@ pub(super) async fn authorize_sender(
     addr: IpAddr,
     provided: Option<&str>,
     mode: ClaimMode,
-    who: Option<&crate::accounts::Identity>,
+    who: Option<&crate::accounts::Caster>,
 ) -> Result<(), SenderRefusal> {
     let settings = {
         let settings = state.settings.read().await;
@@ -276,7 +276,7 @@ pub async fn cast_state(
 pub async fn cast_info(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    identity: Option<axum::Extension<crate::accounts::Identity>>,
+    identity: Option<axum::Extension<crate::accounts::Caster>>,
 ) -> impl IntoResponse {
     // Who this browser is signed in as, so the guest page can show it and a
     // screen kept for accounts does not ask a member to sign in again.
@@ -398,7 +398,7 @@ pub struct ClaimRequest {
 pub async fn claim_session(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    identity: Option<axum::Extension<crate::accounts::Identity>>,
+    identity: Option<axum::Extension<crate::accounts::Caster>>,
     Json(payload): Json<ClaimRequest>,
 ) -> Response {
     if state.args.disable_cast {

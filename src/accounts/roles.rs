@@ -29,6 +29,8 @@ pub fn required(method: &Method, path: &str) -> Need {
 
         // A webhook target's headers are where somebody else's API token lives,
         // so even reading the list is an admin's.
+        (true, ["api", "oidc", "info" | "start" | "callback"]) => Need::Open,
+        (_, ["api", "oidc", "config"]) => Need::Admin,
         (true, ["api", "webhooks", ..]) | (true, ["api", "users", ..]) => Need::Admin,
         (true, ["api", "changesets", "draft", ..]) => Need::Read,
         (true, ["api", "changesets", "mine"]) => Need::Read,
@@ -113,6 +115,11 @@ mod tests {
             (Method::POST, "/api/changesets/mine/hide-decided", Need::Read),
             (Method::POST, "/api/changesets/3/withdraw", Need::Read),
             (Method::POST, "/api/changesets/3/hide", Need::Read),
+            (Method::GET, "/api/oidc/info", Need::Open),
+            (Method::GET, "/api/oidc/start", Need::Open),
+            (Method::GET, "/api/oidc/callback", Need::Open),
+            (Method::GET, "/api/oidc/config", Need::Admin),
+            (Method::PUT, "/api/oidc/config", Need::Admin),
         ];
         for (method, path, need) in cases {
             assert_eq!(required(method, path), *need, "{method} {path}");

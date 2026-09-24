@@ -1,3 +1,4 @@
+mod oidc;
 mod advance;
 mod db;
 mod display;
@@ -208,6 +209,8 @@ async fn main() -> Result<()> {
         locks,
         login_attempts: Arc::new(Mutex::new(Default::default())),
         basic_cache: Arc::new(Mutex::new(Default::default())),
+        oidc: Arc::new(tokio::sync::RwLock::new(crate::oidc::config::load(&pool).await)),
+        oidc_pending: Arc::new(Mutex::new(Default::default())),
         rescue: args.basic_auth_user.clone().zip(args.basic_auth_password.clone()),
         router: Default::default(),
         audio: Arc::new(audio::Backend::detect().await),
@@ -293,6 +296,7 @@ async fn main() -> Result<()> {
         // template.
         .merge(webhook::api::routes())
         .merge(accounts::api::routes())
+        .merge(oidc::api::routes())
         .merge(proposals::api::routes())
         .with_state(state.clone());
 

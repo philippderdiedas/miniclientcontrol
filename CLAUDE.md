@@ -78,8 +78,9 @@ the rules that break it:
   the moment basic auth is switched on.
 - **`cast::is_cast_public_path`** is exempt **regardless of address**, because the
   guest is by definition not loopback.
-- **The cast branch recognises an account but never requires one.** A valid
-  session cookie attaches the `Identity` — for a write only with this host's
+- **The cast branch recognises a signed-in person but never requires one.** A
+  valid account session *or* single-sign-on cast session attaches a `Caster`
+  (a name, no role — deliberately not an `Identity`) — for a write only with this host's
   `Origin`, or another site could claim a screen with a member's cookie; a read
   needs none, because browsers send no `Origin` on a same-origin `GET`. Without
   a cookie the request is a guest exactly as before, and HTTP Basic is ignored
@@ -856,6 +857,48 @@ default.
 Targets are read fresh on every event and never cached: an operator who disables
 one expects the *next* event to respect it, and it is a table with single-digit
 rows.
+
+## Single sign-on (`src/oidc/`)
+
+What it is: [docs/features.md](docs/features.md#single-sign-on); registering the
+device at a provider: [docs/deployment.md](docs/deployment.md#single-sign-on-with-openid-connect).
+The rules:
+
+- **Not `reqwest`**, for the reason `managed_cert.rs` gives; `oidc::http` is
+  hyper + tokio-rustls, and ID tokens are verified on `ring` directly
+  (`oidc::jwt`). A JWT crate is one more dependency to prove against the armv7
+  cross build. A key that names its `alg` verifies only that algorithm; `none`
+  and anything but RS256/ES256/HS256 are refused.
+- **Accounts are linked by `(issuer, subject)` in `user_identities`, never by
+  name.** A provider account called `admin` must not become the local one; a
+  taken name gets `-sso`. An SSO account's `password_hash` is `''`, which
+  `verify_hash` refuses — `users` is not rebuilt to make the column nullable,
+  because `sessions` and `changesets` hold foreign keys into it.
+- **The role follows the groups at every sign-in**, and no mapped group
+  disables the account and ends its sessions. Removal is only learned at a
+  sign-in; there is no back-channel logout.
+- **A cast-only sign-in creates no account.** It is a row in `cast_sessions`
+  under its own cookie `mcc_cast`, and only the middleware's cast branch reads
+  it — as a `Caster`. The ordinary `resolve` never sees that table or cookie,
+  so no role check anywhere can be handed a cast session by mistake.
+- **The callback answers with a page that navigates itself, never a `302`.**
+  The session cookie is `SameSite=Strict`, and a redirect chain that began on
+  the provider's site does not carry it to the next request — the sign-in would
+  land on the login page again. The `mcc_oidc` binding cookie is `Lax` for the
+  same reason in the other direction: the callback itself is that cross-site
+  navigation. A `state` is single use and must match that cookie.
+- **`start` first moves the browser to the canonical address**, the one in the
+  redirect URI (`oidc::config::redirect_uri`, built from `cast::sender_url` and
+  nowhere else). Starting on another name puts the binding cookie and the
+  session cookie on two different hosts.
+- **Local passwords off never touches the command-line credential**, over Basic
+  — it is the way back when the provider is unreachable. Switching them off is
+  refused without a configured provider and an enabled SSO admin, and clears
+  `basic_cache`.
+- The Python harness's provider signs **HS256**, because the suite is
+  stdlib-only; RS256/ES256 are covered in Rust against fixtures made by
+  `scripts/oidc-fixtures.sh`. `--public-url 127.0.0.1` makes the canonical
+  address one the harness can reach.
 
 ## Settings (`src/settings.rs`)
 

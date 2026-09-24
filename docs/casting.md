@@ -246,7 +246,8 @@ the display is showing. The public endpoint never carries it.
 
 The code answers *whether a guest is in the room*; each screen also says *who*
 may use it, separately for casting and for showing a page: **jeder**, **nur
-Konto** or **aus**, on the displays page. Any account counts, whatever its role.
+angemeldet** or **aus**, on the displays page. Any account counts, whatever its
+role, and so does a member signed in through single sign-on only to cast.
 A screen kept for accounts shows a guest "Anmelden zum Casten", which signs in
 on the same address and comes back; a signed-in member still types the code —
 an account in the next room should not take over the foyer. The venue's own

@@ -1,6 +1,6 @@
 # Single sign-on with OpenID Connect
 
-Status: design, approved in conversation on 2026-09-24.
+Status: implemented (designed and approved in conversation on 2026-09-24).
 
 ## What and why
 
@@ -166,3 +166,19 @@ functions; the redirect URI built from `sender_url`.
 Back-channel or front-channel logout, refresh tokens (the controller's own session
 is what lasts), several providers at once, provider-specific group APIs, and API
 tokens for scripts.
+
+## Amendments made while implementing
+
+- **A cast session is attached as a `Caster`, not an `Identity`.** A type with a
+  name and no role cannot be handed to anything that checks roles; an `Identity`
+  with a "cast-only" marker could. Account sessions reach the cast routes as a
+  `Caster` too.
+- **The callback answers with a page that navigates itself**, not a redirect: the
+  session cookie is `SameSite=Strict`, and a redirect chain that began on the
+  provider's site would not carry it. Verified in a real Chrome.
+- **`start` first moves the browser to the canonical address** (the redirect
+  URI's origin). Beginning under another name put the binding cookie and the
+  session cookie on different hosts.
+- **The command-line credential works over Basic**, not the form — it never had
+  an account row and never signed in through the form; that is unchanged.
+- **A key that names its `alg` verifies only that algorithm.**

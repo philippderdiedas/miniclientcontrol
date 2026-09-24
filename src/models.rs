@@ -498,6 +498,10 @@ pub struct AppState {
     /// is slow by design and a page polls every two seconds; cleared whenever
     /// any account changes, so an old password stops working at once.
     pub basic_cache: Arc<Mutex<std::collections::HashMap<String, crate::accounts::Identity>>>,
+    /// The OpenID Connect provider and what its groups mean here.
+    pub oidc: Arc<tokio::sync::RwLock<crate::oidc::config::OidcConfig>>,
+    /// Sign-ins on their way through the provider, by `state`.
+    pub oidc_pending: Arc<Mutex<std::collections::HashMap<String, crate::oidc::flow::Pending>>>,
     /// The command-line credential: a built-in admin, never stored.
     pub rescue: Option<(String, String)>,
     /// The application's own router, for replaying an approved proposal

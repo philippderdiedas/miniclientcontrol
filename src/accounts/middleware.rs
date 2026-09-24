@@ -30,16 +30,21 @@ pub struct ReplayIdentity(pub Identity);
 #[derive(Clone)]
 pub struct ViaTls;
 
-pub fn session_token(headers: &HeaderMap) -> Option<String> {
+/// One cookie's value, if the request carries it non-empty.
+pub fn cookie(headers: &HeaderMap, wanted: &str) -> Option<String> {
     headers
         .get_all(header::COOKIE)
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
         .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, _)| *name == SESSION_COOKIE)
+        .find(|(name, _)| *name == wanted)
         .map(|(_, value)| value.to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub fn session_token(headers: &HeaderMap) -> Option<String> {
+    cookie(headers, SESSION_COOKIE)
 }
 
 fn decode_basic(value: &str) -> Option<(String, String)> {
@@ -71,9 +76,13 @@ async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, boo
                     return Some((Identity::rescue(rescue_user), false));
                 }
             }
-            if let Some(who) = super::verify_password(&state.pool, &user, &password).await {
-                state.basic_cache.lock().await.insert(value.to_string(), who.clone());
-                return Some((who, false));
+            // With local passwords off only the command-line credential above
+            // still works over Basic -- the way back in when the provider is gone.
+            if state.oidc.read().await.local_passwords {
+                if let Some(who) = super::verify_password(&state.pool, &user, &password).await {
+                    state.basic_cache.lock().await.insert(value.to_string(), who.clone());
+                    return Some((who, false));
+                }
             }
         }
     }
@@ -136,19 +145,28 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
     // The guest is by definition not loopback; exempt regardless of address.
-    // Exempt, but not blind: a signed-in member's session is recognised so a
-    // screen can be kept for accounts (`cast::access`). Never required -- a
-    // request without one proceeds exactly as a guest's -- and only from the
-    // cookie: a cached Basic credential must not turn a guest into an account.
-    // A write needs this host's `Origin`, or another site could claim a screen
-    // with a member's cookie; a read only tells the page who is signed in.
+    // Exempt, but not blind: a signed-in person is recognised so a screen can
+    // be kept for them (`cast::access`) -- an account's session, or a cast
+    // session from single sign-on, which exists nowhere else. Attached as a
+    // `Caster`, which carries no role. Never required -- a request without one
+    // proceeds exactly as a guest's -- and only from a cookie: a cached Basic
+    // credential must not turn a guest into an account. A write needs this
+    // host's `Origin`, or another site could claim a screen with a member's
+    // cookie; a read only tells the page who is signed in.
     if !state.args.disable_cast && crate::cast::is_cast_public_path(&path) {
-        if let Some(token) = session_token(request.headers()) {
-            let writing = method != Method::GET && method != Method::HEAD;
-            if !writing || same_origin(request.headers(), request.uri()) {
-                if let Some(who) = super::session_identity(&state.pool, &token).await {
-                    request.extensions_mut().insert(who);
+        let writing = method != Method::GET && method != Method::HEAD;
+        if !writing || same_origin(request.headers(), request.uri()) {
+            let mut name = match session_token(request.headers()) {
+                Some(token) => super::session_identity(&state.pool, &token).await.map(|who| who.name),
+                None => None,
+            };
+            if name.is_none() {
+                if let Some(token) = cookie(request.headers(), crate::oidc::flow::CAST_COOKIE) {
+                    name = crate::oidc::flow::cast_session_name(&state.pool, &token).await;
                 }
+            }
+            if let Some(name) = name {
+                request.extensions_mut().insert(super::Caster { name });
             }
         }
         return next.run(request).await;

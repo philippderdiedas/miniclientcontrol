@@ -374,6 +374,26 @@ SHA-256 of their cookie, so a copy of the database is not a copy of anybody's
 credentials. **Upgrading** a device that had one operator credential stored turns
 it into the first admin account on the first start, same name and password.
 
+## Single sign-on with OpenID Connect
+
+Register the device at the provider as a **confidential client** with the
+authorization-code flow, and enter the **redirect URI** the admin page's
+"Single Sign-on" card shows — `https://<device>/api/oidc/callback`, built from
+the same address guests are given. The provider must be able to name that
+address exactly, so give the device a **stable name**: a managed certificate, or
+`--public-url`. On a bare DHCP address the card warns, because the provider
+refuses a redirect URI that has changed.
+
+Ask for the scopes `openid profile groups`, and make the provider put the
+person's groups into the ID token under the claim the card names (`groups` by
+default — Keycloak needs a group-membership mapper, Authentik and Nextcloud's
+OIDC app send it when the scope is requested). The device verifies RS256 and
+ES256 against the provider's published keys, or HS256 with the client secret.
+
+The device must reach the provider over HTTPS when someone signs in. Offline,
+single sign-on does not work — which is why local passwords stay on by default
+and the command-line credential always works.
+
 ## A webhook target may hold somebody else's secret
 
 A webhook target's `headers` are where an API token goes — a Discord webhook

@@ -11,19 +11,7 @@ and leaves this file when it ships.
 
 ## Next
 
-### Single sign-on with OpenID Connect
-
-Signing in through the venue's identity provider instead of a local password, on
-top of the accounts from users-and-roles: an SSO account is the same `users` row
-with an issuer and subject instead of a password hash.
-
-Still open: which providers to test against; roles from a groups claim or assigned
-locally after the first sign-in; whether a first SSO sign-in creates an account or
-needs an admin to invite it; behaviour offline (local accounts stay as fallback).
-Technically: discovery, the authorization-code flow with PKCE and ID-token checks
-on the hyper + `tokio-rustls` client `managed_cert.rs` already uses and `ring` for
-the signatures — not `reqwest`, which does not cross-compile for armv7 here;
-verify with `cross build`.
+Nothing is queued; the next entry is picked from below.
 
 ## Later
 

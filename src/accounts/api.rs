@@ -70,6 +70,11 @@ async fn login(
         }
         entry.0 += 1;
     }
+    // Single sign-on only: no local account signs in here. (The command-line
+    // credential never did -- it has no account row -- and works over Basic.)
+    if !state.oidc.read().await.local_passwords {
+        return error(StatusCode::FORBIDDEN, "Lokale Anmeldung ist abgeschaltet – bitte per SSO anmelden.");
+    }
     let Some(who) = super::verify_password(&state.pool, &body.name, &body.password).await else {
         return error(StatusCode::UNAUTHORIZED, "Name oder Passwort stimmt nicht.");
     };

@@ -228,6 +228,33 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // An account's identity at an OpenID Connect provider. Linked by issuer and
+    // subject, never by name: a provider account called "admin" must not
+    // become the local one.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS user_identities (
+            issuer   TEXT NOT NULL,
+            subject  TEXT NOT NULL,
+            user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(issuer, subject)
+        );",
+    )
+    .execute(pool)
+    .await?;
+    // A signed-in person with no account, who may only cast. Its own table and
+    // its own cookie, so the ordinary session lookup cannot see it at all.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS cast_sessions (
+            token_hash TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            issuer     TEXT NOT NULL,
+            subject    TEXT NOT NULL,
+            expires_at DATETIME NOT NULL
+        );",
+    )
+    .execute(pool)
+    .await?;
+
     // An editor's proposals: a bundle, and the requests it holds, each with a
     // snapshot of the object as it read when proposed.
     sqlx::query(
