@@ -241,8 +241,12 @@ declaration.
 - `GET /api/displays` — the declared screens, plus any row for a screen this
   deployment no longer declares (`declared: false`), so its timetable can still
   be reassigned. Each entry carries its `schedule` (the body below)
-- `PUT /api/displays/{name}` — set `label`; `null` clears it. Anything else, the
-  former `playlist_id` included, is refused with `422`
+- `PUT /api/displays/{name}` — set `label` (`null` clears it) and who may use the
+  screen: `cast_access`, `page_access`, each `anyone`, `account` or `off`.
+  Switching a mode `off` ends that screen's running session of that mode.
+  Anything else, the former `playlist_id` included, is refused with `422`.
+  `GET /api/displays` returns both, plus `cast_user`: the account casting there,
+  or `null`
 - `GET /api/displays/{name}/schedule` — the screen's timetable:
   `{ default_playlist_id, windows: [{ weekdays, from, to, playlist_id }], overlaps, now }`.
   Weekdays are ISO numbers (Monday = 1), windows are in priority order, `to` may be
@@ -320,9 +324,11 @@ the playback routes follow.
   identified by its `ticket`, which already names the screen it was minted for; the
   display peer passes `?screen=`
 - `GET /api/cast/info` — public:
-  `{ enabled, page_enabled, auth, sender_url, screens: [{ name, label, busy,
-  max_edge }] }`. `busy` is relative to the asking address. `screens` is omitted
-  entirely when neither casting nor guest pages is reachable
+  `{ enabled, page_enabled, auth, sender_url, account, screens: [{ name, label, busy,
+  max_edge, cast_access, page_access }] }`. `busy` is relative to the asking
+  address; the two accesses are folded with the venue switches, and a screen off
+  for both modes is left out. `account` names the signed-in caller, or `null`.
+  `screens` is omitted entirely when neither casting nor guest pages is reachable
 - `GET /api/cast/qr.svg?screen=` — public: QR code for the guest URL. Same screen
   resolution as `/api/cast/state`, and follows `cast_qr_target` the same way: the
   address named or the bare chooser address, matching what is printed beside it
@@ -338,7 +344,9 @@ the playback routes follow.
 - `POST /api/cast/claim` — guest: check the code and reserve the session before
   sharing; returns a ticket the WebSocket needs. Takes
   `{ code?, mode: "cast" | "page", display? }` — the mode defaults to `cast` and
-  is settled here because the display is pinned as soon as the socket connects
+  is settled here because the display is pinned as soon as the socket connects.
+  A screen kept for accounts answers a guest `401`
+  `{ error, login: "/login.html?next=/" }`; a mode that is off there, `403`
 - `DELETE /api/cast/claim` — give the reservation back; takes `{ display? }`
 - `GET`/`POST /api/cast/audio?screen=` — the room audio, for the guest casting to
   that screen (see [Room audio](#room-audio) above)

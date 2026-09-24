@@ -47,6 +47,7 @@ use ::url::Url;
 use crate::guest_page::redact;
 use crate::models::{AppState, Display, OverrideItem, ScrollMode};
 
+pub mod access;
 mod api;
 mod room_audio;
 mod signaling;
@@ -119,6 +120,9 @@ struct Reservation {
     addr: IpAddr,
     expires_at: Instant,
     mode: ClaimMode,
+    /// The account that claimed it, or `None` for a guest. Carried onto the
+    /// session, where the socket's page check and "who cast" read it.
+    user: Option<String>,
     /// The screen this ticket was minted for. A session is per-display now, so
     /// a ticket is already absent from every other display's session -- this
     /// field is what makes a stray socket's refusal legible rather than
@@ -241,6 +245,8 @@ pub struct CastSession {
     cast_announced: bool,
     pairing: Option<Pairing>,
     reservation: Option<Reservation>,
+    /// The account behind the current session, or `None` for a guest.
+    user: Option<String>,
     /// Last limit a display announced. Deliberately kept when a session ends: it
     /// is a property of the hardware, not of the cast, and remembering it is what
     /// lets the *next* sender constrain its capture before the first frame
@@ -455,6 +461,7 @@ async fn activate_display(
     session.started_at = Some(chrono::Utc::now());
     session.epoch += 1;
     let epoch = session.epoch;
+    let user = session.user.clone();
     drop(session);
 
     display.override_signal.notify_one();
@@ -482,6 +489,7 @@ async fn activate_display(
             state.webhooks.fire(&display.name, crate::webhook::Event::GuestPageShown {
                 url: redact(url),
                 sender_ip: sender_ip.map(|addr| addr.to_string()).unwrap_or_default(),
+                user,
             });
             state.webhooks.fire(&display.name, crate::webhook::Event::OverrideSet {
                 url: redact(url),
@@ -540,6 +548,7 @@ async fn deactivate_display(state: &AppState, display: &Arc<Display>, reason: &'
     session.showing = Showing::Nothing;
     session.started_at = None;
     session.sender_addr = None;
+    session.user = None;
     session.pairing = None;
     session.reservation = None;
     session.cast_announced = false;
@@ -608,6 +617,28 @@ async fn deactivate_display(state: &AppState, display: &Arc<Display>, reason: &'
 /// The reason is threaded through rather than decided here, because the callers
 /// disagree about it: an operator's stop, a guest's own stop frame, three
 /// watchdogs giving up and the cast switch being turned off all end up here.
+/// What the screen's session is doing, if anything: its reservation's mode
+/// while it waits, what it shows once it runs. What `PUT /api/displays` needs to
+/// end exactly the session a switched-off mode is running.
+pub async fn running_mode(display: &Display) -> Option<ClaimMode> {
+    let session = display.cast.lock().await;
+    match &session.showing {
+        Showing::Cast => return Some(ClaimMode::Cast),
+        Showing::Page { .. } => return Some(ClaimMode::Page),
+        Showing::Nothing => {}
+    }
+    if session.sender.is_some() {
+        return Some(session.pending_mode);
+    }
+    session.live_reservation().map(|held| held.mode)
+}
+
+/// The account behind the screen's session, for the operator list.
+pub async fn session_user(display: &Display) -> Option<String> {
+    let session = display.cast.lock().await;
+    if session.is_active() { session.user.clone() } else { None }
+}
+
 pub async fn end_session(state: &AppState, display: &Arc<Display>, reason: &'static str) {
     let (sender_peer, display_peer) = {
         let mut session = display.cast.lock().await;
@@ -1264,13 +1295,13 @@ mod tests {
             let state = state.clone();
             let display = display.clone();
             handles.push(tokio::spawn(async move {
-                authorize_sender(&state, &display, addr, Some("ZZZZ"), ClaimMode::Cast).await
+                authorize_sender(&state, &display, addr, Some("ZZZZ"), ClaimMode::Cast, None).await
             }));
         }
 
         let mut evaluated = 0;
         for handle in handles {
-            if let Err(message) = handle.await.unwrap() {
+            if let Err(api::SenderRefusal::Forbidden(message)) = handle.await.unwrap() {
                 if message == "Falscher Code." {
                     evaluated += 1;
                 }

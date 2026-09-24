@@ -78,6 +78,15 @@ the rules that break it:
   the moment basic auth is switched on.
 - **`cast::is_cast_public_path`** is exempt **regardless of address**, because the
   guest is by definition not loopback.
+- **The cast branch recognises an account but never requires one.** A valid
+  session cookie attaches the `Identity` — for a write only with this host's
+  `Origin`, or another site could claim a screen with a member's cookie; a read
+  needs none, because browsers send no `Origin` on a same-origin `GET`. Without
+  a cookie the request is a guest exactly as before, and HTTP Basic is ignored
+  there. `cast::access` decides per screen and mode, in `authorize_sender` *and*
+  in the socket's `present` frame: the page mode reuses the ticket the code check
+  claimed in cast mode, so checking only the claim would let a guest show a page
+  on a screen kept for accounts.
 - **Keep the two separate.** Widening `is_display_path` exposes display-only paths
   to the whole LAN; narrowing the cast list locks guests out.
 - Both listeners must be started with
@@ -541,6 +550,14 @@ One session per declared screen, living on `Display`. What a guest sees and why:
 - **`cast_enabled` off ends every session**, looping the displays;
   `DELETE /api/displays/{name}/cast/session` ends one. The switches
   (`cast_enabled`, the auth mode, guest pages) are the venue's and stay global.
+  **Below them, each screen says who may use it per mode**
+  (`displays.cast_access`/`page_access`: `anyone`, `account`, `off`) and can only
+  narrow what the venue allows (`Access::effective`). Setting a screen's mode to
+  `off` ends that screen's session of that mode (`cast::running_mode`); `account`
+  does not end a running guest's, who was allowed when they started. The
+  account that claimed is carried from the `Reservation` onto the session
+  (`CastSession::user`), which is what `cast.started`/`guest_page.shown` and the
+  operator list name.
 - **`cast_qr_target` is read in three places and must stay that way**:
   `settings::overlay_payload` for the overlay QR, `cast_state` for the address a
   screen prints while idle, `cast::url::cast_qr` (`/api/cast/qr.svg`) for the

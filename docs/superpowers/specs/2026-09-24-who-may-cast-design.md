@@ -1,6 +1,6 @@
 # Who may cast
 
-Status: design, approved in conversation on 2026-09-24.
+Status: implemented (designed and approved in conversation on 2026-09-24).
 
 ## What and why
 

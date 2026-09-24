@@ -765,7 +765,7 @@ async def case_65():
               events_of(receiver))
         started = [b for b in receiver.bodies() if b["event"] == "cast.started"]
         check("it carries the sender's address and mode",
-              started and started[0]["data"] == {"sender_ip": "127.0.0.1", "mode": "cast"},
+              started and started[0]["data"] == {"sender_ip": "127.0.0.1", "mode": "cast", "user": None},
               started)
         check("and the display being pinned is its own event",
               await until_async(lambda: any(b["event"] == "override.set"

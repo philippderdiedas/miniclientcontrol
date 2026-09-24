@@ -62,6 +62,8 @@ pub enum Event {
     CastStarted {
         sender_ip: String,
         mode: String,
+        /// The account that cast, or `None` for a guest.
+        user: Option<String>,
     },
     CastEnded {
         reason: &'static str,
@@ -70,6 +72,8 @@ pub enum Event {
     GuestPageShown {
         url: String,
         sender_ip: String,
+        /// The account that showed it, or `None` for a guest.
+        user: Option<String>,
     },
     GuestPageEnded {
         reason: &'static str,
@@ -111,14 +115,14 @@ impl Event {
             Event::PlaylistEmpty => json!({}),
             Event::OverrideSet { url, source } => json!({ "url": url, "source": source }),
             Event::OverrideCleared { source } => json!({ "source": source }),
-            Event::CastStarted { sender_ip, mode } => {
-                json!({ "sender_ip": sender_ip, "mode": mode })
+            Event::CastStarted { sender_ip, mode, user } => {
+                json!({ "sender_ip": sender_ip, "mode": mode, "user": user })
             }
             Event::CastEnded { reason, duration_secs } => {
                 json!({ "reason": reason, "duration_secs": duration_secs })
             }
-            Event::GuestPageShown { url, sender_ip } => {
-                json!({ "url": url, "sender_ip": sender_ip })
+            Event::GuestPageShown { url, sender_ip, user } => {
+                json!({ "url": url, "sender_ip": sender_ip, "user": user })
             }
             Event::GuestPageEnded { reason, duration_secs } => {
                 json!({ "reason": reason, "duration_secs": duration_secs })
@@ -770,7 +774,7 @@ mod tests {
     fn an_event_names_itself() {
         assert_eq!(Event::PlaylistEmpty.name(), "playback.playlist_empty");
         assert_eq!(
-            Event::CastStarted { sender_ip: "192.168.1.44".into(), mode: "cast".into() }.name(),
+            Event::CastStarted { sender_ip: "192.168.1.44".into(), mode: "cast".into(), user: None }.name(),
             "cast.started"
         );
     }
@@ -778,7 +782,7 @@ mod tests {
     #[test]
     fn the_envelope_carries_event_timestamp_device_and_data() {
         let value = envelope(
-            &Event::CastStarted { sender_ip: "192.168.1.44".into(), mode: "cast".into() },
+            &Event::CastStarted { sender_ip: "192.168.1.44".into(), mode: "cast".into(), user: None },
             "foyer-pi",
             "werkstatt",
             false,
@@ -830,6 +834,7 @@ mod tests {
         let event = Event::GuestPageShown {
             url: crate::guest_page::redact(&url),
             sender_ip: "192.168.1.44".into(),
+            user: None,
         };
         let text = event.data().to_string();
         assert!(!text.contains("hunter2"), "the password reached the payload: {text}");
@@ -936,6 +941,7 @@ mod tests {
             &Event::GuestPageShown {
                 url: "https://dash.example.test/a?x=1&y=2".into(),
                 sender_ip: "192.168.1.44".into(),
+                user: None,
             },
             "foyer-pi",
             "werkstatt",

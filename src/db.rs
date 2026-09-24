@@ -347,6 +347,22 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // Who may use each screen, per mode. `'anyone'` is what every screen did
+    // before this existed, so an upgrade changes nothing.
+    for column in ["cast_access", "page_access"] {
+        let has: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('displays') WHERE name = ?")
+            .bind(column)
+            .fetch_one(pool)
+            .await
+            .map(|row| row.get::<i32, _>(0) > 0)
+            .unwrap_or(false);
+        if !has {
+            sqlx::query(&format!("ALTER TABLE displays ADD COLUMN {column} TEXT NOT NULL DEFAULT 'anyone'"))
+                .execute(pool)
+                .await?;
+        }
+    }
+
     let has_assignment_decided: bool = sqlx::query(
         "SELECT count(*) FROM pragma_table_info('displays') WHERE name='assignment_decided'",
     )

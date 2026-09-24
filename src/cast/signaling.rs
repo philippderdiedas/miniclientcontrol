@@ -311,6 +311,22 @@ async fn handle_frame(state: &AppState, display: &Arc<Display>, role: Role, text
                 refuse("Webseiten sind derzeit nicht erlaubt.").await;
                 return true;
             }
+            // The venue allows pages; this screen may not, or only for an
+            // account. Checked here as well as at the claim, because a guest's
+            // code check claims in cast mode and the page reuses that ticket.
+            let access = super::access::load(&state.pool, &display.name, ClaimMode::Page).await;
+            let signed_in = display.cast.lock().await.user.is_some();
+            match super::access::decide(true, access, signed_in) {
+                Ok(()) => {}
+                Err(super::access::Refusal::Off) => {
+                    refuse("Webseiten sind derzeit nicht erlaubt.").await;
+                    return true;
+                }
+                Err(super::access::Refusal::NeedsAccount) => {
+                    refuse("Zum Anzeigen einer Webseite bitte anmelden.").await;
+                    return true;
+                }
+            }
 
             let raw = value.get("url").and_then(|u| u.as_str()).unwrap_or_default();
             let parsed = match crate::guest_page::parse_guest_url(raw) {
@@ -426,10 +442,12 @@ async fn consume_reservation(
     // `map_or` (as this used to) was reaching for a fallback that could never be
     // taken.
     let mode = held.mode;
+    let user = held.user.clone();
 
     // Carried onto the session so `register_peer` knows, before the guest has
     // said anything on the socket, whether to pin the cast page.
     session.pending_mode = mode;
+    session.user = user;
     session.reservation = None;
     Ok(())
 }
@@ -515,15 +533,16 @@ pub(super) async fn register_peer(
         // `cast.ended.duration_secs` would otherwise count however long the
         // guest took to type it as time spent casting. Only on the announcing
         // pass, so a socket that bounces mid-cast does not restart the clock.
-        let (mode, announce) = {
+        let (mode, announce, user) = {
             let mut session = display.cast.lock().await;
+            let user = session.user.clone();
             let mode = session.pending_mode;
             let announce = mode == ClaimMode::Cast && !session.cast_announced;
             if announce {
                 session.cast_announced = true;
                 session.started_at = Some(chrono::Utc::now());
             }
-            (mode, announce)
+            (mode, announce, user)
         };
         // Before `activate_display`, so a receiver reading its log sees the cast
         // start and then the display being pinned. Nothing depends on it --
@@ -537,6 +556,7 @@ pub(super) async fn register_peer(
             state.webhooks.fire(&display.name, crate::webhook::Event::CastStarted {
                 sender_ip: addr.to_string(),
                 mode: "cast".to_string(),
+                user,
             });
         }
         if mode == ClaimMode::Cast {

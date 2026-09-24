@@ -132,7 +132,7 @@ pub fn catalogue() -> Vec<Value> {
         entry(
             "cast.started",
             "Ein Gast überträgt seinen Bildschirm.",
-            &["sender_ip", "mode"],
+            &["sender_ip", "mode", "user"],
             false,
         ),
         entry(
@@ -144,7 +144,7 @@ pub fn catalogue() -> Vec<Value> {
         entry(
             "guest_page.shown",
             "Ein Gast zeigt eine Webseite.",
-            &["url", "sender_ip"],
+            &["url", "sender_ip", "user"],
             false,
         ),
         entry(
@@ -480,6 +480,7 @@ fn sample_event(name: &str) -> Event {
         "cast.started" => Event::CastStarted {
             sender_ip: "192.168.1.44".into(),
             mode: "cast".into(),
+            user: Some("mitglied".into()),
         },
         "cast.ended" => Event::CastEnded {
             reason: "operator",
@@ -488,6 +489,7 @@ fn sample_event(name: &str) -> Event {
         "guest_page.shown" => Event::GuestPageShown {
             url: "https://example.test/menu".into(),
             sender_ip: "192.168.1.44".into(),
+            user: None,
         },
         "guest_page.ended" => Event::GuestPageEnded {
             reason: "grace",

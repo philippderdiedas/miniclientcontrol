@@ -168,6 +168,8 @@
          secure-context refusal) has to be visible before any screen has
          resolved, not only once one has. -->
     <p class="status" id="status"></p>
+    <p class="status" id="accountLine" hidden></p>
+    <p class="status" id="loginHint" hidden><a id="loginLink" href="/login.html?next=/">Anmelden zum Casten</a></p>
     <hr id="audioRule" hidden />
     <div id="audioPanel" hidden></div>
 
@@ -490,6 +492,12 @@
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           dropReservation();
+          // A screen kept for accounts: offer the sign-in, which brings the
+          // guest back here afterwards.
+          if (res.status === 401 && body.login) {
+            el('loginLink').href = body.login;
+            el('loginHint').hidden = false;
+          }
           return { ok: false, error: body.error || 'Reservierung fehlgeschlagen.' };
         }
         ticket = body.ticket;
@@ -1029,6 +1037,13 @@
         // it there is nothing to bind against, so the page falls back to the
         // server's own default resolution (`display::resolve(None)`), exactly
         // as it did before per-screen casting existed.
+        // Who this browser is signed in as, if anyone: a screen kept for
+        // accounts needs one, and a member should see that it counts.
+        if (info.account) {
+          el('accountLine').textContent = `Angemeldet als ${info.account}`;
+          el('accountLine').hidden = false;
+          el('loginHint').hidden = true;
+        }
         screens = info.screens || [];
         if (screens.length) {
           resolveInitialBinding();

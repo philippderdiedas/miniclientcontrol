@@ -336,9 +336,9 @@ Ten events, in four families:
 | `playback.playlist_empty` | — |
 | `override.set` | `url`, `source` (`operator`/`cast`/`guest_page`) |
 | `override.cleared` | `source` |
-| `cast.started` | `sender_ip`, `mode` |
+| `cast.started` | `sender_ip`, `mode`, `user` (the account, or `null` for a guest) |
 | `cast.ended` | `reason`, `duration_secs` |
-| `guest_page.shown` | `url`, `sender_ip` |
+| `guest_page.shown` | `url`, `sender_ip`, `user` |
 | `guest_page.ended` | `reason`, `duration_secs` |
 | `display.disconnected` | `error` |
 | `display.connected` | `reconnect` |

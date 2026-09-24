@@ -242,6 +242,19 @@ While a pairing code *is* alive, the operator's view of the session carries it
 with its remaining seconds, so somebody helping a guest by phone can read out what
 the display is showing. The public endpoint never carries it.
 
+### Who may cast
+
+The code answers *whether a guest is in the room*; each screen also says *who*
+may use it, separately for casting and for showing a page: **jeder**, **nur
+Konto** or **aus**, on the displays page. Any account counts, whatever its role.
+A screen kept for accounts shows a guest "Anmelden zum Casten", which signs in
+on the same address and comes back; a signed-in member still types the code —
+an account in the next room should not take over the foyer. The venue's own
+switches stay above this: with casting off in the settings, no screen can turn
+it back on. Switching a mode off on one screen ends that screen's session of
+that mode and nobody else's. Who cast shows on the displays page and in the
+`cast.started` and `guest_page.shown` webhooks.
+
 `--cast-auth=code` with no code configured logs an error and refuses every
 sender, but does **not** stop the process. Casting must never keep the signage
 from booting, and the operator can fix it in the UI without a restart.

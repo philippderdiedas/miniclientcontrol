@@ -479,8 +479,9 @@ async fn list(State(state): State<AppState>) -> Response {
         )
             .into_response()
     };
-    let rows = match sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT name, label FROM displays ORDER BY name ASC",
+    let rows = match sqlx::query_as::<_, (String, Option<String>, String, String)>(
+        "SELECT name, label, COALESCE(cast_access, 'anyone'), COALESCE(page_access, 'anyone')
+         FROM displays ORDER BY name ASC",
     )
     .fetch_all(&state.pool)
     .await
@@ -492,22 +493,23 @@ async fn list(State(state): State<AppState>) -> Response {
     // Driven off the declared displays, not off the table: a row for a screen
     // this deployment no longer declares must still be visible (so its timetable
     // can be reassigned) but must not claim to be attached.
-    let mut entries: Vec<(String, Option<String>, bool)> = state
+    let anyone = || "anyone".to_string();
+    let mut entries: Vec<(String, Option<String>, bool, String, String)> = state
         .displays
         .iter()
-        .map(|d| {
-            let label = rows.iter().find(|(name, _)| name == &d.name).and_then(|(_, l)| l.clone());
-            (d.name.clone(), label, true)
+        .map(|d| match rows.iter().find(|(name, ..)| name == &d.name) {
+            Some((_, label, cast, page)) => (d.name.clone(), label.clone(), true, cast.clone(), page.clone()),
+            None => (d.name.clone(), None, true, anyone(), anyone()),
         })
         .collect();
     entries.extend(
         rows.iter()
-            .filter(|(name, _)| state.display(name).is_none())
-            .map(|(name, label)| (name.clone(), label.clone(), false)),
+            .filter(|(name, ..)| state.display(name).is_none())
+            .map(|(name, label, cast, page)| (name.clone(), label.clone(), false, cast.clone(), page.clone())),
     );
 
     let mut out = Vec::with_capacity(entries.len());
-    for (name, label, declared) in entries {
+    for (name, label, declared, cast_access, page_access) in entries {
         let schedule = match crate::schedule::api::body(&state.pool, &name).await {
             Ok(schedule) => schedule,
             Err(e) => return failed(e),
@@ -517,6 +519,12 @@ async fn list(State(state): State<AppState>) -> Response {
             "name": name,
             "declared": declared,
             "schedule": schedule,
+            "cast_access": cast_access,
+            "page_access": page_access,
+            "cast_user": match state.display(&name) {
+                Some(display) => crate::cast::session_user(&display).await,
+                None => None,
+            },
         }));
     }
     Json(out).into_response()
@@ -537,6 +545,12 @@ struct UpdateDisplay {
     /// would not guess.
     #[serde(default, deserialize_with = "crate::handlers::double_option")]
     label: Option<Option<String>>,
+    /// Who may cast to this screen. See `cast::access`.
+    #[serde(default)]
+    cast_access: Option<crate::cast::access::Access>,
+    /// Who may put a web page on it.
+    #[serde(default)]
+    page_access: Option<crate::cast::access::Access>,
 }
 
 async fn update(
@@ -559,6 +573,29 @@ async fn update(
             .await
         {
             tracing::error!("Failed to set label for display {}: {}", name, e);
+        }
+    }
+    for (column, value) in [("cast_access", payload.cast_access), ("page_access", payload.page_access)] {
+        let Some(value) = value else { continue };
+        let sql = format!("UPDATE displays SET {column} = ? WHERE name = ?");
+        if let Err(e) = sqlx::query(&sql).bind(value.as_str()).bind(&name).execute(&state.pool).await {
+            tracing::error!("Failed to set {} for display {}: {}", column, name, e);
+        }
+    }
+    // Switching a mode off on this screen ends a session of that mode here, the
+    // way the venue switch ends every session; `account` does not -- the guest
+    // was allowed when they started.
+    if let Some(display) = state.display(&name) {
+        use crate::cast::access::Access;
+        use crate::cast::ClaimMode;
+        let ends = match crate::cast::running_mode(&display).await {
+            Some(ClaimMode::Cast) => payload.cast_access == Some(Access::Off),
+            Some(ClaimMode::Page) => payload.page_access == Some(Access::Off),
+            None => false,
+        };
+        if ends {
+            tracing::info!("Cast: a mode was switched off on {}, ending its session", name);
+            crate::cast::end_session(&state, &display, "disabled").await;
         }
     }
     Json(json!({ "ok": true })).into_response()

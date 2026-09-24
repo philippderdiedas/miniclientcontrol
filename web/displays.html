@@ -101,6 +101,9 @@
     }
 
     let PLAYLISTS = [];
+    // The venue's switches, for greying out a screen's access where the venue
+    // has the mode off everywhere.
+    let VENUE = { cast_enabled: true, guest_pages_enabled: true };
     // Cards the operator has touched since their last save. Skipped by the poll,
     // because a card holds the label input and the timetable editor.
     const dirty = new Set();
@@ -223,6 +226,22 @@
 
       const schedule = scheduleEditor(display.schedule || { windows: [] }, markDirty);
 
+      // Who may use this screen, per mode. Below the venue's switches: with a
+      // mode off everywhere the choice here is kept but cannot apply.
+      const ACCESS = [['anyone', 'jeder'], ['account', 'nur Konto'], ['off', 'aus']];
+      const accessSelect = (value, venueOn, what) => {
+        const select = el('select', { onchange: markDirty },
+          ...ACCESS.map(([v, text]) => el('option', { value: v, text })));
+        select.value = value || 'anyone';
+        if (!venueOn) {
+          select.disabled = true;
+          select.title = `${what} ist überall aus (Einstellungen)`;
+        }
+        return select;
+      };
+      const castAccess = accessSelect(display.cast_access, VENUE.cast_enabled, 'Casten');
+      const pageAccess = accessSelect(display.page_access, VENUE.guest_pages_enabled, 'Webseiten');
+
       const feedback = el('span', { class: 'feedback' });
 
       const save = async () => {
@@ -235,7 +254,11 @@
           body: JSON.stringify(body),
         });
         try {
-          const labelRes = await put(path, { label: label.value });
+          const labelRes = await put(path, {
+            label: label.value,
+            cast_access: castAccess.value,
+            page_access: pageAccess.value,
+          });
           if (!labelRes.ok) {
             flash(feedback, await readError(labelRes, 'Fehler beim Speichern.'), true);
             return;
@@ -261,14 +284,20 @@
         el('div', { class: 'grid' },
           field('Name', label),
           el('div', { class: 'f' }, el('span', { text: 'Bezeichner' }), name),
-          display.declared ? null : el('span', { class: 'badge', text: 'nicht deklariert' })),
+          display.declared ? null : el('span', { class: 'badge', text: 'nicht deklariert' }),
+          display.cast_user ? el('span', { class: 'badge', text: `gecastet von ${display.cast_user}` }) : null),
+        el('div', { class: 'grid' },
+          field('Casten', castAccess),
+          field('Webseite', pageAccess)),
         schedule.root,
-        display.declared ? null : el('p', {
+        // `append` renders a bare `null` as the text "null", so the note is
+        // spread in or left out rather than passed as null.
+        ...(display.declared ? [] : [el('p', {
           class: 'note',
           text: 'Dieses Display ist im Deployment nicht mehr deklariert. Seine '
               + 'Playlist bleibt erhalten und kann einem anderen Display '
               + 'zugewiesen werden.',
-        }),
+        })]),
         el('div', { class: 'actions' },
           el('button', { type: 'button', class: 'primary', text: 'Speichern', onclick: save }),
           feedback));
@@ -281,11 +310,13 @@
       const list = document.getElementById('list');
       let displays;
       try {
-        const [pl, dp] = await Promise.all([
+        const [pl, dp, st] = await Promise.all([
           fetch('/api/playlists'),
           fetch('/api/displays'),
+          fetch('/api/settings'),
         ]);
         if (!pl.ok || !dp.ok) throw new Error('nicht erreichbar');
+        if (st.ok) VENUE = await st.json();
         PLAYLISTS = await pl.json();
         displays = await dp.json();
       } catch (_) {

@@ -136,7 +136,21 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
     // The guest is by definition not loopback; exempt regardless of address.
+    // Exempt, but not blind: a signed-in member's session is recognised so a
+    // screen can be kept for accounts (`cast::access`). Never required -- a
+    // request without one proceeds exactly as a guest's -- and only from the
+    // cookie: a cached Basic credential must not turn a guest into an account.
+    // A write needs this host's `Origin`, or another site could claim a screen
+    // with a member's cookie; a read only tells the page who is signed in.
     if !state.args.disable_cast && crate::cast::is_cast_public_path(&path) {
+        if let Some(token) = session_token(request.headers()) {
+            let writing = method != Method::GET && method != Method::HEAD;
+            if !writing || same_origin(request.headers(), request.uri()) {
+                if let Some(who) = super::session_identity(&state.pool, &token).await {
+                    request.extensions_mut().insert(who);
+                }
+            }
+        }
         return next.run(request).await;
     }
 

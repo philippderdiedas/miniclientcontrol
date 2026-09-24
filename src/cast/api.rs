@@ -20,6 +20,13 @@ use super::{
 };
 use super::url::sender_url;
 
+/// Why a sender is turned away. A missing account is its own case because the
+/// guest page answers it with a sign-in link, not just a message.
+pub(super) enum SenderRefusal {
+    Forbidden(String),
+    NeedsAccount,
+}
+
 /// Checks a sender's code against the configured policy, with a per-address
 /// lockout so a four-character code cannot simply be enumerated.
 pub(super) async fn authorize_sender(
@@ -28,7 +35,8 @@ pub(super) async fn authorize_sender(
     addr: IpAddr,
     provided: Option<&str>,
     mode: ClaimMode,
-) -> Result<(), String> {
+    who: Option<&crate::accounts::Identity>,
+) -> Result<(), SenderRefusal> {
     let settings = {
         let settings = state.settings.read().await;
         (
@@ -55,21 +63,31 @@ pub(super) async fn authorize_sender(
     // override_item. `cast_attempts` is a leaf everywhere else in the tree (only
     // `authorize_sender` touches it), so taking `cast` while holding it here
     // adds one edge and closes no cycle.
+    // Read before any lock is taken: a database read has no place inside the
+    // settings -> cast_attempts -> cast order.
+    let access = super::access::load(&state.pool, &display.name, mode).await;
+
     let mut attempts = state.cast_attempts.lock().await;
 
     if let Some(entry) = attempts.get(&addr) {
         if let Some(until) = entry.locked_until {
             if Instant::now() < until {
-                return Err("Zu viele Fehlversuche. Bitte kurz warten.".to_string());
+                return Err(SenderRefusal::Forbidden("Zu viele Fehlversuche. Bitte kurz warten.".to_string()));
             }
         }
     }
 
-    if !enabled {
-        return Err(match mode {
-            ClaimMode::Cast => "Übertragung ist derzeit deaktiviert.".to_string(),
-            ClaimMode::Page => "Webseiten sind derzeit nicht erlaubt.".to_string(),
-        });
+    match super::access::decide(enabled, access, who.is_some()) {
+        Ok(()) => {}
+        // The venue's wording whether the venue or this screen said no: the
+        // answer must not tell a guest more than "not here".
+        Err(super::access::Refusal::Off) => {
+            return Err(SenderRefusal::Forbidden(match mode {
+                ClaimMode::Cast => "Übertragung ist derzeit deaktiviert.".to_string(),
+                ClaimMode::Page => "Webseiten sind derzeit nicht erlaubt.".to_string(),
+            }));
+        }
+        Err(super::access::Refusal::NeedsAccount) => return Err(SenderRefusal::NeedsAccount),
     }
 
     // Only `CastAuth::Pairing` reads the session (the code lives on the
@@ -141,7 +159,7 @@ pub(super) async fn authorize_sender(
                 entry.locked_until = Some(Instant::now() + LOCKOUT);
                 warn!("Cast: locking out {} after repeated wrong codes", addr);
             }
-            Err(message)
+            Err(SenderRefusal::Forbidden(message))
         }
     }
 }
@@ -258,7 +276,11 @@ pub async fn cast_state(
 pub async fn cast_info(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    identity: Option<axum::Extension<crate::accounts::Identity>>,
 ) -> impl IntoResponse {
+    // Who this browser is signed in as, so the guest page can show it and a
+    // screen kept for accounts does not ask a member to sign in again.
+    let account = identity.map(|axum::Extension(who)| who.name);
     let sender_url = sender_url(&state, None);
     let (cast_enabled, page_enabled, auth) = {
         let settings = state.settings.read().await;
@@ -283,13 +305,17 @@ pub async fn cast_info(
             "page_enabled": page_enabled,
             "auth": auth,
             "sender_url": sender_url,
+            "account": account,
         }));
     }
 
     // The operator's name for each screen, not the internal name it is
     // declared with -- same source `display::list` reads.
-    let labels: Vec<(String, Option<String>)> =
-        match sqlx::query_as("SELECT name, label FROM displays")
+    let labels: Vec<(String, Option<String>, String, String)> =
+        match sqlx::query_as(
+            "SELECT name, label, COALESCE(cast_access, 'anyone'), COALESCE(page_access, 'anyone')
+             FROM displays",
+        )
             .fetch_all(&state.pool)
             .await
         {
@@ -305,11 +331,20 @@ pub async fn cast_info(
     // here needs two sessions held together.
     let mut screens = Vec::with_capacity(state.displays.len());
     for display in state.displays.iter() {
-        let label = labels
-            .iter()
-            .find(|(name, _)| name == &display.name)
-            .and_then(|(_, label)| label.clone())
+        use super::access::Access;
+        let row = labels.iter().find(|(name, ..)| name == &display.name);
+        let label = row
+            .and_then(|(_, label, ..)| label.clone())
             .unwrap_or_else(|| display.name.clone());
+        let parse = |raw: &str| serde_json::from_value::<Access>(json!(raw)).unwrap_or_default();
+        // Folded with the venue switches: what a guest can actually do here.
+        let cast_access = row.map_or(Access::Anyone, |(.., cast, _)| parse(cast)).effective(enabled);
+        let page_access = row.map_or(Access::Anyone, |(.., page)| parse(page)).effective(page_enabled);
+        if cast_access == Access::Off && page_access == Access::Off {
+            // Nothing a guest can do on this screen, and listing it would be
+            // the enumeration this endpoint avoids when the venue is closed.
+            continue;
+        }
         let session = display.cast.lock().await;
         screens.push(json!({
             "name": display.name,
@@ -320,6 +355,8 @@ pub async fn cast_info(
             // What the display can show. The sender needs this *before* it
             // calls getDisplayMedia, and at that moment it has no socket yet.
             "max_edge": session.display_limits.map(|limits| limits.max_edge),
+            "cast_access": cast_access,
+            "page_access": page_access,
         }));
     }
 
@@ -331,6 +368,7 @@ pub async fn cast_info(
         "page_enabled": page_enabled,
         "auth": auth,
         "screens": screens,
+        "account": account,
         // so a page reached over plain HTTP can send itself to the TLS origin,
         // where getDisplayMedia actually exists
         "sender_url": sender_url,
@@ -360,6 +398,7 @@ pub struct ClaimRequest {
 pub async fn claim_session(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    identity: Option<axum::Extension<crate::accounts::Identity>>,
     Json(payload): Json<ClaimRequest>,
 ) -> Response {
     if state.args.disable_cast {
@@ -417,10 +456,25 @@ pub async fn claim_session(
         }
     }
 
-    if let Err(message) =
-        authorize_sender(&state, &display, addr, payload.code.as_deref(), payload.mode).await
-    {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
+    let who = identity.as_ref().map(|axum::Extension(who)| who);
+    match authorize_sender(&state, &display, addr, payload.code.as_deref(), payload.mode, who).await {
+        Ok(()) => {}
+        Err(SenderRefusal::Forbidden(message)) => {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": message}))).into_response();
+        }
+        Err(SenderRefusal::NeedsAccount) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": match payload.mode {
+                        ClaimMode::Cast => "Zum Casten bitte anmelden.",
+                        ClaimMode::Page => "Zum Anzeigen einer Webseite bitte anmelden.",
+                    },
+                    "login": "/login.html?next=/",
+                })),
+            )
+                .into_response();
+        }
     }
 
     let ticket = generate_ticket();
@@ -431,10 +485,15 @@ pub async fn claim_session(
             addr,
             expires_at: Instant::now() + RESERVATION_TTL,
             mode: payload.mode,
+            user: who.map(|w| w.name.clone()),
             display: display.name.clone(),
         });
     }
-    info!("Cast: session reserved by {}", addr);
+    info!(
+        "Cast: session reserved by {}{}",
+        addr,
+        who.map(|w| format!(" ({})", w.name)).unwrap_or_default()
+    );
 
     Json(json!({
         "ticket": ticket,
