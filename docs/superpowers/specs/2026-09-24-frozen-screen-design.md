@@ -1,6 +1,6 @@
 # A frozen screen is noticed, and the operator sees what is on screen
 
-Status: design, approved in conversation on 2026-09-24.
+Status: implemented and verified on kiosk2 (designed and approved in conversation on 2026-09-24).
 
 ## What and why
 
@@ -106,3 +106,32 @@ an hour still ticks sixty times a second.
 Detecting a panel that is off or a cable that is out (the compositor still
 paints), a history of screenshots, comparing screenshots to decide a freeze, and
 anything compositor-specific.
+
+## Amendments made while implementing
+
+- **An unanswered sample counts as no progress.** With Xorg stopped for more
+  than about fifteen seconds even `Runtime.evaluate` hangs; treating that as "no
+  information" (the first version) detected the freeze only when Xorg resumed,
+  and then restarted screens that were already recovering. The first unanswered
+  sample after a page change starts the clock.
+- **A page change keeps the frozen state**, so the page of a restarted browser
+  painting again is reported as the recovery.
+- **The loop notices a lost connection while it waits** (a per-connection
+  notify fired when the CDP handler ends). Without it a restarted browser left
+  its screen dead until the current item ended.
+- **A navigate that never leaves `about:blank` is replaced by an in-page
+  navigation, then a reconnect.** Found during the kiosk2 test: after connecting
+  to a fresh browser, `Page.navigate` through chromiumoxide hung for the whole
+  connection while the same command by hand took 0.3 s — the cause of the
+  "blank after restart" effect seen on earlier deploys.
+- **Screenshots use `Page.captureScreenshot` directly**, because chromiumoxide's
+  `Page::screenshot` activates the target first.
+- Verified on kiosk2 with Xorg stopped for 90 s, three times: detected at 61–64
+  s, both browsers restarted, both dashboards back about 9 s after `SIGCONT`,
+  confirmed on screen.
+- **The counter is read by a watcher task per screen**, not in the loop's
+  parking places: the loop publishes the page on screen (`Display::screen_page`)
+  and the watcher samples it — a loop parked for a long item is exactly the one
+  that would not come round to check.
+- The frozen header is **`X-Screen-Frozen-Since`** (RFC 3339), not a flag, so the
+  pages can say since when.

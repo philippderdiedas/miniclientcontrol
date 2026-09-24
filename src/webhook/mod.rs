@@ -24,7 +24,7 @@ pub mod api;
 /// The UI reads this through `GET /api/webhooks/events` and never hard-codes a
 /// copy: a page offering placeholders the server does not send is the
 /// overlay-preview mistake in a new place.
-pub const ALL_EVENTS: [&str; 10] = [
+pub const ALL_EVENTS: [&str; 12] = [
     "playback.item_changed",
     "playback.playlist_empty",
     "override.set",
@@ -35,6 +35,8 @@ pub const ALL_EVENTS: [&str; 10] = [
     "guest_page.ended",
     "display.disconnected",
     "display.connected",
+    "display.frozen",
+    "display.recovered",
 ];
 
 /// Something worth telling somebody about.
@@ -52,6 +54,13 @@ pub enum Event {
         advance: crate::advance::Advance,
     },
     PlaylistEmpty,
+    DisplayFrozen {
+        seconds: u64,
+        restarted: bool,
+    },
+    DisplayRecovered {
+        seconds: u64,
+    },
     OverrideSet {
         url: String,
         source: &'static str,
@@ -100,6 +109,8 @@ impl Event {
             Event::GuestPageEnded { .. } => "guest_page.ended",
             Event::DisplayDisconnected { .. } => "display.disconnected",
             Event::DisplayConnected { .. } => "display.connected",
+            Event::DisplayFrozen { .. } => "display.frozen",
+            Event::DisplayRecovered { .. } => "display.recovered",
         }
     }
 
@@ -113,6 +124,8 @@ impl Event {
                 "advance": advance,
             }),
             Event::PlaylistEmpty => json!({}),
+            Event::DisplayFrozen { seconds, restarted } => json!({ "seconds": seconds, "restarted": restarted }),
+            Event::DisplayRecovered { seconds } => json!({ "seconds": seconds }),
             Event::OverrideSet { url, source } => json!({ "url": url, "source": source }),
             Event::OverrideCleared { source } => json!({ "source": source }),
             Event::CastStarted { sender_ip, mode, user } => {
@@ -848,7 +861,7 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), ALL_EVENTS.len(), "ALL_EVENTS has a duplicate");
-        assert_eq!(ALL_EVENTS.len(), 10);
+        assert_eq!(ALL_EVENTS.len(), 12);
     }
 
     fn target_wanting(events: &[&str]) -> Target {

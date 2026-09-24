@@ -35,7 +35,18 @@ per screen rather than trying to read the sessions apart from the log alone.
 Is there a browser? `--no-launch-browser` or a missing Chromium leaves the loop
 reconnecting forever. Check that the CDP port is listening, and that the unit has
 `DISPLAY` in its environment — a controller that starts the browser needs it, one
-that only spoke CDP did not.
+that only spoke CDP did not. If the log says "navigating from the page instead"
+or "stays blank", the navigate command hung on that connection: the controller
+works around it and reconnects by itself.
+
+**`display.frozen` fired.** The screen stopped being painted for
+`--freeze-timeout` seconds — a hung compositor or GPU, not a still page. With
+`restarted: true` the controller restarted that screen's browser; with `false`
+either it did not start that browser itself, or it already restarted it in the
+last 30 minutes and is holding back. `display.recovered` says it came back. A
+freeze on every screen at once points at the display server or the GPU, not at
+a page. Look at the screen's picture on the displays page: it is marked
+"eingefroren seit …" while the heartbeat says so.
 
 **A declared screen sits on the idle page while the other one plays.**
 It has no playlist assigned, which is a state and not a fault: a display with no

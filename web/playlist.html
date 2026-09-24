@@ -219,6 +219,7 @@
   <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
   <script src="/preview.js"></script>
+  <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
   <script src="/proposals.js"></script>
   <script>
@@ -1129,6 +1130,9 @@
         const isLive = currentItemId === item.id;
         card.classList.toggle('active', isLive);
         liveBadge.hidden = !isLive;
+        // The picture follows the playing item: one node per screen, so
+        // appending it here moves it off the card that played before.
+        if (isLive && currentScreen) liveBadge.after(Screenshot.node(currentScreen));
         const play = playability(item);
         stateBadge.hidden = play.ok;
         stateBadge.textContent = play.why;

@@ -115,6 +115,7 @@ mod tests {
             (Method::POST, "/api/changesets/mine/hide-decided", Need::Read),
             (Method::POST, "/api/changesets/3/withdraw", Need::Read),
             (Method::POST, "/api/changesets/3/hide", Need::Read),
+            (Method::GET, "/api/displays/foyer/screenshot", Need::Read),
             (Method::GET, "/api/oidc/info", Need::Open),
             (Method::GET, "/api/oidc/start", Need::Open),
             (Method::GET, "/api/oidc/callback", Need::Open),

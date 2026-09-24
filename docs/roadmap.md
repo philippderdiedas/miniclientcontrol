@@ -15,19 +15,6 @@ Nothing is queued; the next entry is picked from below.
 
 ## Later
 
-### A frozen screen is noticed
-
-CDP reports healthy while the picture has not changed for hours — measured on a
-Pi 3 whose GPU wedged, thirteen hours of one frame (see `CLAUDE.md`, *Webhooks*).
-A periodic `Page.captureScreenshot` compared with the previous one, or a frame
-counter in the page, would notice; the response is restarting that display's
-Chromium and a webhook event. Care is needed not to call a static dashboard
-frozen: an unchanged page is normal, an unchanged *clock in the overlay* is not.
-
-Its screenshots are also the preview the admin page's status line should show —
-deliberately left out of the asset preview, because what a screen shows is not
-its asset's file (an override, a page, the overlay on top).
-
 ### Zones, layouts and widgets
 
 A screen split into areas — main content plus a side column or a ticker. A

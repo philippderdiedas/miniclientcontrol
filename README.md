@@ -247,6 +247,11 @@ declaration.
   Anything else, the former `playlist_id` included, is refused with `422`.
   `GET /api/displays` returns both, plus `cast_user`: the account casting there,
   or `null`
+- `GET /api/displays/{name}/screenshot` — what the screen shows, as a JPEG at
+  most 640 px wide; taken on request, cached 10 s, `X-Screenshot-Age` and (while
+  frozen) `X-Screen-Frozen-Since` headers, `503` before there is any picture.
+  `GET /api/displays` carries `frozen_since` per screen. `--freeze-timeout`
+  (default 60) sets how long a screen may paint nothing before `display.frozen`
 - `GET /api/displays/{name}/schedule` — the screen's timetable:
   `{ default_playlist_id, windows: [{ weekdays, from, to, playlist_id }], overlaps, now }`.
   Weekdays are ISO numbers (Monday = 1), windows are in priority order, `to` may be

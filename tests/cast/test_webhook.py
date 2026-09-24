@@ -624,7 +624,7 @@ async def case_62():
         check("the catalogue is served", status == 200 and "events" in (cat or {}),
               (status, cat))
         names = [e["name"] for e in cat["events"]]
-        check("it offers ten events", len(names) == 10, names)
+        check("it offers twelve events", len(names) == 12 and "display.frozen" in names, names)
         check("the prefixes are published, not hard-coded in the page",
               cat["field_prefix"] == "data." and cat["placeholder_suffix"] == " | tojson",
               cat)

@@ -21,6 +21,11 @@ pub struct Args {
     #[arg(long, env, default_value_t = 120)]
     pub advance_stall_timeout: u64,
 
+    /// How long a screen may go without painting a frame before it counts as
+    /// frozen: its browser is restarted once and `display.frozen` fires.
+    #[arg(long, env, default_value_t = 60)]
+    pub freeze_timeout: u64,
+
     /// Address the plain-HTTP server binds to.
     ///
     /// Loopback by default: that listener exists for the display browser, which
@@ -449,6 +454,17 @@ pub struct Display {
     /// Poked when the overlay configuration changes, so the badge appears on the
     /// item that is already on screen instead of at the next navigation.
     pub overlay_signal: Notify,
+    /// The page this screen shows right now, published by `browser_loop` for
+    /// the freeze watcher and the screenshot endpoint. Cloned out, never held
+    /// across a CDP call.
+    pub screen_page: Mutex<Option<chromiumoxide::Page>>,
+    /// Set while the heartbeat says the screen is frozen.
+    pub frozen_since: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    /// Asks `chromium::supervise` to kill the browser it launched, which it
+    /// then starts again.
+    pub browser_restart: Arc<Notify>,
+    /// The last screenshot and when it was taken.
+    pub screenshot: Mutex<Option<(std::time::Instant, Vec<u8>)>>,
 }
 
 impl Display {
@@ -465,6 +481,10 @@ impl Display {
             playlist_signal: Notify::new(),
             override_signal: Notify::new(),
             overlay_signal: Notify::new(),
+            screen_page: Mutex::new(None),
+            frozen_since: Mutex::new(None),
+            browser_restart: Arc::new(Notify::new()),
+            screenshot: Mutex::new(None),
         }
     }
 }

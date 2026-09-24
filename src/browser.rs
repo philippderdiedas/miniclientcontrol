@@ -75,6 +75,14 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             }
         };
 
+        // Fired when this connection's handler ends -- the browser died, was
+        // restarted after a freeze, or closed the socket. Without it the loop
+        // noticed only at its next CDP call, which inside a ten-minute item is
+        // ten minutes of a dead screen. One per connection, so a permit left
+        // over from the last one cannot tear down the next.
+        let lost = std::sync::Arc::new(tokio::sync::Notify::new());
+        let lost_tx = lost.clone();
+
         // Spawn the handler needed for chromiumoxide
         let _handle = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
@@ -82,6 +90,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     break;
                 }
             }
+            lost_tx.notify_one();
         });
 
         // A URL need not be a page. Anything served with `Content-Disposition:
@@ -206,7 +215,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             };
 
             if let Some(override_item) = active_override {
-                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, &mut overlay_seed, override_item).await {
+                if let Err(e) = run_override_loop(&state, &display, &browser, &mut attached_events, &page, &mut overlay_seed, override_item, &lost).await {
                     error!("Override playback failed: {}", e);
                     if is_connection_lost(e.as_ref()) {
                         reconnect_needed = true;
@@ -312,6 +321,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     }
                 }
                 let empty_url = empty_playlist_url(state.args.port, &display_name);
+                *display.screen_page.lock().await = Some(page.clone());
                 let already_showing = match page.url().await {
                     Ok(Some(current)) => current == empty_url,
                     _ => false,
@@ -448,6 +458,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     advance
                 );
 
+                *display.screen_page.lock().await = Some(active_page.clone());
                 if let Err(e) = active_page.bring_to_front().await {
                     warn!("Failed to bring page to front: {}", e);
                     if is_connection_lost(&e) {
@@ -610,6 +621,11 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                                 }
                             }
                         },
+                        _ = lost.notified() => {
+                            warn!("The browser connection closed while item {} was showing.", item.id);
+                            reconnect_needed = true;
+                            break;
+                        },
                         _ = display.skip_signal.notified() => {
                             info!("Skip signal received.");
                             skip_requested = true;
@@ -762,6 +778,9 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
 
         if reconnect_needed {
             error!("CDP session lost. Reconnecting to browser...");
+            // Nothing is on screen as far as this controller can tell until the
+            // connection is back: no freeze to judge, no picture to take.
+            *display.screen_page.lock().await = None;
             // The only way out of the inner loop, so this is the one path that
             // loses a connection that was working. The guard is belt and braces
             // against a future early `continue` slipping in above.
@@ -813,12 +832,14 @@ async fn run_override_loop(
     page: &Page,
     overlay_seed: &mut OverlaySeed,
     mut override_item: OverrideItem,
+    lost: &tokio::sync::Notify,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         let target_url = override_target_url(state, &override_item);
         info!("Override active. Navigating to: {}", redact_str(&target_url));
 
         let _ = page.bring_to_front().await;
+        *display.screen_page.lock().await = Some(page.clone());
         let overlay = crate::settings::overlay_payload(state, display, None).await;
         seed_overlay_runtime(page, overlay_seed, &overlay).await?;
         navigate_page(page, &target_url).await?;
@@ -842,6 +863,9 @@ async fn run_override_loop(
             // matters. Re-applying does not touch the page otherwise, so a live
             // RTCPeerConnection survives it.
             tokio::select! {
+                // Worded so `is_connection_lost` recognises it: the caller then
+                // reconnects, as for any other lost connection.
+                _ = lost.notified() => return Err("the CDP connection closed".into()),
                 _ = display.override_signal.notified() => {},
                 _ = display.overlay_signal.notified() => {
                     info!("Overlay settings changed while an override is up, re-applying.");
@@ -1201,6 +1225,17 @@ fn is_same_document(current: &str, target: &str) -> bool {
     without_fragment(current) == without_fragment(target)
 }
 
+/// Whether the tab is still on the blank page it was born with -- asked of
+/// the page itself: `Page::url` reads chromiumoxide's own frame bookkeeping,
+/// which is the part suspected of being stuck when a navigate hangs.
+async fn still_blank(page: &Page) -> bool {
+    let answer = tokio::time::timeout(Duration::from_secs(3), page.evaluate("location.href")).await;
+    match answer {
+        Ok(Ok(result)) => result.into_value::<String>().map(|href| href == "about:blank").unwrap_or(false),
+        _ => false,
+    }
+}
+
 async fn navigate_page(page: &Page, target_url: &str) -> Result<(), CdpError> {
     // A `Page.navigate` to the document we are already on is a same-document
     // navigation. Two things go wrong with it: Chrome's reply is a message
@@ -1223,17 +1258,47 @@ async fn navigate_page(page: &Page, target_url: &str) -> Result<(), CdpError> {
 
     // Cap the wait ourselves: chromiumoxide's own request timeout is 30s, long
     // enough for one dropped reply to eat several playlist items.
+    //
+    // A timeout while the tab is still blank means the command never took
+    // effect. Seen on kiosk2 right after connecting to a (re)started browser:
+    // chromiumoxide's `Page.navigate` hung every time for that connection while
+    // the same command sent by hand went through in 0.3 s -- so retrying it is
+    // useless, and the screen stood blank for the whole item, every item. The
+    // page itself still answers `evaluate`, so navigate from inside it; if even
+    // that leaves it blank, report the connection as lost so the loop
+    // reconnects, which is what cleared it before. A tab already elsewhere is
+    // a slow page loading, and is left to finish.
     let navigate = tokio::time::timeout(
         Duration::from_secs(20),
         page.execute(NavigateParams::new(target_url)),
     )
     .await;
-
     let response = match navigate {
         Ok(Ok(response)) => response,
         Ok(Err(CdpError::Timeout)) | Err(_) => {
-            warn!("Navigate command timed out for '{}', continuing (navigation may still succeed)", redact_str(target_url));
-            return Ok(());
+            if !still_blank(page).await {
+                warn!("Navigate command timed out for '{}', continuing (navigation may still succeed)", redact_str(target_url));
+                return Ok(());
+            }
+            warn!(
+                "Navigate command timed out for '{}' with the tab still blank, navigating from the page instead",
+                redact_str(target_url)
+            );
+            let literal = serde_json::to_string(target_url).unwrap_or_else(|_| "\"about:blank\"".to_string());
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                page.evaluate(format!("location.assign({})", literal)),
+            )
+            .await;
+            for _ in 0..20 {
+                sleep(Duration::from_millis(500)).await;
+                if !still_blank(page).await {
+                    return Ok(());
+                }
+            }
+            error!("The tab stays blank for '{}'; reconnecting to the browser", redact_str(target_url));
+            // Worded so `is_connection_lost` recognises it.
+            return Err(CdpError::ChromeMessage("the CDP connection closed: navigation never started".into()));
         }
         Ok(Err(e)) => return Err(e),
     };

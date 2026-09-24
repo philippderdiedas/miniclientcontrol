@@ -443,6 +443,22 @@
     return merged;
   }
 
+  // A heartbeat: how many frames the compositor has let this page paint. It is
+  // what tells a frozen screen from a still one -- a dashboard showing the same
+  // numbers for an hour still ticks every frame, while a compositor that hangs
+  // stops it dead even though the page's JavaScript and CDP keep answering
+  // (measured on kiosk2 with Xorg stopped: 4 frames in 5 s, evaluate fine).
+  // Top frame only, once per document: every seeded registration runs this.
+  if (window.top === window && !globalThis.__ovFramesLoop) {
+    globalThis.__ovFramesLoop = true;
+    globalThis.__ovFrames = 0;
+    const tick = () => {
+      globalThis.__ovFrames += 1;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   globalThis.__ov = {
     // One entry point, called with every layer that should be on screen: the
     // controller has no way to know what the page currently shows, so every
@@ -485,6 +501,7 @@
         // navigation -- and the second is how "the badge was there before the
         // controller got to it" is told apart from "the controller was quick".
         seeds: Number(globalThis.__ovSeeds) || 0,
+        frames: typeof globalThis.__ovFrames === 'number' ? globalThis.__ovFrames : null,
         seededAt,
         boxes: boxes.size,
         positions: [...boxes.keys()],

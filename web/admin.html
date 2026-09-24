@@ -291,6 +291,7 @@
 
   <script src="/audio.js"></script>
   <script src="/preview.js"></script>
+  <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
   <script>
     // Same node-building rule as the other operator pages: a display label, a
@@ -425,6 +426,8 @@
           if (!single && line.playlist) {
             row.append(el('span', { class: 'muted', text: ` — Playlist: ${line.playlist}` }));
           }
+          // The same node every poll, so rebuilding this line does not reload it.
+          row.append(Screenshot.node(line.display.name));
           host.append(row);
         }
         if (!lines.length) {

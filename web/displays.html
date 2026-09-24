@@ -63,6 +63,7 @@
   <div id="list"></div>
   <p class="muted" id="emptyHint" hidden>Keine Displays.</p>
 
+  <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
   <script src="/proposals.js"></script>
   <script>
@@ -302,6 +303,8 @@
           el('button', { type: 'button', class: 'primary', text: 'Speichern', onclick: save }),
           feedback));
 
+      // What the screen shows now: only a declared one has a page to show.
+      if (display.declared) card.prepend(Screenshot.node(display.name));
       cards.set(display.name, card);
       return card;
     }

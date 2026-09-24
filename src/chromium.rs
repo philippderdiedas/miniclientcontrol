@@ -221,6 +221,7 @@ pub async fn supervise(
     args: std::sync::Arc<Args>,
     display: crate::display::DisplayConfig,
     pid_slot: PidSlot,
+    restart: std::sync::Arc<tokio::sync::Notify>,
 ) {
     // See `spawn`: `display.name` inside a `tracing` macro would resolve to the
     // macro's own `display()` helper rather than to this value.
@@ -266,6 +267,19 @@ pub async fn supervise(
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            _ = restart.notified() => {
+                // Only ever our own child: a browser found already running on
+                // the port is somebody else's to restart.
+                if let Some(running) = child.as_mut() {
+                    warn!(
+                        "Restarting the browser for display '{}': the screen stopped painting",
+                        display_name
+                    );
+                    let _ = running.start_kill();
+                }
+            }
+        }
     }
 }

@@ -447,6 +447,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/displays", get(list))
         .route("/api/displays/{name}", put(update))
+        .route("/api/displays/{name}/screenshot", get(crate::screenshot::handler))
         .route(
             "/api/displays/{name}/schedule",
             get(crate::schedule::api::get_schedule).put(crate::schedule::api::put_schedule),
@@ -523,6 +524,10 @@ async fn list(State(state): State<AppState>) -> Response {
             "page_access": page_access,
             "cast_user": match state.display(&name) {
                 Some(display) => crate::cast::session_user(&display).await,
+                None => None,
+            },
+            "frozen_since": match state.display(&name) {
+                Some(display) => display.frozen_since.lock().await.map(|t| t.to_rfc3339()),
                 None => None,
             },
         }));

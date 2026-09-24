@@ -165,6 +165,18 @@ pub fn catalogue() -> Vec<Value> {
             &["reconnect"],
             false,
         ),
+        entry(
+            "display.frozen",
+            "Ein Bildschirm zeichnet nichts mehr.",
+            &["seconds", "restarted"],
+            false,
+        ),
+        entry(
+            "display.recovered",
+            "Ein Bildschirm zeichnet wieder.",
+            &["seconds"],
+            false,
+        ),
     ]
 }
 
@@ -499,6 +511,8 @@ fn sample_event(name: &str) -> Event {
             error: "the CDP connection was lost".into(),
         },
         "display.connected" => Event::DisplayConnected { reconnect: true },
+        "display.frozen" => Event::DisplayFrozen { seconds: 75, restarted: true },
+        "display.recovered" => Event::DisplayRecovered { seconds: 90 },
         _ => Event::ItemChanged {
             item_id: 1,
             kind: "asset",

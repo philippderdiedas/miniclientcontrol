@@ -1,3 +1,5 @@
+mod screenshot;
+mod freeze;
 mod oidc;
 mod advance;
 mod db;
@@ -240,7 +242,8 @@ async fn main() -> Result<()> {
             let browser_args = state.args.clone();
             let config = config.clone();
             let pid_slot = display.browser_pid.clone();
-            tokio::spawn(async move { chromium::supervise(browser_args, config, pid_slot).await });
+            let restart = display.browser_restart.clone();
+            tokio::spawn(async move { chromium::supervise(browser_args, config, pid_slot, restart).await });
         }
     }
 
@@ -253,6 +256,12 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             browser_loop(loop_state, loop_display).await;
         });
+        // Its own task, not a branch of the loop: the loop parks in several
+        // places for long stretches, and a hung compositor is exactly when it
+        // would not come round to check.
+        let watcher_state = state.clone();
+        let watched = display.clone();
+        tokio::spawn(async move { freeze::watch(watcher_state, watched).await });
     }
 
     // 5. Start Web Server

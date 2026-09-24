@@ -246,6 +246,22 @@ never navigates.
 Any `is_connection_lost` error breaks all the way back to the outer loop and
 reconnects; `keep_loaded` tabs are reconciled once per inner pass.
 
+**A lost connection is noticed where the loop waits, not only at its next CDP
+call.** The handler task fires a per-connection `lost` notify when it ends, and
+the per-item `select!` and `run_override_loop` watch it. Without that, a browser
+that died (or was restarted after a freeze) left the screen dead until the item
+ended — ten minutes on a long one. Per connection, so a permit left from the
+last connection cannot tear down the next.
+
+**A `Page.navigate` that times out with the tab still blank never started.**
+Seen on kiosk2 right after connecting to a freshly started browser: every
+navigate on that connection hung, while the same command by hand landed in
+0.3 s — the long-standing "comes up on `about:blank`" effect. `navigate_page`
+then navigates from inside the page (`location.assign`) and, if even that stays
+blank, returns an error `is_connection_lost` recognises so the loop reconnects.
+Blankness is asked of the page (`location.href`), not `Page::url`, which reads
+chromiumoxide's own frame bookkeeping.
+
 **Always `notify_one()`, never `notify_waiters()`** on a `Display`'s notifies
 (`skip_signal`, `playlist_signal`, `override_signal`, `overlay_signal` — they live
 on `Display`, not on `AppState`). The loop is only parked for part of its cycle —
@@ -734,7 +750,7 @@ The rules:
 `fire` takes the display name as its first argument and every emit site has to
 pass the screen the event is about — `browser.rs` its own loop's display,
 `cast/` the screen whose session it resolved. It is in the envelope rather than
-in one event's `data` because all ten events are about a particular screen, and it
+in one event's `data` because every event is about a particular screen, and it
 is additive, so a target configured before several displays existed keeps working.
 `api::catalogue()`'s `envelope` array carries it, so the admin page's chips offer
 it without being told.
@@ -838,12 +854,34 @@ connection that still bails out to the top of the outer loop is not announced �
 and `display.disconnected` is gated on `connected_before`, so a controller that
 never got a browser does not report losing one.
 
-**`display.*` reports the CDP connection, not that anything is being painted**,
-and nothing here detects a frozen screen. Measured on a Pi 3 whose V3D GPU
-wedged: thirteen hours of the same frame, the kernel resetting the GPU once a
-second, the compositor blocked in `vc4_wait_for_seqno` — while CDP answered every
-request and both page targets were present, so `is_connection_lost` never fired.
-Do not let the events grow a name that implies otherwise.
+**`display.connected`/`disconnected` report the CDP connection, not that
+anything is being painted** — a Pi 3 whose V3D GPU wedged showed one frame for
+thirteen hours while CDP answered every request. **Painting is what
+`display.frozen`/`recovered` report** (`src/freeze.rs`), and the rules there:
+
+- **The signal is the overlay runtime's `requestAnimationFrame` counter**
+  (`__ovFrames`, top frame only), sampled every 5 s by a watcher task per
+  screen from the page `browser_loop` publishes as `Display::screen_page`. A
+  static dashboard still ticks; a hung compositor stops it. Measured on kiosk2
+  with Xorg stopped: 4 frames in 5 s while `evaluate` still answered, and after
+  ~15 s `evaluate` itself hangs.
+- **An unanswered sample is no progress, not "unknown".** Treating it as
+  unknown detected the freeze only when Xorg came back — and then restarted a
+  screen that was already recovering. The first unanswered sample after a page
+  change starts the clock. *No page or no runtime* is no evidence, ever.
+- **Only a browser the controller launched is restarted** (`browser_pid` is
+  `Some`), by `chromium::supervise` on `browser_restart`, and not again within
+  30 minutes (`BRAKE`) — a panel switched off by DPMS must not become a restart
+  loop. A page change keeps the frozen state, so a restarted browser's page
+  painting again *is* the recovery that gets reported.
+- It cannot see a panel that is off or a cable that is out: the compositor
+  still paints.
+
+The screenshot endpoint (`src/screenshot.rs`) captures the same published page
+on request, cached 10 s, with a 5 s timeout — a capture hangs on a frozen
+screen, and then the last picture is served with its age. It sends
+`Page.captureScreenshot` directly: `Page::screenshot` *activates* the target
+first, which racing the loop's own page switch would bring an old tab back.
 
 **The routes are operator-only.** Not in `is_display_path` (which would open them
 to the whole LAN), not in `cast::is_cast_public_path` (which would open them to

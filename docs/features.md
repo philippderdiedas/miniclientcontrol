@@ -354,6 +354,8 @@ Ten events, in four families:
 | `guest_page.ended` | `reason`, `duration_secs` |
 | `display.disconnected` | `error` |
 | `display.connected` | `reconnect` |
+| `display.frozen` | `seconds` (since the last painted frame), `restarted` |
+| `display.recovered` | `seconds` (how long it was frozen) |
 
 Every one of them arrives in the same envelope — `event`, `timestamp`, `device`
 (the machine's hostname), `display` (the screen the event is about), and a `data`
@@ -403,3 +405,21 @@ compositor sat blocked in `vc4_wait_for_seqno`, and the screen showed the same
 frame for thirteen hours while CDP answered every request normally and both page
 targets were present. No disconnect was detected, because nothing had
 disconnected.
+
+**That is what `display.frozen` is for.** The controller watches that each
+screen is still being *painted*: a page that stops getting frames for
+`--freeze-timeout` seconds (default 60) counts as frozen, and a browser the
+controller started itself is restarted — once; a second freeze within half an
+hour is only reported, so a panel switched off at night does not become a
+restart loop. `display.recovered` follows when the screen paints again. Tried
+on a real device by stopping its display server for 90 seconds: noticed after
+about a minute, both browsers restarted, both dashboards back seconds after the
+display server resumed.
+
+## What each screen shows
+
+The admin page's status line, each card on the displays page and the playlist
+item that is playing now show a small picture of the screen — what is really on
+it, overlay, override or guest page included, not the asset's file. It is taken
+only while someone has one of these pages open, at most every ten seconds, and a
+frozen screen's picture is marked "eingefroren seit …".
