@@ -82,7 +82,8 @@ itself. There are four **built-ins**:
   einzeiliger Ticker, der zu langen Text durchscrollt).
 - **QR-Code** — for a text/URL you give, or the guest address for screen sharing,
   with an optional caption.
-- **Countdown** — counts down to a date and time ("noch 3 T 4 Std"), then shows a
+- **Countdown** — counts down to a date and time, as words ("3 T 4 Std") or a
+  digital `DD:HH:MM:SS`, optionally with seconds and milliseconds; then shows a
   text you choose.
 
 Bei Uhr, Banner und Countdown ist die **Textgröße** wählbar — *Automatisch*
@@ -394,7 +395,7 @@ a URL, a method, custom headers, the events it wants, and an optional body
 template. They are never configurable from the command line: a URL alone would
 fit a flag, but per-target headers, event selection and a template do not.
 
-Ten events, in four families:
+Twelve events, in five families:
 
 | Event | Carries |
 |---|---|

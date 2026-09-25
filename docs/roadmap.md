@@ -15,12 +15,15 @@ Nothing is queued; the next entry is picked from below.
 
 ## Later
 
-### Widgets of our own
+### More widgets of our own
 
-Layouts (shipped) place widgets that show a URL or an asset. The next step is
-widgets that are the controller's own content: a ticker, a clock and date, a
-countdown, later RSS, weather, a room-booking board. A widget is what a zone
-shows when it is not somebody else's page. One at a time, each its own spec.
+Layouts place widgets, and built-in widgets the controller renders itself have
+shipped: a **clock**, a **banner** (including a marquee ticker), a **QR** and a
+**countdown**, usable both inside a layout and as a standalone item. What remains
+is content that needs an outside source: **RSS**, **weather**, a **room-booking
+board** — each its own spec, and each has to answer how it behaves on a device
+that is often offline (weather and RSS need the network; the room board needs a
+calendar source).
 
 ### A free-form layout editor
 

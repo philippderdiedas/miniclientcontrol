@@ -93,7 +93,8 @@ If credentials are enabled, the control UI and the API require authentication.
 The operator UI (`/admin.html`, `/playlist.html`, `/assets.html`,
 `/displays.html`, `/webhooks.html`, `/api/*`) requires the credentials. The pages
 the *display* browser renders are exempt, but **only when requested from
-loopback**: `/uploads/*`, `/pdf_viewer.html`, `/pdf.min.js`,
+loopback**: `/uploads/*`, `/pdf_viewer.html`, `/media_viewer.html`,
+`/layout.html`, `/widget.html`, `/api/layout/*`, `/pdf.min.js`,
 `/pdf.worker.min.js`, `/autoscroll.js`, `/no_content.svg`,
 `/empty_playlist.html`, `/logo.svg` and `/api/cast/state`.
 Chromium is driven over CDP and cannot present credentials, so without this
@@ -136,6 +137,8 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --chromium-arg <flag>        (extra browser flags, repeatable)
 --browser-language <list>    (default: de,de-DE,en-US,en)
 --locale <tag>               (dates and times; default: from LC_ALL/LC_TIME/LANG)
+--advance-stall-timeout <s>  (a page counting passes that makes no progress moves on; default: 120)
+--freeze-timeout <s>         (a screen that stops painting is reported frozen; default: 60)
 --managed-cert <auto|off>    (real cert for a <lan-ip>.clientctrl.cc name; default: auto)
 --guest-pages <on|off>       (may guests put a web page on the display; default: off)
 --public-url <none|mdns|X>   (how guests reach this device; default: none;
@@ -152,7 +155,8 @@ declaration.
 
 - Creates the asset directory if missing.
 - Creates/migrates SQLite tables (`assets`, `playlists`, `playlist_items`,
-  `displays`, `settings`, `webhooks`).
+  `displays`, `schedule_windows`, `settings`, `webhooks`, `users`, `sessions`,
+  `user_identities`, `cast_sessions`, `changesets`, `change_requests`).
 - Starts an HTTP server on `0.0.0.0:<port>`.
 - Serves uploaded files from `/uploads/...`.
 - Serves embedded UI files with fallback to `index.html`.

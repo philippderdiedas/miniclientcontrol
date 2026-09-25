@@ -152,7 +152,8 @@ overlay's own QR — one setting, read in three places, never a fourth.
 
 ### What the chooser can be told, and by whom
 
-`/api/cast/info` carries `screens: [{name, label, busy, max_edge}]`, and it is
+`/api/cast/info` carries `screens: [{name, label, busy, max_edge, cast_access,
+page_access}]` (plus a top-level `account` when the request is signed in), and it is
 exempt from authentication regardless of address — it has to be, the guest is by
 definition not loopback. So **any guest on the LAN can read the screen labels and
 watch when each is in use.** That is the price of the chooser and it is paid

@@ -3,22 +3,34 @@
 ## Modules
 
 ```
-src/main.rs      CLI, database bootstrap, auth middleware, router, two listeners
-src/models.rs    CLI arguments, DTOs, AppState
-src/db.rs        run_migrations(): idempotent CREATE TABLE + ADD COLUMN probes
-src/handlers.rs  assets, playlist items, playback control, override
-src/display.rs   the declared screens: derivation, registration, /api/displays
-src/playlists.rs playlists as objects: /api/playlists and the delete guard
-src/browser.rs   the CDP control loop -- all playback logic lives here, one per display
-src/cast/        cast signaling relay and the per-screen session lifecycle
-src/settings.rs  runtime settings, operator credentials, overlay config, /api/settings
-src/chromium.rs  finds, launches and supervises the display browser
-src/tls.rs       self-signed certificate, HTTPS listener, public-address resolution
-src/mdns.rs      publishes an extra .local name via avahi-publish
-src/audio.rs     venue audio through pactl, behind a backend seam
-src/webhook/     outbound webhooks: the Dispatcher on AppState, and its HTTP surface
-src/web.rs       serves web/ embedded with include_dir
-web/             the operator UI and the pages the display browser renders
+src/main.rs        CLI, database bootstrap, auth middleware, router, two listeners
+src/models.rs      CLI arguments, DTOs, AppState
+src/db.rs          run_migrations(): idempotent CREATE TABLE + ADD COLUMN probes
+src/handlers.rs    assets, playlist items, playback control, override
+src/display.rs     the declared screens: derivation, registration, /api/displays
+src/playlists.rs   playlists as objects: /api/playlists and the delete guard
+src/schedule/      the timetable: default playlist + dayparting windows, the resolver
+src/browser.rs     the CDP control loop -- all playback logic lives here, one per display
+src/advance.rs     when an item moves on: Time, or Passes counted by the page
+src/layout.rs      a screen split into widgets on a 24x24 grid (/api/layout)
+src/frames.rs      unlocks framed dashboards in a layout, on its own raw CDP connection
+src/builtin.rs     controller-rendered widgets (clock, banner, QR, countdown) -> /widget.html
+src/freeze.rs      per-screen freeze watcher: notices a screen that stopped painting
+src/screenshot.rs  what a screen shows, as a picture (/api/displays/{name}/screenshot)
+src/cast/          cast signaling relay and the per-screen session lifecycle
+src/guest_page.rs  a guest showing a web page instead of casting; URL redaction
+src/managed_cert.rs a real wildcard certificate for a private address
+src/settings.rs    runtime settings, operator credentials, overlay config, /api/settings
+src/accounts/      users, roles and sessions; the auth middleware's identity resolution
+src/oidc/          single sign-on (OpenID Connect): login and cast-only sessions
+src/proposals/     an editor's changes staged as a changeset for an admin to approve
+src/chromium.rs    finds, launches and supervises the display browser
+src/tls.rs         self-signed certificate, HTTPS listener, public-address resolution
+src/mdns.rs        publishes an extra .local name via avahi-publish
+src/audio.rs       venue audio through pactl, behind a backend seam
+src/webhook/       outbound webhooks: the Dispatcher on AppState, and its HTTP surface
+src/web.rs         serves web/ embedded with include_dir
+web/               the operator UI and the pages the display browser renders
 ```
 
 `web/` is **compiled into the binary**. Editing anything there needs a rebuild;
@@ -43,6 +55,13 @@ settings and the webhook dispatcher. It is three nested loops:
 
 The loop **owns what is on screen**. The API never navigates; it writes state and
 pokes a signal.
+
+Alongside each `browser_loop`, a **freeze watcher** (`src/freeze.rs`) is spawned
+per display: it samples the overlay runtime's frame counter on the page the loop
+publishes, and reports `display.frozen`/`recovered` when a screen stops painting —
+its own task, because the loop parks for long stretches where it could not check.
+Which playlist a loop plays is resolved by `src/schedule/` (the default playlist
+plus dayparting windows), read fresh on every inner pass.
 
 ### Signals
 
@@ -116,8 +135,8 @@ has three kinds of client, and they need different treatment:
 
 | Audience | Reaches | Credentials |
 |---|---|---|
-| **Operator** | `/admin.html`, `/playlist.html`, `/assets.html`, `/displays.html`, `/webhooks.html`, `/api/*` | required, when configured |
-| **Display browser** | `/uploads/*`, `/pdf_viewer.html`, the pdf.js files, `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`, `/api/cast/state` | exempt, **loopback only** |
+| **Operator** | `/admin.html`, `/playlist.html`, `/assets.html`, `/displays.html`, `/webhooks.html`, `/users.html`, `/proposals.html`, `/approvals.html`, `/api/*` | required, when configured |
+| **Display browser** | `/uploads/*`, `/pdf_viewer.html`, `/media_viewer.html`, `/layout.html`, `/widget.html`, `/api/layout/*`, the pdf.js files, `/autoscroll.js`, `/no_content.svg`, `/empty_playlist.html`, `/logo.svg`, `/api/cast/state` | exempt, **loopback only** |
 | **Cast guest** | `/`, `/index.html`, `/cast.html`, `/cast.js`, `/audio.js`, `/cast_display.html`, `/api/cast/{ws,claim,pair,info,qr.svg,audio}` | exempt, **from any address** |
 
 Both lists are literal string matches, and that is what decides the shape of every
@@ -233,12 +252,18 @@ on.
 ## Database
 
 SQLite, path from `--database-path`. Tables: `assets`, `playlists`,
-`playlist_items` (each with a `playlist_id`), `displays` (name, label, assigned
-playlist), `settings` (key/value, for what the operator can change without a
-restart), and `webhooks` (one row per outbound target).
+`playlist_items` (each with a `playlist_id`), `displays` (name, label,
+`default_playlist_id`), `schedule_windows` (dayparting: a playlist for a time
+range on a screen), `settings` (key/value, for what the operator can change
+without a restart), `webhooks` (one row per outbound target), the accounts tables
+`users`, `sessions` and `user_identities` (the last links an account to an OIDC
+`(issuer, subject)`), `cast_sessions` (a cast-only SSO sign-in, no account), and
+the proposal tables `changesets` and `change_requests` (an editor's staged edits
+awaiting an admin).
 
-`displays.playlist_id` is `ON DELETE SET NULL`, which is what makes "a playlist is
-never deleted with a display" true in the schema rather than only in a handler:
+`displays.default_playlist_id` is `ON DELETE SET NULL`, which is what makes "a
+playlist is never deleted with a display" true in the schema rather than only in a
+handler:
 deleting a playlist unassigns it wherever it was assigned, and deleting a display
 row cannot reach the playlist at all. The other direction is the API's job —
 deleting a playlist that still holds items is refused, because `ON DELETE` has no
