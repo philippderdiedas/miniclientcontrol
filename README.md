@@ -632,3 +632,9 @@ a loop, unmuted. `fit_mode` is the layout and `scroll_config` the motion:
 - The server currently uses permissive CORS (`CorsLayer::permissive()`).
 - Max upload body size is configured to 500 MB.
 - This project is designed for trusted local/network environments unless hardened further.
+
+## License
+
+Dual-licensed: **GNU AGPL v3.0** (see [`LICENSE`](LICENSE)) for open-source use,
+or a **commercial licence** for use without the AGPL obligations. Details in
+[`LICENSING.md`](LICENSING.md).

@@ -2,6 +2,9 @@
 name = "miniclientcontrol"
 version = "0.1.0"
 edition = "2021"
+# Dual-licensed: AGPL-3.0-only for open-source use, or a commercial licence.
+# See LICENSING.md.
+license = "AGPL-3.0-only"
 
 [dependencies]
 tokio = { version = "1.49.0", features = ["full"] }
