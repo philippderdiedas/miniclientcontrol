@@ -65,7 +65,34 @@ and the login is confined to that layout so no other page can use it. A dashboar
 must be reachable over HTTPS to keep its login in a widget. Each widget from
 another site is a browser process of its own — a wall of dashboards is light on a
 mini-PC and heavy on a Raspberry Pi. Any item, layout or not, can be **duplicated**
-from its card.
+from its card. A layout has a **Hintergrund**-Farbe für die Fläche hinter und
+zwischen den Widgets (Standard schwarz).
+
+## Built-in widgets
+
+Some content needs neither a URL nor an uploaded file — the controller can draw it
+itself. There are four **built-ins**:
+
+- **Uhr** — the time, large and auto-sized: 12/24-hour, seconds on or off, an
+  optional date line, and a time zone (blank uses the device's).
+- **Banner / Nachricht** — styled text. At **Textgröße** *Automatisch* it is a
+  headline that fills the space (for "GESCHLOSSEN", a room name); at a fixed vmin
+  size it is body text that wraps (links-, zentriert- oder rechtsbündig), for a
+  longer notice. **Überlauf** wählt zwischen Abschneiden und *Lauftext* (ein
+  einzeiliger Ticker, der zu langen Text durchscrollt).
+- **QR-Code** — for a text/URL you give, or the guest address for screen sharing,
+  with an optional caption.
+- **Countdown** — counts down to a date and time ("noch 3 T 4 Std"), then shows a
+  text you choose.
+
+Bei Uhr, Banner und Countdown ist die **Textgröße** wählbar — *Automatisch*
+füllt die Kachel, sonst ein fester Wert in vmin (dieselbe Einheit wie beim
+Overlay).
+
+Each has a background colour, a text colour and a **Schriftart** (Sans, Serif oder
+Monospace — offline vorhanden). A built-in can be a **widget in a layout**
+(pick "Built-in" as the widget's source) or a **whole item on its own** (pick
+"Built-in" when adding an item) — a full-screen clock is just a built-in item.
 
 ## Several screens
 

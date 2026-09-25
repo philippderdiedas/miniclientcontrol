@@ -1,4 +1,5 @@
 mod frames;
+mod builtin;
 mod layout;
 mod screenshot;
 mod freeze;
@@ -68,6 +69,7 @@ pub(crate) fn is_display_path(path: &str) -> bool {
             | "/no_content.svg"
             | "/empty_playlist.html"
             | "/layout.html"
+            | "/widget.html"
             | "/logo.svg"
             // the cast display page reads this to show the sender's HTTPS address;
             // remote operators still need credentials for it

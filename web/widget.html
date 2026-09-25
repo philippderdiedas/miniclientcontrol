@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<title>Widget</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; }
+  #box { flex: 1; display: flex; flex-direction: column; align-items: center;
+         justify-content: center; gap: 0.4em; overflow: hidden; text-align: center;
+         font-family: system-ui, sans-serif; font-weight: 600; line-height: 1.2;
+         padding: 2vmin; box-sizing: border-box; }
+  #box.left { align-items: flex-start; text-align: left; }
+  #box.right { align-items: flex-end; text-align: right; }
+  /* Single line by default so `fit` scales by width -- a wrappable line "fits" a
+     tall cell by breaking, which is the clock wrapping between its digits. The
+     banner's normal mode opts back into wrapping. */
+  .main { font-variant-numeric: tabular-nums; max-width: 100%; white-space: nowrap; }
+  .sub { opacity: 0.85; max-width: 100%; overflow-wrap: anywhere; }
+  svg.qr { background: #fff; border-radius: 0.4em; width: min(80vw, 80vh); height: min(80vw, 80vh); }
+</style>
+</head>
+<body>
+<div id="box"><div class="main" id="main"></div><div class="sub" id="sub"></div></div>
+<script>
+  'use strict';
+  // Decode the self-contained payload the server put in ?c=. Nothing is fetched:
+  // this page is our own, on the loopback origin, so it needs none of the
+  // overlay's defences and no cross-site unlock.
+  function config() {
+    try {
+      const c = new URLSearchParams(location.search).get('c') || '';
+      const json = atob(c.replace(/-/g, '+').replace(/_/g, '/'));
+      return JSON.parse(json);
+    } catch (_) {
+      return { kind: 'banner', text: '' };
+    }
+  }
+  const cfg = config();
+  const box = document.getElementById('box');
+  const main = document.getElementById('main');
+  const sub = document.getElementById('sub');
+  box.style.background = cfg.background_color || '#000';
+  box.style.color = cfg.text_color || '#fff';
+  // Only families the device has offline -- no web fonts to fetch.
+  const FONTS = {
+    sans: 'system-ui, sans-serif',
+    serif: 'Georgia, "Times New Roman", serif',
+    mono: 'ui-monospace, "Courier New", monospace',
+  };
+  box.style.fontFamily = FONTS[cfg.font] || FONTS.sans;
+
+  // Scale a node to fill the cell, within a few iterations. Binary search on the
+  // font size, capped so a single glyph does not overflow on a wide cell.
+  function fit(node, maxVmin) {
+    let lo = 1, hi = maxVmin || 40;
+    for (let i = 0; i < 12; i++) {
+      const mid = (lo + hi) / 2;
+      node.style.fontSize = mid + 'vmin';
+      const over = node.scrollWidth > box.clientWidth - 8 || node.scrollHeight > box.clientHeight - 8;
+      if (over) hi = mid; else lo = mid;
+    }
+    node.style.fontSize = lo + 'vmin';
+  }
+
+  // A fixed size the operator gave, in vmin (of the cell) -- the same unit the
+  // overlay uses. Anything else (absent/null) means fill the cell.
+  function fixedSize() {
+    return typeof cfg.text_size === 'number' && cfg.text_size > 0 ? cfg.text_size : null;
+  }
+
+  // Size the main line: the fixed vmin, or fill the cell via `fit`. `wrap` lets
+  // fixed-size body text (the banner) run to several lines; the clock and
+  // countdown stay on one line so a big font shrinks instead of wrapping between
+  // digits.
+  function sizeMain(maxVmin, wrap) {
+    const step = fixedSize();
+    if (step) {
+      main.style.whiteSpace = wrap ? 'pre-wrap' : 'nowrap';
+      if (wrap) main.style.overflowWrap = 'anywhere';
+      main.style.fontSize = step + 'vmin';
+    } else {
+      fit(main, maxVmin);
+    }
+  }
+
+  function renderClock() {
+    const opts = {
+      hour: '2-digit', minute: '2-digit',
+      hour12: !cfg.format_24h,
+      timeZone: cfg.timezone || undefined,
+    };
+    if (cfg.show_seconds) opts.second = '2-digit';
+    let fmt, dfmt;
+    try { fmt = new Intl.DateTimeFormat(cfg.locale || undefined, opts); }
+    catch (_) { delete opts.timeZone; fmt = new Intl.DateTimeFormat(cfg.locale || undefined, opts); }
+    try {
+      dfmt = new Intl.DateTimeFormat(cfg.locale || undefined, {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+        timeZone: cfg.timezone || undefined,
+      });
+    } catch (_) {
+      dfmt = new Intl.DateTimeFormat(cfg.locale || undefined, {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+      });
+    }
+    const tick = () => {
+      const now = new Date();
+      main.textContent = fmt.format(now);
+      sub.textContent = cfg.show_date ? dfmt.format(now) : '';
+      sizeMain(40, false);
+      if (cfg.show_date) fit(sub, 8);
+    };
+    tick();
+    setInterval(tick, cfg.show_seconds ? 1000 : 15000);
+  }
+
+  function renderBanner() {
+    main.textContent = cfg.text || '';
+    if (cfg.overflow === 'marquee') { marqueeBanner(); return; }
+    // 'auto' is a headline that fills the cell on one line; a fixed size is
+    // wrapped body text at that size, aligned as asked.
+    sizeMain(40, true);
+    if (fixedSize() && cfg.align === 'left') box.classList.add('left');
+    if (fixedSize() && cfg.align === 'right') box.classList.add('right');
+  }
+
+  // A one-line ticker: the text scrolls right-to-left, looping, when the banner's
+  // overflow is set to marquee. Absolute positioning so the transform is the only
+  // thing placing it; centred vertically.
+  function marqueeBanner() {
+    box.style.display = 'block';
+    box.style.position = 'relative';
+    box.style.overflow = 'hidden';
+    main.style.position = 'absolute';
+    main.style.top = '50%';
+    main.style.whiteSpace = 'nowrap';
+    main.style.fontSize = (fixedSize() || 8) + 'vmin';
+    let x, w, cw;
+    const reset = () => { cw = box.clientWidth; w = main.scrollWidth; if (x === undefined || x < -w) x = cw; };
+    reset();
+    let last = performance.now();
+    const step = (t) => {
+      const dt = Math.min((t - last) / 1000, 0.1);
+      last = t;
+      cw = box.clientWidth; w = main.scrollWidth;
+      x -= (cw / 8) * dt;             // about one cell-width every 8 s
+      if (x < -w) x = cw;
+      main.style.transform = `translate(${x}px, -50%)`;
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  function renderQr() {
+    const rows = cfg.qr_modules;
+    if (!Array.isArray(rows) || !rows.length) {
+      main.textContent = '';
+      sub.textContent = cfg.label || '';
+      if (sub.textContent) fit(sub, 6);
+      return;
+    }
+    const NS = 'http://www.w3.org/2000/svg';
+    const n = rows.length, q = 2, span = n + q * 2;
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'qr');
+    svg.setAttribute('viewBox', `0 0 ${span} ${span}`);
+    const bg = document.createElementNS(NS, 'rect');
+    bg.setAttribute('width', span);
+    bg.setAttribute('height', span);
+    bg.setAttribute('fill', '#fff');
+    svg.appendChild(bg);
+    rows.forEach((row, y) => {
+      let x = 0;
+      while (x < n) {
+        if (row[x] === '1') {
+          let w = 1;
+          while (x + w < n && row[x + w] === '1') w++;
+          const r = document.createElementNS(NS, 'rect');
+          r.setAttribute('x', x + q);
+          r.setAttribute('y', y + q);
+          r.setAttribute('width', w);
+          r.setAttribute('height', 1);
+          r.setAttribute('fill', '#000');
+          svg.appendChild(r);
+          x += w;
+        } else {
+          x++;
+        }
+      }
+    });
+    main.replaceChildren(svg);
+    sub.textContent = cfg.label || '';
+    if (sub.textContent) fit(sub, 6);
+  }
+
+  function renderCountdown() {
+    const target = new Date(cfg.target);
+    const tick = () => {
+      const ms = target - new Date();
+      if (Number.isNaN(target.getTime()) || ms <= 0) {
+        main.textContent = cfg.done_text || '';
+      } else {
+        const d = Math.floor(ms / 86400000);
+        const h = Math.floor((ms % 86400000) / 3600000);
+        const m = Math.floor((ms % 3600000) / 60000);
+        const s = Math.floor((ms % 60000) / 1000);
+        const p2 = (n) => String(n).padStart(2, '0');
+        if (cfg.digital) {
+          // DD:HH:MM:SS, days only once there are any, optional .mmm.
+          let out = (d > 0 ? `${d}:${p2(h)}` : `${p2(h)}`) + `:${p2(m)}:${p2(s)}`;
+          if (cfg.show_ms) out += `.${String(ms % 1000).padStart(3, '0')}`;
+          main.textContent = out;
+        } else {
+          const parts = [];
+          if (d > 0) parts.push(`${d} T`);
+          if (d > 0 || h > 0) parts.push(`${h} Std`);
+          parts.push(`${m} Min`);
+          if (cfg.show_seconds || cfg.show_ms) parts.push(`${s} Sek`);
+          if (cfg.show_ms) parts.push(`${String(ms % 1000).padStart(3, '0')} ms`);
+          main.textContent = parts.join(' ');
+        }
+      }
+      sub.textContent = cfg.label || '';
+      sizeMain(30, false);
+      if (sub.textContent) fit(sub, 6);
+    };
+    tick();
+    // Fast enough for the finest unit shown: ms needs a near-frame tick, seconds
+    // one a second, otherwise the minute line only moves twice a minute.
+    setInterval(tick, cfg.show_ms ? 50 : ((cfg.show_seconds || cfg.digital) ? 1000 : 30000));
+  }
+
+  const renderers = { clock: renderClock, banner: renderBanner, qr: renderQr, countdown: renderCountdown };
+  (renderers[cfg.kind] || renderBanner)();
+  // The cell can change size (a layout reload, a rotate); re-fit by reloading,
+  // which is cheap for a self-contained page and re-runs the binary-search fit.
+  let resizeTimer = null;
+  addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => location.reload(), 300);
+  });
+</script>
+</body>
+</html>

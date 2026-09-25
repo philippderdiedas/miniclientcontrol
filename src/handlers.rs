@@ -53,6 +53,8 @@ pub struct AddToPlaylistRequest {
     pub advance: Option<crate::advance::Advance>,
     /// A layout instead of a URL or an asset: widgets on the 24×24 grid.
     pub layout: Option<crate::layout::Layout>,
+    /// A built-in the controller renders (clock, banner, QR, countdown).
+    pub builtin: Option<crate::builtin::Builtin>,
     pub enabled: Option<bool>,
     pub keep_loaded: Option<bool>,
     pub start_date: Option<String>,
@@ -99,6 +101,8 @@ pub struct UpdatePlaylistRequest {
     pub asset_id: Option<i64>,
     /// Replacement layout. Only accepted for items that already are layouts.
     pub layout: Option<crate::layout::Layout>,
+    /// Replacement built-in. Only accepted for items that already are built-ins.
+    pub builtin: Option<crate::builtin::Builtin>,
     /// Move the item into another playlist. Sent on its own -- see the rule at
     /// the top of `update_playlist_item`.
     ///
@@ -136,6 +140,7 @@ impl UpdatePlaylistRequest {
             url,
             asset_id,
             layout,
+            builtin,
             playlist_id: _,
         } = self;
 
@@ -153,6 +158,7 @@ impl UpdatePlaylistRequest {
             || url.is_some()
             || asset_id.is_some()
             || layout.is_some()
+            || builtin.is_some()
     }
 }
 
@@ -480,6 +486,7 @@ pub async fn get_playlist(
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.layout, 'null') as layout,
+            COALESCE(p.builtin, 'null') as builtin,
             COALESCE(p.overlay_config, 'null') as overlay_config,
             COALESCE(p.fit_mode, 'contain') as fit_mode,
             COALESCE(p.fit_background, '#000000') as fit_background,
@@ -502,6 +509,7 @@ pub async fn get_playlist(
 }
 
 const LAYOUT_PASSES: &str = "Ein Layout wechselt nach Zeit; Durchläufe gibt es nur für einzelne Inhalte.";
+const BUILTIN_PASSES: &str = "Ein Built-in läuft nach Zeit, nicht nach Durchläufen.";
 
 /// Every asset a layout names must exist: a dangling id is a widget that shows
 /// nothing, with no error anywhere.
@@ -529,12 +537,13 @@ pub async fn add_to_playlist(
         payload.asset_id.is_some(),
         !payload.url.as_deref().unwrap_or("").trim().is_empty(),
         payload.layout.is_some(),
+        payload.builtin.is_some(),
     ]
     .iter()
     .filter(|s| **s)
     .count();
     if sources != 1 {
-        return bad_request("Ein Element ist genau eines: eine URL, ein Asset oder ein Layout.");
+        return bad_request("Ein Element ist genau eines: eine URL, ein Asset, ein Layout oder ein Built-in.");
     }
     if let Some(layout) = &payload.layout {
         if let Err(message) = layout.check() {
@@ -546,6 +555,12 @@ pub async fn add_to_playlist(
         if matches!(payload.advance, Some(crate::advance::Advance::Passes { .. })) {
             return bad_request(LAYOUT_PASSES);
         }
+    }
+    // A built-in runs by time; a pass has no meaning across a clock or a banner.
+    if payload.builtin.is_some()
+        && matches!(payload.advance, Some(crate::advance::Advance::Passes { .. }))
+    {
+        return bad_request(BUILTIN_PASSES);
     }
 
     // Checked before anything is read or written, so a refusal leaves no trace.
@@ -606,8 +621,12 @@ pub async fn add_to_playlist(
         .filter(|overlay| overlay.matters())
         .map(sqlx::types::Json);
 
+    let builtin = payload.builtin.map(crate::builtin::Builtin::sanitized);
+    // Layouts too: a built-in widget inside one must get the same caps as a
+    // standalone built-in, and the background must be a real colour.
+    let layout = payload.layout.map(|l| l.sanitized());
     let inserted = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, advance, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background, layout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, advance, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background, layout, builtin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
@@ -622,7 +641,8 @@ pub async fn add_to_playlist(
     .bind(payload.playlist_id)
     .bind(fit_mode.as_str())
     .bind(fit_background)
-    .bind(sqlx::types::Json(payload.layout))
+    .bind(sqlx::types::Json(layout))
+    .bind(sqlx::types::Json(builtin))
     .execute(&state.pool)
     .await;
     let id = match inserted {
@@ -768,7 +788,7 @@ pub async fn update_playlist_item(
             return bad_request(LAYOUT_PASSES);
         }
         if let Err(e) = sqlx::query("UPDATE playlist_items SET layout = ? WHERE id = ?")
-            .bind(sqlx::types::Json(layout))
+            .bind(sqlx::types::Json(layout.clone().sanitized()))
             .bind(id)
             .execute(&state.pool)
             .await
@@ -777,19 +797,46 @@ pub async fn update_playlist_item(
         }
     }
 
+    // A built-in replaces a built-in only, the same like-for-like rule as a
+    // layout: turning a URL/asset/layout item into a built-in and back would need
+    // the other columns cleared in the same write.
+    if let Some(builtin) = &payload.builtin {
+        let is_builtin: Option<bool> = sqlx::query_scalar(
+            "SELECT COALESCE(builtin, 'null') != 'null' FROM playlist_items WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+        let Some(is_builtin) = is_builtin else {
+            return (StatusCode::NOT_FOUND, Json(ApiError { error: format!("Element {} gibt es nicht.", id) })).into_response();
+        };
+        if !is_builtin {
+            return bad_request("Nur ein Built-in-Element kann ein Built-in bekommen.");
+        }
+        if let Err(e) = sqlx::query("UPDATE playlist_items SET builtin = ? WHERE id = ?")
+            .bind(sqlx::types::Json(builtin.clone().sanitized()))
+            .bind(id)
+            .execute(&state.pool)
+            .await
+        {
+            error!("Failed to update the built-in of playlist item {}: {}", id, e);
+        }
+    }
+
     // A source edit may only swap like for like: a URL item gets a different URL, an
     // asset item a different asset. Allowing a kind change would need the other column
     // cleared in the same write, and `playlist_target_url` silently prefers one column
     // over the other, so a half-changed row plays the wrong thing with no error.
     if payload.url.is_some() || payload.asset_id.is_some() {
-        let existing = sqlx::query_as::<_, (Option<i64>, Option<String>, bool)>(
-            "SELECT asset_id, url, COALESCE(layout, 'null') != 'null' FROM playlist_items WHERE id = ?",
+        let existing = sqlx::query_as::<_, (Option<i64>, Option<String>, bool, bool)>(
+            "SELECT asset_id, url, COALESCE(layout, 'null') != 'null', COALESCE(builtin, 'null') != 'null' FROM playlist_items WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&state.pool)
         .await;
 
-        let (existing_asset_id, _existing_url, is_layout) = match existing {
+        let (existing_asset_id, _existing_url, is_layout, is_builtin) = match existing {
             Ok(Some(row)) => row,
             Ok(None) => {
                 return (
@@ -809,6 +856,9 @@ pub async fn update_playlist_item(
         let is_asset_item = existing_asset_id.is_some();
         if is_layout {
             return bad_request("Ein Layout bekommt keine URL und kein Asset, nur Widgets.");
+        }
+        if is_builtin {
+            return bad_request("Ein Built-in bekommt keine URL und kein Asset.");
         }
 
         if payload.url.is_some() && is_asset_item {
@@ -947,9 +997,9 @@ pub async fn update_playlist_item(
 /// "the same L-shape for ten items" without named layout templates.
 pub async fn duplicate_playlist_item(State(state): State<AppState>, Path(id): Path<i64>) -> axum::response::Response {
     let inserted = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, layout, advance, is_enabled, keep_loaded, start_date, end_date,
+        "INSERT INTO playlist_items (asset_id, url, layout, builtin, advance, is_enabled, keep_loaded, start_date, end_date,
              scroll_config, overlay_config, playlist_id, fit_mode, fit_background, play_order)
-         SELECT asset_id, url, layout, advance, is_enabled, keep_loaded, start_date, end_date,
+         SELECT asset_id, url, layout, builtin, advance, is_enabled, keep_loaded, start_date, end_date,
              scroll_config, overlay_config, playlist_id, fit_mode, fit_background,
              (SELECT COALESCE(MAX(q.play_order), 0) + 1 FROM playlist_items q WHERE q.playlist_id IS p.playlist_id)
          FROM playlist_items p WHERE p.id = ?",
@@ -1700,6 +1750,7 @@ mod tests {
             url: None,
             asset_id: None,
             layout: None,
+            builtin: None,
             playlist_id: Some(Some(2)),
         };
         assert!(!request.edits_besides_the_playlist(), "a move on its own");

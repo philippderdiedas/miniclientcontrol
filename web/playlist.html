@@ -187,6 +187,7 @@
           <select id="addKind">
             <option value="url">Seite / Asset</option>
             <option value="layout">Layout</option>
+            <option value="builtin">Built-in</option>
           </select>
         </label>
         <label class="f addSrc"><span>Asset</span>
@@ -207,6 +208,7 @@
       </div>
       <div id="addScroll"></div>
       <div id="addLayout" hidden></div>
+      <div id="addBuiltin" hidden></div>
       <div class="actions">
         <button type="button" class="primary" id="addBtn">Hinzufügen</button>
         <span class="feedback" id="addFeedback"></span>
@@ -227,6 +229,7 @@
 
   <script src="/preview.js"></script>
   <script src="/layout-editor.js"></script>
+  <script src="/builtin-editor.js"></script>
   <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
   <script src="/proposals.js"></script>
@@ -927,13 +930,15 @@
       // asset picker; a layout gets the grid editor. The server rejects any
       // other direction, so the UI never offers it.
       const isLayout = item.layout !== null && item.layout !== undefined;
-      const isAsset = !isLayout && item.asset_id !== null && item.asset_id !== undefined;
-      const urlInput = (isLayout || isAsset) ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
+      const isBuiltin = !isLayout && item.builtin !== null && item.builtin !== undefined;
+      const isAsset = !isLayout && !isBuiltin && item.asset_id !== null && item.asset_id !== undefined;
+      const urlInput = (isLayout || isBuiltin || isAsset) ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
       const assetPicker = isAsset ? assetSelect(item.asset_id) : null;
       const assetThumb = isAsset ? Preview.follow(assetPicker, assetById) : null;
       const layoutEditor = isLayout
         ? LayoutEditor.create({ layout: item.layout, aspect: screenAspect(), assets, scrollEditor, assetSelect, el })
         : null;
+      const builtinEditor = isBuiltin ? BuiltinEditor.create({ builtin: item.builtin, el }) : null;
 
       const advance = advanceEditor(item.advance);
       const enabled = el('input', { type: 'checkbox', checked: !!(item.enabled ?? item.is_enabled) });
@@ -943,7 +948,8 @@
 
       const srcField = isLayout
         ? field('Layout', el('span', { text: `${(item.layout.widgets || []).length} Widget(s)` }))
-        : (isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput));
+        : (isBuiltin ? field('Built-in', el('span', { text: item.builtin.kind }))
+          : (isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput)));
       card.append(el('div', { class: 'grid' },
         srcField,
         field('Weiter nach', advance.root),
@@ -953,11 +959,12 @@
         field('Ende', end)));
 
       if (isLayout) card.append(layoutEditor.root);
+      if (isBuiltin) card.append(builtinEditor.root);
 
-      const scroll = isLayout ? null : scrollEditor(item.scroll_config);
+      const scroll = (isLayout || isBuiltin) ? null : scrollEditor(item.scroll_config);
       if (scroll) card.append(scroll.root);
       const isVideo = (item.mimetype || '').toLowerCase().startsWith('video/');
-      const recheck = () => advance.setCountable(!isLayout && (isVideo || (scroll && scroll.read().type !== 'None')));
+      const recheck = () => advance.setCountable(!isLayout && !isBuiltin && (isVideo || (scroll && scroll.read().type !== 'None')));
       if (scroll) scroll.onInput(recheck);
       recheck();
 
@@ -1039,6 +1046,8 @@
         };
         if (isLayout) {
           payload.layout = layoutEditor.read();
+        } else if (isBuiltin) {
+          payload.builtin = builtinEditor.read();
         } else {
           payload.scroll_config = scroll.read();
           if (fit) Object.assign(payload, fit.read());
@@ -1303,19 +1312,27 @@
     // add form switches to it, so it takes the current screen's aspect ratio
     // and the latest assets.
     let addLayoutEditor = null;
+    let addBuiltinEditor = null;
     const addKind = document.getElementById('addKind');
     const addLayoutBox = document.getElementById('addLayout');
+    const addBuiltinBox = document.getElementById('addBuiltin');
     const syncAddKind = () => {
       const isLayout = addKind.value === 'layout';
-      for (const n of document.querySelectorAll('.addSrc')) n.hidden = isLayout;
-      document.getElementById('addScroll').hidden = isLayout;
+      const isBuiltin = addKind.value === 'builtin';
+      for (const n of document.querySelectorAll('.addSrc')) n.hidden = isLayout || isBuiltin;
+      document.getElementById('addScroll').hidden = isLayout || isBuiltin;
       addLayoutBox.hidden = !isLayout;
-      addAdvance.setCountable(!isLayout);
+      addBuiltinBox.hidden = !isBuiltin;
+      // Layout and built-in both run by time; only single content can count passes.
+      addAdvance.setCountable(!isLayout && !isBuiltin);
       if (isLayout) {
         addLayoutEditor = LayoutEditor.create({
           layout: null, aspect: screenAspect(), assets, scrollEditor, assetSelect, el,
         });
         addLayoutBox.replaceChildren(addLayoutEditor.root);
+      } else if (isBuiltin) {
+        addBuiltinEditor = BuiltinEditor.create({ builtin: null, el });
+        addBuiltinBox.replaceChildren(addBuiltinEditor.root);
       } else {
         addCountable();
       }
@@ -1343,10 +1360,11 @@
       const feedback = document.getElementById('addFeedback');
       if (!currentPlaylist) { flash(feedback, 'Keine Playlist ausgewählt.', true); return; }
       const isLayout = addKind.value === 'layout';
+      const isBuiltin = addKind.value === 'builtin';
       const assetVal = document.getElementById('addAsset').value;
       const urlVal = document.getElementById('addUrl').value.trim();
-      if (!isLayout && !assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
-      if (!isLayout && assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
+      if (!isLayout && !isBuiltin && !assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
+      if (!isLayout && !isBuiltin && assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
 
       const payload = {
         advance: addAdvance.read(),
@@ -1358,6 +1376,8 @@
       };
       if (isLayout) {
         payload.layout = addLayoutEditor.read();
+      } else if (isBuiltin) {
+        payload.builtin = addBuiltinEditor.read();
       } else {
         payload.asset_id = assetVal ? Number(assetVal) : null;
         payload.url = urlVal || null;

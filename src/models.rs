@@ -401,6 +401,10 @@ pub struct PlaylistItemWithAsset {
     #[sqlx(default)]
     pub layout: sqlx::types::Json<Option<crate::layout::Layout>>,
 
+    /// A standalone built-in item; `None` for url/asset/layout items.
+    #[sqlx(default)]
+    pub builtin: sqlx::types::Json<Option<crate::builtin::Builtin>>,
+
     /// `FitMode` by name. A `String` rather than the enum, which would need a
     /// `sqlx::Type` impl to decode; parsed with `FitMode::from_value` where it is
     /// used, and that parse is total anyway.

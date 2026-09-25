@@ -963,11 +963,18 @@ A playlist item can be a **layout**: widgets on a fixed 24×24 grid
 `layout.html?item=<id>` — a display path — which builds a CSS grid of iframes
 from `/api/layout/<id>`. The rules:
 
-- **An item is exactly one of url / asset / layout.** The add/update handlers
-  count sources and refuse anything but one; a layout replaces a layout only,
-  never a URL or asset item and back. `advance` for a layout is time-only
+- **An item is exactly one of url / asset / layout / builtin.** The add/update
+  handlers count sources and refuse anything but one; a layout replaces a layout
+  only, never a URL or asset item and back. `advance` for a layout is time-only
   (*passes* has no meaning across widgets). `check()` refuses a widget outside
   the grid, a zero size, an overlap, an empty layout or more than 12.
+- **`Layout::sanitized` is called before every store**, in `add_to_playlist` and
+  `update_playlist_item`, so a **built-in widget inside a layout** gets the same
+  caps as a standalone built-in (`Builtin::sanitized`) — the store sites must not
+  bind `payload.layout` raw. It also drops a `background` that is not a hex
+  colour. `Layout::background` is the colour behind and between the widgets,
+  returned by `widgets_for_display` and applied by `layout.html` (black when
+  unset).
 - **Framed dashboards are unlocked by `src/frames.rs`, on its own raw CDP
   connection** (tokio-tungstenite, flattened sessions) — not chromiumoxide,
   which exposes neither the browser target stream nor per-frame sessions, and
@@ -1013,6 +1020,42 @@ from `/api/layout/<id>`. The rules:
   `localhost` or over HTTPS. Real dashboards are HTTPS.
 - The lab this came from is `tests/cast/test_layouts.py` case `[184]`, kept so a
   Chromium change to any measured behaviour fails loudly.
+
+## Built-in widgets (`src/builtin.rs`, `web/widget.html`)
+
+Content the controller renders itself — a **clock**, a **banner** (headline that
+fills the cell, or wrapped body text), a **QR**, a **countdown**. Usable two ways,
+both resolving through the same code:
+
+- a **layout widget** source (`layout::Source::Builtin`, a third kind beside
+  `Url`/`Asset`), and
+- a **standalone playlist item** (`playlist_items.builtin`, JSON, `COALESCE`'d).
+  An item is exactly one of url / asset / layout / builtin; the handlers count
+  sources and the like-for-like rule refuses turning one kind into another.
+  `advance` for a builtin is **time-only** (`Passes` is refused, as for a layout).
+
+The rules:
+
+- **`builtin::resolve` is the only resolver.** It encodes a self-contained
+  payload into `http://127.0.0.1:<port>/widget.html?c=<base64url json>`, adding the
+  fields only the server has: the QR module matrix (`cast::qr_matrix`), the
+  resolved guest URL (`cast::sender_url`) for a `cast`-source QR, and the locale.
+  These are the **same sources the overlay uses**, so nothing drifts. Both
+  `layout::widgets_for_display` and `browser::playlist_target_url` call it.
+- **`web/widget.html` fetches nothing and needs no defences.** It is our own page
+  on the loopback origin, so — unlike the overlay injected into foreign pages — it
+  needs no shadow DOM / popover / CSSOM tricks, and no `frames.rs` unlock (that is
+  only for cross-site dashboards). It decodes `c`, renders the kind, fills the
+  cell, and ticks client-side for the clock and countdown. It is in
+  `is_display_path` (the loopback display loads it with no credentials).
+- **`Builtin::sanitized` caps the free text** (banner 500, QR text 500, labels
+  100) so a widget URL cannot grow without bound. Unparseable values fall back on
+  the page, never error — a screen has nobody in front of it.
+- `web/widget.html` and `web/builtin-editor.js` are compiled in via `include_dir`;
+  editing needs a rebuild, and both were new files, so they needed `touch
+  src/web.rs`. `builtin-editor.js` is the one config editor, reused by the layout
+  widget picker (`layout-editor.js`) and the playlist item kind (`playlist.html`).
+- The lab is `tests/cast/test_builtin.py`.
 
 ## Settings (`src/settings.rs`)
 

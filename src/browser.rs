@@ -270,6 +270,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
             COALESCE(p.layout, 'null') as layout,
+            COALESCE(p.builtin, 'null') as builtin,
                     COALESCE(p.fit_mode, 'contain') as fit_mode,
                     COALESCE(p.fit_background, '#000000') as fit_background,
                     a.local_path, a.mimetype, a.filename
@@ -299,6 +300,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             if let Err(e) = reconcile_keep_loaded_tabs(
                 &mut browser,
                 &state,
+                &display,
                 &playlist,
                 &mut keep_loaded_tabs,
                 &dynamic_page,
@@ -421,7 +423,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     *lock = Some(item.id);
                 }
 
-                let target_url = playlist_target_url(&state, item);
+                let target_url = playlist_target_url(&state, &display, item).await;
 
                 // Clamp before the cast: a negative i64 wraps to a ~584-billion-year
                 // u64 and parks the playlist on this item forever; 0 spins the loop.
@@ -947,6 +949,7 @@ async fn run_override_loop(
 async fn reconcile_keep_loaded_tabs(
     browser: &mut Browser,
     state: &AppState,
+    display: &Display,
     playlist: &[PlaylistItemWithAsset],
     tabs: &mut HashMap<i64, (Page, String)>,
     dynamic_page: &Page,
@@ -969,7 +972,7 @@ async fn reconcile_keep_loaded_tabs(
     }
 
     for item in playlist.iter().filter(|item| item.keep_loaded) {
-        let target_url = playlist_target_url(state, item);
+        let target_url = playlist_target_url(state, display, item).await;
         if let Some((tab, loaded_url)) = tabs.get_mut(&item.id) {
             if loaded_url != &target_url {
                 navigate_page(tab, &target_url).await?;
@@ -989,10 +992,15 @@ async fn reconcile_keep_loaded_tabs(
     Ok(())
 }
 
-fn playlist_target_url(state: &AppState, item: &PlaylistItemWithAsset) -> String {
+async fn playlist_target_url(state: &AppState, display: &Display, item: &PlaylistItemWithAsset) -> String {
     // A layout is a page of the controller's own, which frames its widgets.
     if item.layout.0.is_some() {
         return format!("http://127.0.0.1:{}/layout.html?item={}", state.args.port, item.id);
+    }
+    // A built-in is a controller-rendered page; the resolver adds the QR/cast/
+    // locale bits and encodes the config into the widget page's URL.
+    if let Some(b) = item.builtin.0.as_ref() {
+        return crate::builtin::resolve(state, Some(display), b).await;
     }
     if let Some(url) = &item.url {
         return url.clone();

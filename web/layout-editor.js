@@ -51,7 +51,8 @@
       ? (region ? [{ box: { x: region.x, y: region.y, w: region.w, h: region.h }, source: null }] : [])
       : (layout && Array.isArray(layout.widgets) ? layout.widgets : []).map((w) => ({
           box: { x: w.x, y: w.y, w: w.w, h: w.h },
-          source: w.source && w.source.asset_id != null ? { asset_id: w.source.asset_id } : { url: (w.source && w.source.url) || '' },
+          source: w.source && w.source.kind ? w.source
+            : (w.source && w.source.asset_id != null ? { asset_id: w.source.asset_id } : { url: (w.source && w.source.url) || '' }),
           scroll_config: w.scroll_config || { type: 'None' },
           fit_mode: w.fit_mode || 'contain',
         }));
@@ -82,6 +83,7 @@
     function label(widget) {
       const s = widget.source;
       if (!s) return 'Overlay';
+      if (s.kind) return 'Built-in: ' + s.kind;
       return s.asset_id != null ? `Asset ${s.asset_id}` : (s.url ? s.url.replace(/^https?:\/\//, '') : 'leer');
     }
 
@@ -97,30 +99,43 @@
       if (!e) {
         const kind = el('select', {},
           el('option', { value: 'url', text: 'Seite (URL)' }),
-          el('option', { value: 'asset', text: 'Asset' }));
-        kind.value = selected.source.asset_id != null ? 'asset' : 'url';
-        const url = el('input', { value: selected.source.url || '', placeholder: 'https://...', style: 'width:min(360px,100%)' });
-        const asset = assetSelect(selected.source.asset_id);
+          el('option', { value: 'asset', text: 'Asset' }),
+          el('option', { value: 'builtin', text: 'Built-in' }));
+        kind.value = selected.source && selected.source.kind ? 'builtin'
+          : (selected.source && selected.source.asset_id != null ? 'asset' : 'url');
+        const url = el('input', { value: (selected.source && selected.source.url) || '', placeholder: 'https://...', style: 'width:min(360px,100%)' });
+        const asset = assetSelect(selected.source && selected.source.asset_id);
         const scroll = scrollEditor(selected.scroll_config);
         const fit = el('select', {}, ...['contain', 'cover', 'fill', 'none', 'width', 'height'].map((v) =>
           el('option', { value: v, text: v })));
         fit.value = selected.fit_mode;
+        // The built-in sub-editor is dependency-free and shares this page's `el`.
+        const builtin = BuiltinEditor.create({ builtin: selected.source && selected.source.kind ? selected.source : null, el });
+        builtin.root.addEventListener('input', commit);
+        builtin.root.addEventListener('change', commit);
         const sync = () => {
-          url.hidden = kind.value !== 'url';
-          asset.hidden = kind.value !== 'asset';
+          const k = kind.value;
+          url.hidden = k !== 'url';
+          asset.hidden = k !== 'asset';
+          builtin.root.hidden = k !== 'builtin';
+          // A built-in has no scroll or fit -- it renders itself into the cell.
+          scroll.root.hidden = k === 'builtin';
         };
         kind.addEventListener('change', () => { sync(); commit(); });
         [url, asset, fit].forEach((n) => n.addEventListener('input', commit));
         scroll.onInput(commit);
         sync();
-        e = { kind, url, asset, scroll, fit };
+        e = { kind, url, asset, scroll, fit, builtin };
         editors.set(selected, e);
       }
       const field = (t, n) => el('label', { class: 'f' }, el('span', { text: t }), n);
+      const source = e.kind.value === 'url' ? field('URL', e.url)
+        : (e.kind.value === 'asset' ? field('Asset', e.asset) : el('span'));
       fields.append(el('div', { class: 'grid' },
         field('Quelle', e.kind),
-        e.kind.value === 'url' ? field('URL', e.url) : field('Asset', e.asset),
-        field('Einpassen', e.fit)),
+        source,
+        e.kind.value === 'builtin' ? el('span') : field('Einpassen', e.fit)),
+        e.builtin.root,
         e.scroll.root);
     }
 
@@ -128,9 +143,13 @@
       if (!selected) return;
       const e = editors.get(selected);
       if (!e) return;
-      selected.source = e.kind.value === 'asset'
-        ? { asset_id: e.asset.value ? Number(e.asset.value) : null }
-        : { url: e.url.value.trim() };
+      if (e.kind.value === 'builtin') {
+        selected.source = e.builtin.read();
+      } else if (e.kind.value === 'asset') {
+        selected.source = { asset_id: e.asset.value ? Number(e.asset.value) : null };
+      } else {
+        selected.source = { url: e.url.value.trim() };
+      }
       selected.scroll_config = e.scroll.read();
       selected.fit_mode = e.fit.value;
       const node = selected._node;
@@ -261,6 +280,12 @@
       render();
     }
 
+    // Layout background (behind and between the widgets). A checkbox, because a
+    // colour input has no empty state; unchecked = the default black.
+    const bgOwn = el('input', { type: 'checkbox' });
+    bgOwn.checked = !!(layout && layout.background);
+    const bgInput = el('input', { type: 'color', value: (layout && layout.background) || '#000000' });
+
     let toolbar;
     if (boxMode) {
       // A preset per named place, plus (when the box may be dropped) a way back
@@ -289,7 +314,8 @@
       });
       const addBtn = el('button', { type: 'button', text: '+ Widget' });
       addBtn.addEventListener('click', () => { if (widgets.length < MAX) addWidget(); });
-      toolbar = el('div', { class: 'row' }, templateSelect, addBtn, hint);
+      const bgLabel = el('label', { class: 'inline' }, bgOwn, el('span', { text: 'Hintergrund' }), bgInput);
+      toolbar = el('div', { class: 'row' }, templateSelect, addBtn, bgLabel, hint);
     }
 
     const root = el('div', { class: 'layout-editor' }, toolbar, canvas, fields);
@@ -307,10 +333,12 @@
         return {
           widgets: widgets.map((w) => ({
             x: w.box.x, y: w.box.y, w: w.box.w, h: w.box.h,
-            source: w.source.asset_id != null ? { asset_id: w.source.asset_id } : { url: w.source.url },
+            source: w.source.kind ? w.source
+              : (w.source.asset_id != null ? { asset_id: w.source.asset_id } : { url: w.source.url }),
             scroll_config: w.scroll_config,
             fit_mode: w.fit_mode,
           })),
+          background: bgOwn.checked ? bgInput.value : null,
         };
       },
     };

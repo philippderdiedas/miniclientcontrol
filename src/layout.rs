@@ -14,6 +14,10 @@ pub const MAX_WIDGETS: usize = 12;
 pub enum Source {
     Url { url: String },
     Asset { asset_id: i64 },
+    // A built-in the controller renders. Internally tagged by `kind`, so an
+    // untagged `{ "kind": ... }` object matches only this -- Url needs `url`,
+    // Asset needs `asset_id`.
+    Builtin(crate::builtin::Builtin),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -31,9 +35,13 @@ pub struct Widget {
     pub fit_background: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Layout {
     pub widgets: Vec<Widget>,
+    /// The colour behind and between the widgets (uncovered grid cells). Hex;
+    /// `None` is the default black the layout page falls back to.
+    #[serde(default)]
+    pub background: Option<String>,
 }
 
 impl Layout {
@@ -78,8 +86,25 @@ impl Layout {
     pub fn asset_ids(&self) -> Vec<i64> {
         self.widgets.iter().filter_map(|w| match w.source {
             Source::Asset { asset_id } => Some(asset_id),
-            Source::Url { .. } => None,
+            Source::Url { .. } | Source::Builtin(_) => None,
         }).collect()
+    }
+
+    /// Tidy content before storing: cap each built-in widget's fields (the same
+    /// caps a standalone built-in gets), and drop a background that is not a hex
+    /// colour. Geometry is `check`'s job; this only touches content.
+    pub fn sanitized(mut self) -> Self {
+        for w in &mut self.widgets {
+            if let Source::Builtin(b) = &w.source {
+                w.source = Source::Builtin(b.clone().sanitized());
+            }
+        }
+        if let Some(bg) = &self.background {
+            if !crate::settings::is_hex_colour(bg) {
+                self.background = None;
+            }
+        }
+        self
     }
 }
 
@@ -104,6 +129,10 @@ pub async fn widgets_for_display(
     for widget in &layout.widgets {
         let src = match &widget.source {
             Source::Url { url } => url.clone(),
+            // No display scope here: a layout resolves against the primary, the
+            // same way `/api/overlay` does, so a cast-QR built-in uses the
+            // chooser/primary URL.
+            Source::Builtin(b) => crate::builtin::resolve(&state, None, b).await,
             Source::Asset { asset_id } => {
                 let asset: Option<(String, String)> =
                     sqlx::query_as("SELECT local_path, mimetype FROM assets WHERE id = ?")
@@ -129,7 +158,7 @@ pub async fn widgets_for_display(
             "x": widget.x, "y": widget.y, "w": widget.w, "h": widget.h, "src": src, "scroll": scroll,
         }));
     }
-    axum::Json(serde_json::json!({ "widgets": widgets })).into_response()
+    axum::Json(serde_json::json!({ "widgets": widgets, "background": layout.background })).into_response()
 }
 
 #[cfg(test)]
@@ -142,31 +171,49 @@ mod tests {
     }
 
     #[test]
+    fn a_builtin_widget_round_trips_and_needs_no_asset() {
+        let w = Widget {
+            x: 0, y: 0, w: 12, h: 12,
+            source: Source::Builtin(crate::builtin::Builtin::Clock {
+                format_24h: true, show_seconds: false, show_date: false,
+                timezone: String::new(), text_size: None,
+                style: crate::builtin::Style::default(),
+            }),
+            scroll_config: ScrollMode::None, fit_mode: None, fit_background: None,
+        };
+        let layout = Layout { widgets: vec![w], ..Default::default() };
+        assert!(layout.check().is_ok());
+        assert!(layout.asset_ids().is_empty());
+        let v = serde_json::to_value(&layout).unwrap();
+        assert_eq!(serde_json::from_value::<Layout>(v).unwrap(), layout);
+    }
+
+    #[test]
     fn an_l_shape_is_valid() {
-        let l = Layout { widgets: vec![url(0, 0, 18, 20), url(18, 0, 6, 20), url(0, 20, 24, 4)] };
+        let l = Layout { widgets: vec![url(0, 0, 18, 20), url(18, 0, 6, 20), url(0, 20, 24, 4)], ..Default::default() };
         assert_eq!(l.check(), Ok(()));
     }
 
     #[test]
     fn the_refusals() {
-        assert!(Layout { widgets: vec![] }.check().is_err());
-        assert!(Layout { widgets: vec![url(20, 0, 5, 1)] }.check().unwrap_err().contains("ragt"));
-        assert!(Layout { widgets: vec![url(0, 0, 0, 1)] }.check().unwrap_err().contains("leer"));
-        assert!(Layout { widgets: vec![url(0, 0, 12, 12), url(11, 11, 4, 4)] }.check().unwrap_err().contains("überlappen"));
-        assert!(Layout { widgets: (0..13).map(|i| url(i, 0, 1, 1)).collect() }.check().unwrap_err().contains("Höchstens"));
+        assert!(Layout { widgets: vec![], ..Default::default() }.check().is_err());
+        assert!(Layout { widgets: vec![url(20, 0, 5, 1)], ..Default::default() }.check().unwrap_err().contains("ragt"));
+        assert!(Layout { widgets: vec![url(0, 0, 0, 1)], ..Default::default() }.check().unwrap_err().contains("leer"));
+        assert!(Layout { widgets: vec![url(0, 0, 12, 12), url(11, 11, 4, 4)], ..Default::default() }.check().unwrap_err().contains("überlappen"));
+        assert!(Layout { widgets: (0..13).map(|i| url(i, 0, 1, 1)).collect(), ..Default::default() }.check().unwrap_err().contains("Höchstens"));
         let mut bad = url(0, 0, 1, 1);
         bad.source = Source::Url { url: "javascript:alert(1)".into() };
-        assert!(Layout { widgets: vec![bad] }.check().unwrap_err().contains("http"));
+        assert!(Layout { widgets: vec![bad], ..Default::default() }.check().unwrap_err().contains("http"));
     }
 
     #[test]
     fn huge_numbers_do_not_overflow() {
-        assert!(Layout { widgets: vec![url(0, 0, 1, 1), url(250, 250, 250, 250)] }.check().is_err());
+        assert!(Layout { widgets: vec![url(0, 0, 1, 1), url(250, 250, 250, 250)], ..Default::default() }.check().is_err());
     }
 
     #[test]
     fn touching_edges_do_not_overlap() {
-        assert_eq!(Layout { widgets: vec![url(0, 0, 12, 24), url(12, 0, 12, 24)] }.check(), Ok(()));
+        assert_eq!(Layout { widgets: vec![url(0, 0, 12, 24), url(12, 0, 12, 24)], ..Default::default() }.check(), Ok(()));
     }
 
     #[test]

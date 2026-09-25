@@ -1,6 +1,6 @@
 # Built-in widgets — design
 
-**Status:** approved, ready for planning
+**Status:** implemented
 
 ## Goal
 

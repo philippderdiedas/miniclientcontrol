@@ -20,7 +20,9 @@
       const item = new URLSearchParams(location.search).get('item');
       const res = await fetch(`/api/layout/${encodeURIComponent(item)}`);
       if (!res.ok) return;
-      const { widgets } = await res.json();
+      const { widgets, background } = await res.json();
+      // The colour behind and between the widgets; black when unset.
+      if (background) document.body.style.background = background;
       const grid = document.getElementById('grid');
       widgets.forEach((w, i) => {
         const frame = document.createElement('iframe');

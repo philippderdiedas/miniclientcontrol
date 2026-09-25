@@ -40,6 +40,7 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             keep_loaded   BOOLEAN DEFAULT 0,
             scroll_config TEXT DEFAULT '{"type":"None","options":null}',
             layout        TEXT DEFAULT 'null',
+            builtin       TEXT DEFAULT 'null',
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
         );"#
     )
@@ -79,6 +80,14 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     // read paths decode it as JSON, and a real NULL fails the whole query.
     if !playlist_items_has(pool, "layout").await {
         let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN layout TEXT DEFAULT 'null'")
+            .execute(pool)
+            .await;
+    }
+
+    // A standalone built-in item (clock, banner, QR, countdown). 'null' rather
+    // than NULL for the same reason as `layout`.
+    if !playlist_items_has(pool, "builtin").await {
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN builtin TEXT DEFAULT 'null'")
             .execute(pool)
             .await;
     }
