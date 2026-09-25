@@ -52,6 +52,7 @@ pub fn required(method: &Method, path: &str) -> Need {
         (false, ["api", "playlist"]) if method == Method::POST => Need::Content,
         (false, ["api", "playlist", _]) => Need::Content,
         (false, ["api", "playlist", _, "move"]) => Need::Content,
+        (false, ["api", "playlist", _, "duplicate"]) => Need::Content,
         (false, ["api", "displays", _, "schedule"]) => Need::Content,
 
         (false, ["api", "override"]) => Need::Manager,
@@ -98,6 +99,7 @@ mod tests {
             (Method::PUT, "/api/playlist/9", Need::Content),
             (Method::DELETE, "/api/playlist/9", Need::Content),
             (Method::POST, "/api/playlist/9/move", Need::Content),
+            (Method::POST, "/api/playlist/9/duplicate", Need::Content),
             (Method::PUT, "/api/displays/foyer/schedule", Need::Content),
             (Method::POST, "/api/override", Need::Manager),
             (Method::DELETE, "/api/override", Need::Manager),

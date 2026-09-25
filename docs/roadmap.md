@@ -15,13 +15,18 @@ Nothing is queued; the next entry is picked from below.
 
 ## Later
 
-### Zones, layouts and widgets
+### Widgets of our own
 
-A screen split into areas — main content plus a side column or a ticker. A
-playlist item would become a layout: a set of zones, each with its own content.
-Widgets (ticker, RSS, weather, countdown, room booking) come with it, because a
-widget is what a zone shows when it is not a URL. Needs zones first; widgets
-without zones are only the overlay again.
+Layouts (shipped) place widgets that show a URL or an asset. The next step is
+widgets that are the controller's own content: a ticker, a clock and date, a
+countdown, later RSS, weather, a room-booking board. A widget is what a zone
+shows when it is not somebody else's page. One at a time, each its own spec.
+
+### A free-form layout editor
+
+The layout data model already describes any 24×24 grid, so a designer beyond the
+templates would be UI only. Wanted only if the templates plus drag-and-resize
+turn out to be too little.
 
 ### Transitions between items
 

@@ -212,8 +212,17 @@ declaration.
     read as `width`. Ignored for URL items
   - `fit_background`: hex colour behind a contained asset (default `#000000`);
     anything that is not a hex colour is a `400`
+- An item can instead be a **layout**: `layout` is
+  `{ "widgets": [ { "x", "y", "w", "h", "source": { "url" } | { "asset_id" },
+  "scroll_config", "fit_mode" } ] }` on a 24×24 grid — widgets inside the grid,
+  no overlap, 1..12, or a `400`. An item is exactly one of url / asset / layout,
+  and a layout advances by time only. `GET /api/layout/{id}` (display-only) is
+  what the layout page reads.
 - `POST /api/playlist/{id}/move` — renumber within the item's own playlist
+- `POST /api/playlist/{id}/duplicate` — copy any item to the end of its playlist
 - `DELETE /api/playlist/{id}` — remove playlist item
+- `GET /api/displays` also returns each screen's `viewport_width`/`viewport_height`
+  (measured on connect), for the layout editor's aspect ratio
 
 ### Settings
 

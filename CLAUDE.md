@@ -375,9 +375,22 @@ What it does and why it looks the way it does:
 [docs/features.md](docs/features.md#overlay). The two sources are
 `settings.overlay_config` (global) and `playlist_items.overlay_config` (the item),
 and they are **additive**: the runtime takes a list of layers, global first.
-Layers naming the same corner share one box and the first of them decides how it
-looks, so the style is not per layer. An item that names no corner joins the
-global box.
+Each box sits in a **region** on the 24×24 grid (`OverlayRegion {x,y,w,h}`, the
+same grid the layout widgets use) — it replaced the fixed corners. **The box
+fills its region**: the host frame is sized to the region (`regionFrameCss`) and
+the `.box` is `width/height: 100%` of it, so what the operator draws in the
+editor is what stands on the screen (WYSIWYG). Content scales with the region
+(`overlay.js`'s `regionScale` is `min(w,h)/4`, so the default region — short edge
+4 — draws `size`/`qr_size` as before, a bigger region larger, a smaller one
+smaller) and is centred inside; `overflow: hidden` keeps it within the drawn
+rectangle. `margin` and `max_width` are gone — the region names the place and the
+size. `plain` (no box) drops the background and padding but the box still fills
+the region and centres its content. Layers naming the same region share
+one box and the first of them decides how it looks, so the style is not per
+layer. An item that names **no** region (`region: None`) joins the global box.
+The corner→region migration is one table (`OverlayRegion::PRESETS`), mirrored by
+`web/layout-editor.js`'s `OVERLAY_PRESETS` (its preset buttons); keep the two in
+step.
 
 **The one exception is `ItemOverlay::color`, and it recolours the box rather
 than the layer.** One bright page in a dark playlist makes the *global*
@@ -392,13 +405,13 @@ one place. Three rules hold it together:
   and no badge — and must not push an empty layer. `matters()` is the pair, and
   it is what the two storage sites filter on: an item overlay is SQL `null`
   unless it would draw *or* recolour.
-- **A colour-only item recolours the global box whatever corner it names.** With
-  nothing drawn it has no box of its own, so its `position` is meaningless and
+- **A colour-only item recolours the global box whatever region it names.** With
+  nothing drawn it has no box of its own, so its `region` is meaningless and
   honouring it would be a stored setting that silently does nothing.
 - **Only the hue is negotiable.** `color_alpha`, the background and the sizes
   stay global; an item that could restyle the box completely is the display
   changing character item by item, which the global-only style was protecting.
-  An unparseable colour falls back to inherit, like an unknown corner.
+  An unparseable colour falls back to inherit, like an off-grid region.
 
 The global QR has a **source**, not just a text: `qr_source` is `text` (use
 `qr_text`) or `cast` (resolve the guest URL when drawing). With casting switched
@@ -481,11 +494,15 @@ cast-sourced QR is dropped independently of it. **The test is
 period after a sender's socket drops the cast page is still on screen, and an
 overlay blinking back for those seconds would look like a fault.
 
-Content aligns with the corner it sits in (`alignmentFor`): a `-center` position
-centres, `-right` right-aligns, everything else stays left. The QR row is flex, so
-`text-align` does not reach it and the same alignment is spelled out as
-`justify-content`. **Deliberately no separate alignment control** — a box pinned
-centre-bottom with left-aligned text is a mistake, not a choice worth offering.
+Content is **always centred** in its region — an invisible fixed frame at the
+region rectangle does the centring, and the box is `position: static` inside it.
+The frame lives on the host element (inline CSSOM in `ensureHost`, so a CSP never
+touches it); the box's own look travels on the constructable stylesheet, which is
+the CSP-sensitive part. **Deliberately no alignment control** — a region already
+places the box, and a separate alignment would be one more thing to get wrong.
+The one place this matters for testing: `test_overlay.py [46a]` now asserts the
+*host* is `position: fixed` and the box got `display: flex` from the adopted
+sheet, not that the box itself is `fixed`.
 
 Storage rules: the box style is structured (`background_color` +
 `background_alpha`, `color` + `color_alpha`, a `plain` flag), not a CSS string,
@@ -499,8 +516,9 @@ background alpha. Both legacy fields are `skip_serializing`, so they leave the A
 on the first write-back.
 
 An enabled overlay with nothing in it is a `400`. Out-of-range numbers are
-**clamped rather than rejected** and an unknown corner falls back — the
-alternative is an error message on a screen nobody is standing in front of.
+**clamped rather than rejected** and an off-grid region is pulled inside the grid
+(`OverlayRegion::sanitized`) — the alternative is an error message on a screen
+nobody is standing in front of.
 
 ## Casting (`src/cast/`, `src/tls.rs`)
 
@@ -937,6 +955,64 @@ The rules:
   stdlib-only; RS256/ES256 are covered in Rust against fixtures made by
   `scripts/oidc-fixtures.sh`. `--public-url 127.0.0.1` makes the canonical
   address one the harness can reach.
+
+## Layouts (`src/layout.rs`, `src/frames.rs`)
+
+A playlist item can be a **layout**: widgets on a fixed 24×24 grid
+(`playlist_items.layout`, JSON, `COALESCE`d to `'null'`). Shown as
+`layout.html?item=<id>` — a display path — which builds a CSS grid of iframes
+from `/api/layout/<id>`. The rules:
+
+- **An item is exactly one of url / asset / layout.** The add/update handlers
+  count sources and refuse anything but one; a layout replaces a layout only,
+  never a URL or asset item and back. `advance` for a layout is time-only
+  (*passes* has no meaning across widgets). `check()` refuses a widget outside
+  the grid, a zero size, an overlap, an empty layout or more than 12.
+- **Framed dashboards are unlocked by `src/frames.rs`, on its own raw CDP
+  connection** (tokio-tungstenite, flattened sessions) — not chromiumoxide,
+  which exposes neither the browser target stream nor per-frame sessions, and
+  because interception must never sit in the path of the control loop's
+  commands. It runs per display, reconnecting forever.
+- **Only frames under a layout page are touched.** Interception attaches to
+  layout-page targets (`Target.setDiscoverTargets`), enables `Fetch` on their
+  sessions and auto-attaches their children. A layout page's own main frame is
+  never touched (`continueRequest`); its child frames are.
+- **A `Host` header on the `/json/version` GET must carry the port**, or Chrome
+  builds a `webSocketDebuggerUrl` without one and the connect is refused
+  (measured — cost an hour once).
+- **Framing headers are removed by replacing the response**
+  (`getResponseBody` + `fulfillRequest`): `continueResponse` with new headers
+  alone does **not** lift the block (measured). `X-Frame-Options` goes;
+  `content-security-policy` keeps everything but its `frame-ancestors`.
+- **A login cookie blocked for SameSite is re-set as partitioned
+  `SameSite=None`** (`Storage.setCookies`, `partitionKey.topLevelSite` = the
+  layout page's loopback site). `Fetch` never shows `Set-Cookie`, so the cookie
+  is taken from `Network.responseReceivedExtraInfo` and set before the (often
+  redirect) response is released. **The partition is load-bearing**: without it
+  another page in the browser — a guest's — would ride the dashboard's session
+  (measured). Collected globally by (name, domain), not per request, because a
+  reload splits a navigation across ids that would not match. Third-party
+  cookies are allowed in the profile (`chromium::write_preferences`), or the
+  browser drops the cookie outright.
+- **The layout page is reloaded once on first attach**, so iframes already
+  loading when the unlocker connected pass through the interception. A brief
+  flash, only the first time a layout shows after a controller start.
+- **Scroll per widget** rides the existing `__asApply` message protocol:
+  `layout.html` posts each widget's settings to its iframe; a same-origin frame
+  it drives directly, a cross-site one gets `autoscroll.js` from `frames.rs`
+  (injected on its `Page.loadEventFired`) and hears the postMessage. Note:
+  cross-*origin* but same-*site* (a different port on the same host) is neither
+  — no OOPIF for `frames.rs`, no DOM access for the page — so scroll there is
+  unsupported; real dashboards are cross-site.
+- **`keep_loaded` keeps the whole layout page and every widget frame.** No
+  per-widget `keep_loaded`: a frame belongs to one page.
+- Each cross-site widget is its own renderer process; a kept layout holds them
+  permanently. No limit — the docs say what it costs.
+- **A plain-HTTP dashboard on another host cannot keep a login in a widget**:
+  `SameSite=None` needs `Secure`, and a Secure cookie is accepted only for
+  `localhost` or over HTTPS. Real dashboards are HTTPS.
+- The lab this came from is `tests/cast/test_layouts.py` case `[184]`, kept so a
+  Chromium change to any measured behaviour fails loudly.
 
 ## Settings (`src/settings.rs`)
 

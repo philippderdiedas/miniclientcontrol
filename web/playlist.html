@@ -183,10 +183,16 @@
     <summary>Item hinzufügen</summary>
     <div class="body">
       <div class="grid">
-        <label class="f"><span>Asset</span>
+        <label class="f"><span>Art</span>
+          <select id="addKind">
+            <option value="url">Seite / Asset</option>
+            <option value="layout">Layout</option>
+          </select>
+        </label>
+        <label class="f addSrc"><span>Asset</span>
           <select id="addAsset"><option value="">(keins)</option></select>
         </label>
-        <label class="f"><span>oder URL</span>
+        <label class="f addSrc"><span>oder URL</span>
           <input id="addUrl" placeholder="https://..." style="width:280px" />
         </label>
         <label class="f"><span>Weiter nach</span><span id="addAdvance"></span></label>
@@ -200,6 +206,7 @@
         </label>
       </div>
       <div id="addScroll"></div>
+      <div id="addLayout" hidden></div>
       <div class="actions">
         <button type="button" class="primary" id="addBtn">Hinzufügen</button>
         <span class="feedback" id="addFeedback"></span>
@@ -219,6 +226,7 @@
   <p class="muted" id="noPlaylistHint" hidden>Noch keine Playlist. Lege eine an, um Elemente hinzuzufügen.</p>
 
   <script src="/preview.js"></script>
+  <script src="/layout-editor.js"></script>
   <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
   <script src="/proposals.js"></script>
@@ -459,15 +467,13 @@
       image.value = cfg.image_asset_id ? String(cfg.image_asset_id) : '';
       const imageThumb = Preview.follow(image, (v) => (assets || []).find((a) => String(a.id) === v));
 
-      const position = el('select', {},
-        el('option', { value: '', text: 'wie global (gleiche Box)' }),
-        el('option', { value: 'bottom-right', text: 'unten rechts' }),
-        el('option', { value: 'bottom-left', text: 'unten links' }),
-        el('option', { value: 'bottom-center', text: 'unten mittig' }),
-        el('option', { value: 'top-right', text: 'oben rechts' }),
-        el('option', { value: 'top-left', text: 'oben links' }),
-        el('option', { value: 'top-center', text: 'oben mittig' }));
-      position.value = cfg.position || '';
+      // Empty (no box) means "join the global overlay's box", so the item
+      // editor allows clearing. Placement uses percentages, so it renders
+      // correctly even while the fieldset is collapsed.
+      const regionEditor = LayoutEditor.create({
+        boxMode: true, region: cfg.region || null, aspect: screenAspect(),
+        allowEmpty: true, el,
+      });
 
       // A colour input has no empty state, so the checkbox is what expresses
       // "use the global colour" -- without it there is no way back once a colour
@@ -482,7 +488,8 @@
       const rows = el('div', {},
         el('div', { class: 'grid' }, field('Text', text)),
         el('div', { class: 'grid' }, field('QR-Code für', qrText), field('QR-Beschriftung', qrLabel)),
-        el('div', { class: 'grid' }, field('Bild', el('span', {}, image, imageThumb.element)), field('Ecke', position)),
+        el('div', { class: 'grid' }, field('Bild', el('span', {}, image, imageThumb.element))),
+        field('Position (Raster)', regionEditor.root),
         colorRow);
 
       const syncColor = () => { color.disabled = !ownColor.checked || rows.hidden; };
@@ -512,7 +519,7 @@
             qr_text: qrText.value.trim(),
             qr_label: qrLabel.value,
             image_asset_id: image.value ? Number(image.value) : null,
-            position: position.value,
+            region: regionEditor.read(),
             // Empty means "the global colour", which is what the server reads it as.
             color: ownColor.checked ? color.value : '',
           };
@@ -764,6 +771,12 @@
     const remember = (name) => { try { localStorage.setItem(SCREEN_KEY, name); } catch (_) { /* ignore */ } };
 
     const screenOf = (name) => screens.find((s) => s.name === name) || null;
+    // The aspect ratio of the screen the playlist runs on, for the layout
+    // editor; 16:9 until a screen has been measured.
+    const screenAspect = () => {
+      const s = screenOf(currentScreen);
+      return s && s.viewport_width && s.viewport_height ? s.viewport_width / s.viewport_height : 16 / 9;
+    };
     const screenLabel = () => {
       const screen = screenOf(currentScreen);
       return screen ? (screen.label || screen.name) : '–';
@@ -911,11 +924,16 @@
       card.append(head);
 
       // Source: same-kind swap only. A URL item gets a URL input, an asset item an
-      // asset picker. The server rejects the other direction, so the UI never offers it.
-      const isAsset = item.asset_id !== null && item.asset_id !== undefined;
-      const urlInput = isAsset ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
+      // asset picker; a layout gets the grid editor. The server rejects any
+      // other direction, so the UI never offers it.
+      const isLayout = item.layout !== null && item.layout !== undefined;
+      const isAsset = !isLayout && item.asset_id !== null && item.asset_id !== undefined;
+      const urlInput = (isLayout || isAsset) ? null : el('input', { value: item.url ?? '', style: 'width:min(420px, 100%)', placeholder: 'https://...' });
       const assetPicker = isAsset ? assetSelect(item.asset_id) : null;
       const assetThumb = isAsset ? Preview.follow(assetPicker, assetById) : null;
+      const layoutEditor = isLayout
+        ? LayoutEditor.create({ layout: item.layout, aspect: screenAspect(), assets, scrollEditor, assetSelect, el })
+        : null;
 
       const advance = advanceEditor(item.advance);
       const enabled = el('input', { type: 'checkbox', checked: !!(item.enabled ?? item.is_enabled) });
@@ -923,19 +941,24 @@
       const start = el('input', { type: 'datetime-local', value: toInputValue(item.start_date), style: 'width:200px' });
       const end = el('input', { type: 'datetime-local', value: toInputValue(item.end_date), style: 'width:200px' });
 
+      const srcField = isLayout
+        ? field('Layout', el('span', { text: `${(item.layout.widgets || []).length} Widget(s)` }))
+        : (isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput));
       card.append(el('div', { class: 'grid' },
-        isAsset ? field('Asset', el('span', {}, assetPicker, assetThumb.element)) : field('URL', urlInput),
+        srcField,
         field('Weiter nach', advance.root),
         el('label', { class: 'inline' }, enabled, el('span', { text: 'Enabled' })),
         el('label', { class: 'inline' }, keep, el('span', { text: 'Keep loaded' })),
         field('Start', start),
         field('Ende', end)));
 
-      const scroll = scrollEditor(item.scroll_config);
-      card.append(scroll.root);
+      if (isLayout) card.append(layoutEditor.root);
+
+      const scroll = isLayout ? null : scrollEditor(item.scroll_config);
+      if (scroll) card.append(scroll.root);
       const isVideo = (item.mimetype || '').toLowerCase().startsWith('video/');
-      const recheck = () => advance.setCountable(isVideo || scroll.read().type !== 'None');
-      scroll.onInput(recheck);
+      const recheck = () => advance.setCountable(!isLayout && (isVideo || (scroll && scroll.read().type !== 'None')));
+      if (scroll) scroll.onInput(recheck);
       recheck();
 
       const mimetype = (item.mimetype || '').toLowerCase();
@@ -945,8 +968,8 @@
       const fit = takesFit ? fitEditor(item.fit_mode, item.fit_background, isImage) : null;
       if (fit) {
         card.append(fit.root);
-        const syncHint = () => fit.hintFor(scroll.read().type);
-        scroll.onInput(syncHint);
+        const syncHint = () => fit.hintFor(scroll ? scroll.read().type : 'None');
+        if (scroll) scroll.onInput(syncHint);
         fit.onChange(syncHint);
         syncHint();
       }
@@ -987,8 +1010,15 @@
       const moveWrap = el('span', { class: 'moveto' },
         el('span', { class: 'muted', text: 'nach' }), moveList, moveBtn);
 
+      const dupBtn = el('button', { type: 'button', text: 'Duplizieren' });
+      dupBtn.addEventListener('click', async () => {
+        const res = await fetch(`/api/playlist/${item.id}/duplicate`, { method: 'POST' });
+        if (!res.ok) { flash(feedback, await readError(res, 'Duplizieren fehlgeschlagen'), true); return; }
+        await loadPlaylist();
+      });
+
       card.append(el('div', { class: 'actions' },
-        saveBtn, playBtn, upBtn, downBtn, delBtn, moveWrap, feedback));
+        saveBtn, playBtn, upBtn, downBtn, dupBtn, delBtn, moveWrap, feedback));
 
       const markDirty = () => {
         dirty.add(item.id);
@@ -1005,12 +1035,16 @@
           keep_loaded: keep.checked,
           start_date: toIso(start.value),
           end_date: toIso(end.value),
-          scroll_config: scroll.read(),
           overlay: overlay.read(),
         };
-        if (fit) Object.assign(payload, fit.read());
-        if (isAsset) payload.asset_id = Number(assetPicker.value);
-        else payload.url = urlInput.value.trim();
+        if (isLayout) {
+          payload.layout = layoutEditor.read();
+        } else {
+          payload.scroll_config = scroll.read();
+          if (fit) Object.assign(payload, fit.read());
+          if (isAsset) payload.asset_id = Number(assetPicker.value);
+          else payload.url = urlInput.value.trim();
+        }
 
         saveBtn.disabled = true;
         const res = await fetch(`/api/playlist/${item.id}`, {
@@ -1265,6 +1299,28 @@
     document.getElementById('ovAsset').after(ovThumb.element);
     const addScroll = scrollEditor(null);
     document.getElementById('addScroll').append(addScroll.root);
+    // Layout kind: a grid editor instead of a URL/asset. Rebuilt each time the
+    // add form switches to it, so it takes the current screen's aspect ratio
+    // and the latest assets.
+    let addLayoutEditor = null;
+    const addKind = document.getElementById('addKind');
+    const addLayoutBox = document.getElementById('addLayout');
+    const syncAddKind = () => {
+      const isLayout = addKind.value === 'layout';
+      for (const n of document.querySelectorAll('.addSrc')) n.hidden = isLayout;
+      document.getElementById('addScroll').hidden = isLayout;
+      addLayoutBox.hidden = !isLayout;
+      addAdvance.setCountable(!isLayout);
+      if (isLayout) {
+        addLayoutEditor = LayoutEditor.create({
+          layout: null, aspect: screenAspect(), assets, scrollEditor, assetSelect, el,
+        });
+        addLayoutBox.replaceChildren(addLayoutEditor.root);
+      } else {
+        addCountable();
+      }
+    };
+    addKind.addEventListener('change', syncAddKind);
     const addAdvance = advanceEditor(null);
     document.getElementById('addAdvance').append(addAdvance.root);
     const addCountable = () => {
@@ -1285,23 +1341,28 @@
 
     document.getElementById('addBtn').addEventListener('click', async () => {
       const feedback = document.getElementById('addFeedback');
+      if (!currentPlaylist) { flash(feedback, 'Keine Playlist ausgewählt.', true); return; }
+      const isLayout = addKind.value === 'layout';
       const assetVal = document.getElementById('addAsset').value;
       const urlVal = document.getElementById('addUrl').value.trim();
-      if (!currentPlaylist) { flash(feedback, 'Keine Playlist ausgewählt.', true); return; }
-      if (!assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
-      if (assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
+      if (!isLayout && !assetVal && !urlVal) { flash(feedback, 'Asset oder URL angeben.', true); return; }
+      if (!isLayout && assetVal && urlVal) { flash(feedback, 'Nur Asset ODER URL, nicht beides.', true); return; }
 
       const payload = {
-        asset_id: assetVal ? Number(assetVal) : null,
-        url: urlVal || null,
         advance: addAdvance.read(),
         enabled: document.getElementById('addEnabled').checked,
         keep_loaded: document.getElementById('addKeep').checked,
         start_date: toIso(document.getElementById('addStart').value),
         end_date: toIso(document.getElementById('addEnd').value),
-        scroll_config: addScroll.read(),
         playlist_id: Number(currentPlaylist),
       };
+      if (isLayout) {
+        payload.layout = addLayoutEditor.read();
+      } else {
+        payload.asset_id = assetVal ? Number(assetVal) : null;
+        payload.url = urlVal || null;
+        payload.scroll_config = addScroll.read();
+      }
 
       const res = await fetch('/api/playlist', {
         method: 'POST',

@@ -9,6 +9,9 @@ axum = { version = "0.8.1", features = ["multipart", "macros", "ws"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 chromiumoxide = "0.9.0"
 futures = "0.3.32"
+# Layouts: a raw CDP connection to the display browser for frame interception
+# (src/frames.rs). Already in the tree via axum; plain ws:// to loopback only.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Fetching the managed wildcard certificate. hyper + tokio-rustls are already in

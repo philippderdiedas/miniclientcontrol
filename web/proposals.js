@@ -69,6 +69,9 @@
       if (k === 'playlist_id' || k === 'default_playlist_id') return playlistName(v);
       if (k === 'asset_id') return (refs.assets[String(v)] || {}).filename || `#${v}`;
       if (k === 'duration') return `${v} s`;
+      if (k === 'layout' && v && typeof v === 'object') {
+        return `${(v.widgets || []).length} Widget(s)`;
+      }
       if (k === 'advance' && v && typeof v === 'object') {
         return v.on === 'passes' ? `${v.count} ${v.count === 1 ? 'Durchlauf' : 'Durchläufe'}` : `${v.seconds} s`;
       }
@@ -112,9 +115,16 @@
       text(`Neue Playlist „${body.name || ''}“`);
     } else if (request.method === 'POST' && request.path === '/api/playlist') {
       text(`Neues Item in ${playlistName(body.playlist_id)}: `);
-      const node = content(body);
-      if (node) out.append(node); else text('(ohne Inhalt)');
-      if (body.advance) text(`, ${shown('advance', body.advance)}`);
+      if (body.layout) {
+        text(`Layout mit ${(body.layout.widgets || []).length} Widget(s)`);
+      } else {
+        const node = content(body);
+        if (node) out.append(node); else text('(ohne Inhalt)');
+        if (body.advance) text(`, ${shown('advance', body.advance)}`);
+      }
+    } else if (request.path.endsWith('/duplicate')) {
+      item(id);
+      text(' duplizieren');
     } else if (request.path.endsWith('/move')) {
       item(id);
       inPlaylist(itemSource(id));

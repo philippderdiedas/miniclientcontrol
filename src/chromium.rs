@@ -112,6 +112,18 @@ fn write_preferences(user_data_dir: &Path, languages: &str) -> Result<()> {
         translate.insert("enabled".into(), serde_json::Value::Bool(false));
     }
 
+    // A framed dashboard keeps its session only as a third-party cookie -- it is
+    // a cross-site frame inside our layout page. `src/frames.rs` relays those
+    // cookies as partitioned `SameSite=None`, which the browser stores only when
+    // third-party cookies are not blocked outright.
+    let prof = root
+        .entry("profile")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(prof) = prof.as_object_mut() {
+        prof.insert("cookie_controls_mode".into(), serde_json::json!(0));
+        prof.insert("block_third_party_cookies".into(), serde_json::Value::Bool(false));
+    }
+
     std::fs::write(&path, serde_json::to_string(&prefs)?)
         .with_context(|| format!("writing {}", path.display()))?;
     debug!("Seeded {} with languages '{}'", path.display(), languages);
@@ -281,5 +293,30 @@ pub async fn supervise(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_allow_third_party_cookies_and_keep_existing_keys() {
+        let dir = std::env::temp_dir().join(format!("mcc-prefs-{}", uuid::Uuid::new_v4()));
+        let profile = dir.join("Default");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(profile.join("Preferences"), r#"{"bookmark_bar":{"show":true}}"#).unwrap();
+
+        write_preferences(&dir, "de-DE").unwrap();
+
+        let prefs: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(profile.join("Preferences")).unwrap()).unwrap();
+        assert_eq!(prefs["profile"]["cookie_controls_mode"], 0);
+        assert_eq!(prefs["profile"]["block_third_party_cookies"], false);
+        assert_eq!(prefs["translate"]["enabled"], false);
+        assert_eq!(prefs["intl"]["accept_languages"], "de-DE");
+        // Nothing already in the file is thrown away.
+        assert_eq!(prefs["bookmark_bar"]["show"], true);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

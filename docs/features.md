@@ -48,6 +48,25 @@ the card: the move decides the item's new position, so a move carrying other
 edits is refused — and an item that has just left the list it was being edited in
 should say so in one place rather than half-save in two.
 
+## Layouts
+
+An item can split the screen instead of filling it: a **layout** is a set of
+**widgets** on a 24×24 grid, each showing a URL or an asset — two dashboards side
+by side, a main page with a bar below, a grid of pictures. The editor on the
+playlist page starts from templates (L-shape, main + bar, 50/50, 2×2 …) and lets
+each widget be dragged and resized; the canvas is drawn in the real aspect ratio
+of the screen the playlist runs on. Each widget scrolls with its own mode.
+
+A dashboard that normally refuses to be embedded (checkmk, Grafana) still shows
+in a widget: the controller drops the framing headers and carries the login
+cookie across, so the widget stays signed in. This only happens for widgets the
+operator put into a layout, never for a page shown full-screen or a guest's cast,
+and the login is confined to that layout so no other page can use it. A dashboard
+must be reachable over HTTPS to keep its login in a widget. Each widget from
+another site is a browser process of its own — a wall of dashboards is light on a
+mini-PC and heavy on a Raspberry Pi. Any item, layout or not, can be **duplicated**
+from its card.
+
 ## Several screens
 
 One controller can drive more than one screen. Each declared display gets its own
@@ -178,6 +197,14 @@ item may add **its own** on top of it. The item's layer is deliberately smaller 
 scope (text, image, QR, position) so a display does not change character item by
 item while the playlist runs.
 
+The box is placed on a **24×24 grid** — the same grid the layout widgets use —
+rather than pinned to a fixed corner. Drag and resize it in the editor, or take
+one of the presets (the old corners, plus *Mitte*) as a starting point. **The box
+fills the rectangle you draw** — what you see in the editor is what stands on the
+screen — and the clock, text and QR scale with it, centred inside; a small
+rectangle in a corner behaves like the old corner badge, a big one is a big
+badge. An item overlay left with no region of its own joins the global box.
+
 The badge does not disappear between items. The controller hands the next page
 its overlay before navigating to it, so the badge is there from the page's first
 frame — and stays through a page that reloads itself. A page with a strict
@@ -189,8 +216,8 @@ it can reach. The case is a single bright page in an otherwise dark playlist:
 white text that reads everywhere else disappears there, and the global setting
 cannot fix one item without breaking the rest. The override recolours the whole
 box it lands in — including the clock the global overlay draws, which is usually
-the thing that became unreadable. An item that shares the global corner
-recolours that shared box; one with a corner of its own recolours only its own.
+the thing that became unreadable. An item that shares the global region
+recolours that shared box; one with a region of its own recolours only its own.
 
 A colour needs no text or QR beside it: a bright page often wants no badge of its
 own, only a readable house clock. Everything else about the look — background,

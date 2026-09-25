@@ -1,6 +1,6 @@
 # Layouts: a screen split into widgets
 
-Status: design, approved in conversation on 2026-09-24. Part 1 of three; see
+Status: implemented (designed and approved in conversation on 2026-09-24). Part 1 of three; see
 *The parts* below.
 
 ## What and why

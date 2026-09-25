@@ -39,6 +39,7 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
             end_date      TEXT,
             keep_loaded   BOOLEAN DEFAULT 0,
             scroll_config TEXT DEFAULT '{"type":"None","options":null}',
+            layout        TEXT DEFAULT 'null',
             FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
         );"#
     )
@@ -72,6 +73,14 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
         sqlx::query(r#"ALTER TABLE playlist_items ADD COLUMN advance TEXT NOT NULL DEFAULT '{"on":"time","seconds":10}'"#)
             .execute(pool)
             .await?;
+    }
+
+    // A layout item's widgets. 'null' rather than NULL, like overlay_config: the
+    // read paths decode it as JSON, and a real NULL fails the whole query.
+    if !playlist_items_has(pool, "layout").await {
+        let _ = sqlx::query("ALTER TABLE playlist_items ADD COLUMN layout TEXT DEFAULT 'null'")
+            .execute(pool)
+            .await;
     }
 
     // 3. Migration: Check for 'scroll_config' column
@@ -373,6 +382,22 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Each screen's window size, measured by the controller on every CDP
+    // connection: the layout editor draws in that aspect ratio.
+    for column in ["viewport_width", "viewport_height"] {
+        let has: bool = sqlx::query("SELECT count(*) FROM pragma_table_info('displays') WHERE name = ?")
+            .bind(column)
+            .fetch_one(pool)
+            .await
+            .map(|row| row.get::<i32, _>(0) > 0)
+            .unwrap_or(false);
+        if !has {
+            sqlx::query(&format!("ALTER TABLE displays ADD COLUMN {column} INTEGER"))
+                .execute(pool)
+                .await?;
+        }
+    }
 
     // Who may use each screen, per mode. `'anyone'` is what every screen did
     // before this existed, so an upgrade changes nothing.

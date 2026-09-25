@@ -1401,6 +1401,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-rustls",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "tracing",

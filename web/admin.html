@@ -232,23 +232,12 @@
       </p>
       <p class="muted" id="ovCastHint" hidden></p>
       <p>
-        <label for="ovPosition">Ecke:</label>
-        <select id="ovPosition">
-          <option value="bottom-right">unten rechts</option>
-          <option value="bottom-left">unten links</option>
-          <option value="bottom-center">unten mittig</option>
-          <option value="top-right">oben rechts</option>
-          <option value="top-left">oben links</option>
-          <option value="top-center">oben mittig</option>
-        </select>
+        <label>Position (Raster):</label>
       </p>
+      <div id="ovRegion"></div>
       <p>
         <label for="ovSize">Schriftgröße:</label>
         <input type="number" id="ovSize" step="0.1" min="0.5" max="20" size="4" /> vmin
-        <label for="ovMargin">Abstand zum Rand:</label>
-        <input type="number" id="ovMargin" step="0.5" min="0" max="40" size="4" /> vmin
-        <label for="ovMaxWidth">max. Breite:</label>
-        <input type="number" id="ovMaxWidth" step="1" min="5" max="100" size="4" /> vw
       </p>
       <p>
         <label for="ovQrSize">QR-Größe:</label>
@@ -293,6 +282,7 @@
   <script src="/preview.js"></script>
   <script src="/screenshot.js"></script>
   <script src="/me.js"></script>
+  <script src="/layout-editor.js"></script>
   <script>
     // Same node-building rule as the other operator pages: a display label, a
     // playlist name and an item URL are all operator- or guest-supplied, so
@@ -690,8 +680,7 @@
     const ov = {
       enabled: 'ovEnabled', text: 'ovText', show_clock: 'ovClock',
       show_seconds: 'ovSeconds', show_date: 'ovDate', qr_text: 'ovQrText',
-      qr_label: 'ovQrLabel', position: 'ovPosition', size: 'ovSize',
-      margin: 'ovMargin', max_width: 'ovMaxWidth', qr_size: 'ovQrSize',
+      qr_label: 'ovQrLabel', size: 'ovSize', qr_size: 'ovQrSize',
       hide_during_cast: 'ovHideCast',
       background_color: 'ovBackgroundColor', plain: 'ovPlain',
       background_css: 'ovBackgroundCss', color: 'ovColor',
@@ -742,12 +731,38 @@
 
     let castSenderUrl = '';
 
+    // The overlay's box, placed on the grid. Mounted once and left alone on
+    // later applies, so a poll cannot wipe an in-progress drag.
+    let overlayRegionEditor = null;
+    let overlayAspect = 16 / 9;
+    fetch('/api/displays')
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        const d = Array.isArray(list) ? list[0] : null;
+        if (d && d.viewport_width && d.viewport_height) overlayAspect = d.viewport_width / d.viewport_height;
+      })
+      .catch(() => { /* keep the 16:9 default */ });
+
+    function mountOverlayRegion(region) {
+      const host = document.getElementById('ovRegion');
+      host.textContent = '';
+      overlayRegionEditor = LayoutEditor.create({
+        boxMode: true,
+        region: region || { x: 18, y: 20, w: 6, h: 4 },
+        aspect: overlayAspect,
+        allowEmpty: false,
+        el,
+      });
+      host.append(overlayRegionEditor.root);
+    }
+
     function applyOverlay(overlay) {
       for (const [key, id] of Object.entries(ov)) {
         const node = document.getElementById(id);
         if (node.type === 'checkbox') node.checked = !!overlay[key];
         else node.value = overlay[key] === null || overlay[key] === undefined ? '' : overlay[key];
       }
+      if (!overlayRegionEditor) mountOverlayRegion(overlay.region);
       document.getElementById('ovImage').value =
         overlay.image_asset_id === null || overlay.image_asset_id === undefined
           ? '' : String(overlay.image_asset_id);
@@ -811,6 +826,7 @@
       for (const [key, [slider]] of Object.entries(alphas)) {
         body[key] = Number(document.getElementById(slider).value) / 100;
       }
+      if (overlayRegionEditor) body.region = overlayRegionEditor.read();
       return body;
     }
 

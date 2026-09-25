@@ -397,6 +397,10 @@ pub struct PlaylistItemWithAsset {
     #[sqlx(default)]
     pub overlay_config: sqlx::types::Json<Option<crate::settings::ItemOverlay>>,
 
+    /// A layout item's widgets; `None` for a URL or an asset item.
+    #[sqlx(default)]
+    pub layout: sqlx::types::Json<Option<crate::layout::Layout>>,
+
     /// `FitMode` by name. A `String` rather than the enum, which would need a
     /// `sqlx::Type` impl to decode; parsed with `FitMode::from_value` where it is
     /// used, and that parse is total anyway.

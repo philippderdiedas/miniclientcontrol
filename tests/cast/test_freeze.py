@@ -176,33 +176,42 @@ async def case_restart():
 
 async def case_screenshot():
     print("\n[172] what is on screen, as a picture")
-    with Display():
-        add_item(url=PAGE)
-        name = "default"
-        status, body = None, None
-        for _ in range(40):
-            req = urllib.request.Request(f"http://127.0.0.1:{HTTP}/api/displays/{name}/screenshot")
-            try:
-                with urllib.request.urlopen(req, timeout=10) as res:
-                    status, body, headers = res.status, res.read(), res.headers
-                    break
-            except urllib.error.HTTPError as e:
-                status = e.code
-            await asyncio.sleep(0.5)
-        check("a JPEG comes back", status == 200 and body[:3] == b"\xff\xd8\xff", status)
-        check("never cached by the browser", headers.get("Cache-Control") == "no-store", dict(headers))
-        with urllib.request.urlopen(req, timeout=10) as res:
-            again = res.read()
-        check("a second request within 10 s is the cached picture", again == body, None)
-        status, _ = http("GET", "/api/displays/nope/screenshot")
-        check("an unknown screen is a 404", status == 404, status)
+    # Its own browser: the screenshot needs a page on screen, so this case must
+    # not depend on a Chrome an earlier case happened to leave running.
+    start_chrome()
+    try:
+        with Display():
+            add_item(url=PAGE)
+            name = "default"
+            status, body, headers = None, None, None
+            for _ in range(40):
+                req = urllib.request.Request(f"http://127.0.0.1:{HTTP}/api/displays/{name}/screenshot")
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as res:
+                        status, body, headers = res.status, res.read(), res.headers
+                        if status == 200:
+                            break
+                except urllib.error.HTTPError as e:
+                    status = e.code
+                await asyncio.sleep(0.5)
+            check("a JPEG comes back", status == 200 and body[:3] == b"\xff\xd8\xff", status)
+            check("never cached by the browser", headers and headers.get("Cache-Control") == "no-store",
+                  dict(headers) if headers else None)
+            with urllib.request.urlopen(req, timeout=10) as res:
+                again = res.read()
+            check("a second request within 10 s is the cached picture", again == body, None)
+            status, _ = http("GET", "/api/displays/nope/screenshot")
+            check("an unknown screen is a 404", status == 404, status)
 
-
-    print("\n[173] the picture is an operator's, not a guest's")
-    with Display():
-        http("POST", "/api/users", {"name": "root", "password": "longenough", "role": "admin"})
-        status, _ = http("GET", "/api/displays/default/screenshot")
-        check("without credentials it is refused", status == 401, status)
+            # [173] the picture is an operator's, not a guest's. Same server, so
+            # no second controller racing this one's database on the shared path.
+            print("\n[173] the picture is an operator's, not a guest's")
+            status, _ = http("POST", "/api/users", {"name": "root", "password": "longenough", "role": "admin"})
+            check("the admin account is created", status in (200, 201), status)
+            status, _ = http("GET", "/api/displays/default/screenshot")
+            check("with an account, no credentials is refused", status == 401, status)
+    finally:
+        stop_chrome()
 
 
 CASES = [case_freeze, case_hung, case_restart, case_screenshot]

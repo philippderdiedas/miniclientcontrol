@@ -1,3 +1,5 @@
+mod frames;
+mod layout;
 mod screenshot;
 mod freeze;
 mod oidc;
@@ -51,7 +53,9 @@ use web::serve_embedded_ui;
 /// has no way to present credentials, so requiring auth here blanks the signage.
 /// These stay reachable without auth, but only from loopback.
 pub(crate) fn is_display_path(path: &str) -> bool {
-    if path.starts_with("/uploads/") {
+    // A layout's widgets, which only the display browser asks for: the page it
+    // builds from them is in the list below.
+    if path.starts_with("/uploads/") || path.starts_with("/api/layout/") {
         return true;
     }
     matches!(
@@ -63,6 +67,7 @@ pub(crate) fn is_display_path(path: &str) -> bool {
             | "/autoscroll.js"
             | "/no_content.svg"
             | "/empty_playlist.html"
+            | "/layout.html"
             | "/logo.svg"
             // the cast display page reads this to show the sender's HTTPS address;
             // remote operators still need credentials for it
@@ -262,6 +267,11 @@ async fn main() -> Result<()> {
         let watcher_state = state.clone();
         let watched = display.clone();
         tokio::spawn(async move { freeze::watch(watcher_state, watched).await });
+        // Its own raw CDP connection, so unlocking layout frames never sits in
+        // the path of the control loop's commands.
+        let frames_state = state.clone();
+        let frames_cdp = display.cdp_url.clone();
+        tokio::spawn(async move { frames::run(frames_state, frames_cdp).await });
     }
 
     // 5. Start Web Server
@@ -274,6 +284,8 @@ async fn main() -> Result<()> {
         .route("/api/playlist", get(get_playlist).post(add_to_playlist))
         .route("/api/playlist/{id}", put(update_playlist_item).delete(delete_playlist_item))
         .route("/api/playlist/{id}/move", axum::routing::post(move_playlist_item))
+        .route("/api/playlist/{id}/duplicate", axum::routing::post(handlers::duplicate_playlist_item))
+        .route("/api/layout/{id}", get(layout::widgets_for_display))
         .route("/api/control/current", get(get_current).post(set_current))
         .route(
             "/api/override",

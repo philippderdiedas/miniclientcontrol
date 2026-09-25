@@ -43,14 +43,22 @@
   if (globalThis.__ov) return;
 
   const HOST_PREFIX = '__mcc_overlay';
-  const CORNERS = {
-    'top-left': 'top: var(--m); left: var(--m);',
-    'top-right': 'top: var(--m); right: var(--m);',
-    'bottom-left': 'bottom: var(--m); left: var(--m);',
-    'bottom-right': 'bottom: var(--m); right: var(--m);',
-    'top-center': 'top: var(--m); left: 50%; transform: translateX(-50%);',
-    'bottom-center': 'bottom: var(--m); left: 50%; transform: translateX(-50%);',
-  };
+  const GRID = 24;
+
+  // A box's place on the 24x24 grid, as a rectangle. The box centres inside it.
+  function validRegion(r) {
+    return r && [r.x, r.y, r.w, r.h].every((n) => Number.isFinite(Number(n)));
+  }
+  function regionKey(r) {
+    return `${r.x}-${r.y}-${r.w}-${r.h}`;
+  }
+  // The invisible frame the box centres in: fixed at the region, flex-centred.
+  function regionFrameCss(r) {
+    return `position: fixed; inset: auto;`
+      + ` left: ${(r.x / GRID) * 100}%; top: ${(r.y / GRID) * 100}%;`
+      + ` width: ${(r.w / GRID) * 100}%; height: ${(r.h / GRID) * 100}%;`
+      + ` display: flex; align-items: center; justify-content: center;`;
+  }
 
   let payload = null;
   // Set while a display page is showing something the overlay must not sit on
@@ -64,15 +72,16 @@
   // readiness waits -- so a page that could only call `suspend()` would be
   // covered by the very overlay it asked to stand down.
   let suspended = !!globalThis.__ovSuspend;
-  // One entry per corner in use: { host, shadow }.
+  // One entry per region in use, keyed by `regionKey`: { host, shadow }.
   const boxes = new Map();
   let ticker = null;
   let observer = null;
   let seededAt = null;
 
-  function ensureHost(position) {
-    const id = HOST_PREFIX + '_' + position;
-    let entry = boxes.get(position);
+  function ensureHost(region) {
+    const key = regionKey(region);
+    const id = HOST_PREFIX + '_' + key;
+    let entry = boxes.get(key);
     let host = entry && entry.host;
 
     if (!host || !host.isConnected) {
@@ -90,10 +99,11 @@
       (document.body || document.documentElement).appendChild(host);
     }
 
-    // Reset every property the page could have inherited into the host.
-    host.style.cssText = 'all: initial; position: fixed; inset: auto; '
-      + 'margin: 0; padding: 0; border: 0; background: transparent; '
-      + 'z-index: 2147483647; pointer-events: none;';
+    // Reset every property the page could have inherited into the host, then
+    // place the region frame the box will centre inside.
+    host.style.cssText = 'all: initial; margin: 0; padding: 0; border: 0; '
+      + 'background: transparent; z-index: 2147483647; pointer-events: none; '
+      + regionFrameCss(region);
 
     if (host.showPopover) {
       try {
@@ -105,7 +115,7 @@
 
     const shadow = host.shadowRoot || host.attachShadow({ mode: 'open' });
     entry = { host, shadow };
-    boxes.set(position, entry);
+    boxes.set(key, entry);
     return entry;
   }
 
@@ -169,54 +179,58 @@
     return rgba(style.background_color, style.background_alpha);
   }
 
-  // Which way the content lines up, taken from the corner it sits in: a box
-  // pinned centre-bottom with left-aligned text looks like a mistake, and a
-  // separate control would be one more thing to get wrong.
-  function alignmentFor(position) {
-    if (position.endsWith('center')) return ['center', 'center'];
-    if (position.endsWith('right')) return ['right', 'flex-end'];
-    return ['left', 'flex-start'];
+  // How big the drawn region is, as a factor. The reference is 4 grid cells --
+  // the default region's short edge -- so a default region draws exactly what it
+  // did before, a bigger one scales the badge up and a smaller one down. The
+  // short edge, not the area, so a wide thin banner does not blow up text that
+  // its width cannot hold anyway.
+  const REGION_REF = 4;
+  function regionScale(region) {
+    return Math.min(region.w, region.h) / REGION_REF;
   }
 
-  function styles(style, position) {
-    const corner = CORNERS[position] || CORNERS['bottom-right'];
-    const [textAlign, flexAlign] = alignmentFor(position);
-    // Sizes are in vmin so one configuration looks the same on a 1080p panel and
-    // on a portrait 4K one -- signage is looked at from across a room, and a
-    // pixel size that reads well on one screen is invisible on the other.
+  function styles(style) {
+    // The box *is* the drawn region: it fills the host frame, which is sized to
+    // the region, so what the operator draws in the editor is what stands on the
+    // screen. Content is scaled by the region and centred inside -- so a bigger
+    // rectangle is a bigger badge, not a big empty block, and overflow is clipped
+    // to keep it within what was drawn. Sizes are in vmin so one configuration
+    // looks the same on a 1080p panel and a portrait 4K one.
+    const scale = regionScale(style.region);
     return `
       :host { all: initial; }
       .box {
-        position: fixed;
-        ${corner}
-        --m: ${style.margin}vmin;
+        position: static;
         box-sizing: border-box;
+        width: 100%;
+        height: 100%;
         display: flex;
         flex-direction: column;
+        align-items: center;
+        justify-content: center;
         gap: 0.5em;
-        max-width: ${style.max_width}vw;
-        padding: 0.7em 1em;
+        padding: 0.5em 0.7em;
         border-radius: 0.5em;
         background: ${boxBackground(style)};
         color: ${rgba(style.color, style.color_alpha)};
         font-family: system-ui, sans-serif;
-        font-size: ${style.size}vmin;
+        font-size: ${style.size * scale}vmin;
         line-height: 1.25;
         font-weight: 600;
-        text-align: ${textAlign};
+        text-align: center;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+        overflow: hidden;
       }
       .box.plain { background: transparent; padding: 0; border-radius: 0; }
-      .layer { display: flex; flex-direction: column; gap: 0.3em; }
+      .layer { display: flex; flex-direction: column; align-items: center; gap: 0.3em; }
       .clock { font-variant-numeric: tabular-nums; font-size: 1.6em; font-weight: 700; }
       .date { opacity: 0.85; font-size: 0.85em; font-weight: 500; }
       img.logo { max-width: 100%; max-height: 6em; object-fit: contain; }
-      .qr { width: ${style.qr_size}vmin; height: ${style.qr_size}vmin; display: block;
+      .qr { width: ${style.qr_size * scale}vmin; height: ${style.qr_size * scale}vmin; display: block;
              background: #fff; border-radius: 0.3em; }
-      /* The QR row is flex, so text-align does not reach it -- it needs the same
-         alignment spelled out. */
-      .qrwrap { display: flex; align-items: center; gap: 0.6em; justify-content: ${flexAlign}; }
+      /* The QR row is flex, so text-align does not reach it -- it is centred too. */
+      .qrwrap { display: flex; align-items: center; gap: 0.6em; justify-content: center; }
       .qrlabel { font-size: 0.8em; font-weight: 500; }
     `;
   }
@@ -352,26 +366,27 @@
 
     watch();
 
-    // Group by corner, keeping the given order: the global layer comes first, so
-    // it sits at the top of a shared box and decides its style.
+    // Group by region, keeping the given order: the global layer comes first, so
+    // it sits at the top of a shared box and decides its style. The region
+    // object is carried on the group so `ensureHost` can place the frame.
     const grouped = new Map();
     for (const layer of active) {
-      const position = CORNERS[layer.position] ? layer.position : 'bottom-right';
-      if (!grouped.has(position)) grouped.set(position, []);
-      grouped.get(position).push(layer);
+      const key = regionKey(layer.region);
+      if (!grouped.has(key)) grouped.set(key, { region: layer.region, layers: [] });
+      grouped.get(key).layers.push(layer);
     }
 
-    // Corners nobody wants any more lose their box, or an item's badge would
+    // Regions nobody wants any more lose their box, or an item's badge would
     // linger after the playlist moved on.
-    for (const [position, entry] of [...boxes.entries()]) {
-      if (!grouped.has(position)) {
-        dropBox(position, entry);
+    for (const [key, entry] of [...boxes.entries()]) {
+      if (!grouped.has(key)) {
+        dropBox(key, entry);
       }
     }
 
-    for (const [position, group] of grouped) {
-      const { shadow } = ensureHost(position);
-      const css = styles(group[0], position);
+    for (const [, { region, layers: group }] of grouped) {
+      const { shadow } = ensureHost(region);
+      const css = styles(group[0]);
 
       const box = document.createElement('div');
       box.className = 'box' + (group[0].plain ? ' plain' : '');
@@ -426,20 +441,19 @@
   }
 
   const DEFAULTS = {
-    margin: 3, size: 2.4, max_width: 40, qr_size: 14,
+    size: 2.4, qr_size: 14,
     background_color: '#000000', background_alpha: 0.65, plain: false,
     background_css: '', color: '#ffffff', color_alpha: 1,
-    position: 'bottom-right',
+    region: { x: 18, y: 20, w: 6, h: 4 },
   };
 
   function normalize(layer) {
     const merged = { ...DEFAULTS, ...layer };
-    for (const key of ['margin', 'size', 'max_width', 'qr_size',
-                       'background_alpha', 'color_alpha']) {
+    for (const key of ['size', 'qr_size', 'background_alpha', 'color_alpha']) {
       const value = Number(merged[key]);
       merged[key] = Number.isFinite(value) ? value : DEFAULTS[key];
     }
-    if (!CORNERS[merged.position]) merged.position = DEFAULTS.position;
+    if (!validRegion(merged.region)) merged.region = DEFAULTS.region;
     return merged;
   }
 

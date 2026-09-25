@@ -205,9 +205,16 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
             reconnect: connected_before,
         });
         connected_before = true;
+        remember_viewport(&state, &display_name, &page).await;
 
         // Inner loop mainly for playlist iteration
         let mut reconnect_needed = false;
+        // The layout item currently on `dynamic_page`, if any. A single-item
+        // playlist re-enters its one item every advance period, and a layout
+        // page torn down and rebuilt on every such pass -- with all its widget
+        // frames -- is the flicker a short advance turns constant. Tracked so an
+        // unchanged layout is left up; an edit changes the value and reloads.
+        let mut shown_layout: Option<(i64, crate::layout::Layout)> = None;
         loop {
             let active_override = {
                 let lock = display.override_item.lock().await;
@@ -262,6 +269,7 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     p.start_date, p.end_date,
                     COALESCE(p.keep_loaded, 0) as keep_loaded,
                     COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
+            COALESCE(p.layout, 'null') as layout,
                     COALESCE(p.fit_mode, 'contain') as fit_mode,
                     COALESCE(p.fit_background, '#000000') as fit_background,
                     a.local_path, a.mimetype, a.filename
@@ -341,6 +349,8 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     let mut lock = display.current_item_id.lock().await;
                     *lock = None;
                 }
+                // The page left the layout for the idle placeholder.
+                shown_layout = None;
 
                 if !announced_empty {
                     announced_empty = true;
@@ -440,12 +450,25 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                     advance,
                 });
 
+                // A layout already on screen with the same content: re-navigating
+                // would blank the grid and reload every widget frame for nothing.
+                // The URL is re-checked against the page rather than assumed, so a
+                // page that navigated itself is still reloaded.
+                let unchanged_layout = match item.layout.0.as_ref() {
+                    Some(layout) if shown_layout.as_ref() == Some(&(item.id, layout.clone())) => {
+                        matches!(dynamic_page.url().await, Ok(Some(u)) if u == target_url)
+                    }
+                    _ => false,
+                };
+
                 let (active_page, do_navigate) = if item.keep_loaded {
                     if let Some((tab, _)) = keep_loaded_tabs.get(&item.id) {
                         (tab.clone(), false)
                     } else {
                         (dynamic_page.clone(), true)
                     }
+                } else if unchanged_layout {
+                    (dynamic_page.clone(), false)
                 } else {
                     (dynamic_page.clone(), true)
                 };
@@ -493,6 +516,14 @@ pub async fn browser_loop(state: AppState, display: Arc<Display>) {
                             break;
                         }
                     }
+                }
+
+                // Remember what `dynamic_page` is showing, so the next pass over
+                // the same item can leave an unchanged layout untouched. A
+                // keep_loaded layout lives in its own tab and never navigates
+                // `dynamic_page`, so it is not recorded here.
+                if !item.keep_loaded {
+                    shown_layout = item.layout.0.clone().map(|l| (item.id, l));
                 }
 
                 if let Err(e) = drain_attached_target_events(&browser, &mut attached_events, Duration::from_millis(700)).await {
@@ -959,6 +990,10 @@ async fn reconcile_keep_loaded_tabs(
 }
 
 fn playlist_target_url(state: &AppState, item: &PlaylistItemWithAsset) -> String {
+    // A layout is a page of the controller's own, which frames its widgets.
+    if item.layout.0.is_some() {
+        return format!("http://127.0.0.1:{}/layout.html?item={}", state.args.port, item.id);
+    }
     if let Some(url) = &item.url {
         return url.clone();
     }
@@ -1008,7 +1043,7 @@ fn override_target_url(state: &AppState, item: &OverrideItem) -> String {
 /// with a control bar nothing turns off. PDFs keep their own viewer; anything
 /// else is navigated to as before. The existence check stays with the caller,
 /// so this is testable without an `AppState`.
-fn asset_target_url(
+pub(crate) fn asset_target_url(
     port: u16,
     local_path: &str,
     mimetype: Option<&str>,
@@ -1391,7 +1426,7 @@ async fn stop_scrolling(page: &Page) -> Result<(), chromiumoxide::error::CdpErro
         .map(|_| ())
 }
 
-struct ScrollRuntimeSettings {
+pub(crate) struct ScrollRuntimeSettings {
     enable: bool,
     px_per_sec: f64,
     backend_mode: &'static str,
@@ -1402,7 +1437,23 @@ struct ScrollRuntimeSettings {
     step_delay_ms: u64,
 }
 
-fn scroll_mode_settings(mode: &ScrollMode) -> ScrollRuntimeSettings {
+impl ScrollRuntimeSettings {
+    /// The payload `web/autoscroll.js`'s `__asApply` takes.
+    pub(crate) fn payload(&self) -> serde_json::Value {
+        serde_json::json!({
+            "mode": self.backend_mode,
+            "speed": self.px_per_sec,
+            "enable": self.enable,
+            "topDelay": self.top_delay_ms,
+            "returnDelay": self.return_delay_ms,
+            "stepPx": self.step_px,
+            "stepTime": self.step_time_ms,
+            "stepDelay": self.step_delay_ms,
+        })
+    }
+}
+
+pub(crate) fn scroll_mode_settings(mode: &ScrollMode) -> ScrollRuntimeSettings {
     match mode {
         ScrollMode::None => ScrollRuntimeSettings {
             enable: false,
@@ -1710,7 +1761,7 @@ async fn wait_for_scroll_readiness(
     }
 }
 
-fn scroll_runtime_script() -> &'static str {
+pub(crate) fn scroll_runtime_script() -> &'static str {
     include_str!("../web/autoscroll.js")
 }
 
@@ -1734,6 +1785,28 @@ async fn register_overlay_runtime_script(page: &Page) -> Result<(), CdpError> {
 /// viewer `__media` does not exist and this does nothing, which is why it is
 /// called for every item rather than only for video URLs. A failure is not
 /// worth a log above debug -- the page starts itself after 20 s.
+/// The display browser's window size, stored for the layout editor, which
+/// draws in the screen's real aspect ratio. Best effort: a failure here must
+/// not keep a screen from playing.
+async fn remember_viewport(state: &AppState, display_name: &str, page: &Page) {
+    let size = tokio::time::timeout(Duration::from_secs(3), page.evaluate("[innerWidth, innerHeight]")).await;
+    let Ok(Ok(result)) = size else { return };
+    let Ok(size) = result.into_value::<Vec<i64>>() else { return };
+    if let [width, height] = size[..] {
+        if width > 0 && height > 0 {
+            if let Err(e) = sqlx::query("UPDATE displays SET viewport_width = ?, viewport_height = ? WHERE name = ?")
+                .bind(width)
+                .bind(height)
+                .bind(display_name)
+                .execute(&state.pool)
+                .await
+            {
+                error!("Failed to store the viewport of display {}: {}", display_name, e);
+            }
+        }
+    }
+}
+
 /// Start counting passes on `page`, with the target, right where the item's
 /// clock would start. Probed, never assumed, like the other runtimes: a page
 /// without the counter is the stall case the loop handles.

@@ -51,6 +51,8 @@ pub struct AddToPlaylistRequest {
     /// When the item moves on. Absent: the asset's length or ten seconds
     /// (`Advance::default_for`).
     pub advance: Option<crate::advance::Advance>,
+    /// A layout instead of a URL or an asset: widgets on the 24×24 grid.
+    pub layout: Option<crate::layout::Layout>,
     pub enabled: Option<bool>,
     pub keep_loaded: Option<bool>,
     pub start_date: Option<String>,
@@ -95,6 +97,8 @@ pub struct UpdatePlaylistRequest {
     pub url: Option<String>,
     /// Replacement asset. Only accepted for items that already are asset-backed.
     pub asset_id: Option<i64>,
+    /// Replacement layout. Only accepted for items that already are layouts.
+    pub layout: Option<crate::layout::Layout>,
     /// Move the item into another playlist. Sent on its own -- see the rule at
     /// the top of `update_playlist_item`.
     ///
@@ -131,6 +135,7 @@ impl UpdatePlaylistRequest {
             fit_background,
             url,
             asset_id,
+            layout,
             playlist_id: _,
         } = self;
 
@@ -147,6 +152,7 @@ impl UpdatePlaylistRequest {
             || fit_background.is_some()
             || url.is_some()
             || asset_id.is_some()
+            || layout.is_some()
     }
 }
 
@@ -473,6 +479,7 @@ pub async fn get_playlist(
             p.start_date, p.end_date, p.playlist_id,
             COALESCE(p.keep_loaded, 0) as keep_loaded,
             COALESCE(p.scroll_config, '{"type":"None","options":null}') as scroll_config,
+            COALESCE(p.layout, 'null') as layout,
             COALESCE(p.overlay_config, 'null') as overlay_config,
             COALESCE(p.fit_mode, 'contain') as fit_mode,
             COALESCE(p.fit_background, '#000000') as fit_background,
@@ -494,13 +501,51 @@ pub async fn get_playlist(
     (StatusCode::OK, Json(items))
 }
 
+const LAYOUT_PASSES: &str = "Ein Layout wechselt nach Zeit; Durchläufe gibt es nur für einzelne Inhalte.";
+
+/// Every asset a layout names must exist: a dangling id is a widget that shows
+/// nothing, with no error anywhere.
+async fn check_layout_assets(pool: &sqlx::SqlitePool, layout: &crate::layout::Layout) -> Result<(), String> {
+    for id in layout.asset_ids() {
+        let found: Option<i64> = sqlx::query_scalar("SELECT id FROM assets WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+        if found.is_none() {
+            return Err(format!("Asset {id} gibt es nicht."));
+        }
+    }
+    Ok(())
+}
+
 pub async fn add_to_playlist(
     State(state): State<AppState>,
     Json(payload): Json<AddToPlaylistRequest>,
 ) -> axum::response::Response {
-    // An item with neither source silently renders as "no content" forever.
-    if payload.asset_id.is_none() && payload.url.as_deref().unwrap_or("").trim().is_empty() {
-        return StatusCode::BAD_REQUEST.into_response();
+    // Exactly one source: an item with none silently renders as "no content"
+    // forever, and one with two plays whichever `playlist_target_url` prefers.
+    let sources = [
+        payload.asset_id.is_some(),
+        !payload.url.as_deref().unwrap_or("").trim().is_empty(),
+        payload.layout.is_some(),
+    ]
+    .iter()
+    .filter(|s| **s)
+    .count();
+    if sources != 1 {
+        return bad_request("Ein Element ist genau eines: eine URL, ein Asset oder ein Layout.");
+    }
+    if let Some(layout) = &payload.layout {
+        if let Err(message) = layout.check() {
+            return bad_request(message);
+        }
+        if let Err(message) = check_layout_assets(&state.pool, layout).await {
+            return bad_request(message);
+        }
+        if matches!(payload.advance, Some(crate::advance::Advance::Passes { .. })) {
+            return bad_request(LAYOUT_PASSES);
+        }
     }
 
     // Checked before anything is read or written, so a refusal leaves no trace.
@@ -562,7 +607,7 @@ pub async fn add_to_playlist(
         .map(sqlx::types::Json);
 
     let inserted = sqlx::query(
-        "INSERT INTO playlist_items (asset_id, url, play_order, advance, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO playlist_items (asset_id, url, play_order, advance, is_enabled, keep_loaded, start_date, end_date, scroll_config, overlay_config, playlist_id, fit_mode, fit_background, layout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(payload.asset_id)
     .bind(payload.url)
@@ -577,6 +622,7 @@ pub async fn add_to_playlist(
     .bind(payload.playlist_id)
     .bind(fit_mode.as_str())
     .bind(fit_background)
+    .bind(sqlx::types::Json(payload.layout))
     .execute(&state.pool)
     .await;
     let id = match inserted {
@@ -693,19 +739,57 @@ pub async fn update_playlist_item(
         }
     }
 
+    // A layout replaces a layout, and nothing else: a URL or asset item does not
+    // turn into one, nor a layout into either (checked below, where `url` and
+    // `asset_id` are).
+    if let Some(layout) = &payload.layout {
+        let current: Option<(bool, sqlx::types::Json<crate::advance::Advance>)> = sqlx::query_as(
+            r#"SELECT COALESCE(layout, 'null') != 'null', COALESCE(advance, '{"on":"time","seconds":10}')
+               FROM playlist_items WHERE id = ?"#,
+        )
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await
+        .unwrap_or(None);
+        let Some((is_layout, advance)) = current else {
+            return (StatusCode::NOT_FOUND, Json(ApiError { error: format!("Element {} gibt es nicht.", id) })).into_response();
+        };
+        if !is_layout {
+            return bad_request("Nur ein Layout-Element kann ein Layout bekommen.");
+        }
+        if let Err(message) = layout.check() {
+            return bad_request(message);
+        }
+        if let Err(message) = check_layout_assets(&state.pool, layout).await {
+            return bad_request(message);
+        }
+        let advance = payload.advance.unwrap_or(advance.0);
+        if matches!(advance, crate::advance::Advance::Passes { .. }) {
+            return bad_request(LAYOUT_PASSES);
+        }
+        if let Err(e) = sqlx::query("UPDATE playlist_items SET layout = ? WHERE id = ?")
+            .bind(sqlx::types::Json(layout))
+            .bind(id)
+            .execute(&state.pool)
+            .await
+        {
+            error!("Failed to update the layout of playlist item {}: {}", id, e);
+        }
+    }
+
     // A source edit may only swap like for like: a URL item gets a different URL, an
     // asset item a different asset. Allowing a kind change would need the other column
     // cleared in the same write, and `playlist_target_url` silently prefers one column
     // over the other, so a half-changed row plays the wrong thing with no error.
     if payload.url.is_some() || payload.asset_id.is_some() {
-        let existing = sqlx::query_as::<_, (Option<i64>, Option<String>)>(
-            "SELECT asset_id, url FROM playlist_items WHERE id = ?",
+        let existing = sqlx::query_as::<_, (Option<i64>, Option<String>, bool)>(
+            "SELECT asset_id, url, COALESCE(layout, 'null') != 'null' FROM playlist_items WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(&state.pool)
         .await;
 
-        let (existing_asset_id, _existing_url) = match existing {
+        let (existing_asset_id, _existing_url, is_layout) = match existing {
             Ok(Some(row)) => row,
             Ok(None) => {
                 return (
@@ -723,6 +807,9 @@ pub async fn update_playlist_item(
         };
 
         let is_asset_item = existing_asset_id.is_some();
+        if is_layout {
+            return bad_request("Ein Layout bekommt keine URL und kein Asset, nur Widgets.");
+        }
 
         if payload.url.is_some() && is_asset_item {
             return bad_request(
@@ -854,6 +941,33 @@ pub async fn update_playlist_item(
     }
 
     StatusCode::OK.into_response()
+}
+
+/// A copy of an item -- any kind -- at the end of its playlist. The answer to
+/// "the same L-shape for ten items" without named layout templates.
+pub async fn duplicate_playlist_item(State(state): State<AppState>, Path(id): Path<i64>) -> axum::response::Response {
+    let inserted = sqlx::query(
+        "INSERT INTO playlist_items (asset_id, url, layout, advance, is_enabled, keep_loaded, start_date, end_date,
+             scroll_config, overlay_config, playlist_id, fit_mode, fit_background, play_order)
+         SELECT asset_id, url, layout, advance, is_enabled, keep_loaded, start_date, end_date,
+             scroll_config, overlay_config, playlist_id, fit_mode, fit_background,
+             (SELECT COALESCE(MAX(q.play_order), 0) + 1 FROM playlist_items q WHERE q.playlist_id IS p.playlist_id)
+         FROM playlist_items p WHERE p.id = ?",
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await;
+    match inserted {
+        Ok(result) if result.rows_affected() == 1 => {
+            state.notify_playlist_changed();
+            (StatusCode::CREATED, Json(serde_json::json!({ "id": result.last_insert_rowid() }))).into_response()
+        }
+        Ok(_) => (StatusCode::NOT_FOUND, Json(ApiError { error: format!("Element {} gibt es nicht.", id) })).into_response(),
+        Err(e) => {
+            error!("Failed to duplicate playlist item {}: {}", id, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 /// The ids `move_playlist_item` reorders among, in play order, scoped to one
@@ -1585,6 +1699,7 @@ mod tests {
             fit_background: None,
             url: None,
             asset_id: None,
+            layout: None,
             playlist_id: Some(Some(2)),
         };
         assert!(!request.edits_besides_the_playlist(), "a move on its own");

@@ -4,6 +4,7 @@
 # Cast TLS certificate -- contains the private key
 cast-cert.pem
 cast-cert.pem.sans
+cast-cert.pem.managed.json
 tests/cast/*.db
 tests/cast/cert.pem*
 tests/cast/assets/

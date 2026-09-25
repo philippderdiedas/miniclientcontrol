@@ -468,6 +468,19 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+/// The window size last measured for a screen, if it was ever connected.
+async fn viewport(pool: &sqlx::SqlitePool, name: &str) -> Option<(i64, i64)> {
+    sqlx::query_as::<_, (Option<i64>, Option<i64>)>(
+        "SELECT viewport_width, viewport_height FROM displays WHERE name = ?",
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|(w, h)| Some((w?, h?)))
+}
+
 async fn list(State(state): State<AppState>) -> Response {
     let failed = |e: sqlx::Error| {
         tracing::error!("Failed to list displays: {}", e);
@@ -526,6 +539,8 @@ async fn list(State(state): State<AppState>) -> Response {
                 Some(display) => crate::cast::session_user(&display).await,
                 None => None,
             },
+            "viewport_width": viewport(&state.pool, &name).await.map(|v| v.0),
+            "viewport_height": viewport(&state.pool, &name).await.map(|v| v.1),
             "frozen_since": match state.display(&name) {
                 Some(display) => display.frozen_since.lock().await.map(|t| t.to_rfc3339()),
                 None => None,

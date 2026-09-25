@@ -114,15 +114,17 @@ BOXES = """(() => {
 
 
 STYLED = """(() => {
-  const hosts = [...document.querySelectorAll('[id^="__mcc_overlay"]')];
-  const box = hosts.map((h) => h.shadowRoot && h.shadowRoot.querySelector('.box'))
-                   .find(Boolean);
+  const host = document.querySelector('[id^="__mcc_overlay"]');
+  const box = host && host.shadowRoot && host.shadowRoot.querySelector('.box');
   if (!box) return JSON.stringify({box: false});
   const cs = getComputedStyle(box);
   return JSON.stringify({
     box: true,
     text: box.textContent,
-    position: cs.position,
+    // The region frame is on the host (inline CSSOM); the box's look -- flex,
+    // background, size -- comes from the adopted sheet, which is the CSP test.
+    hostPosition: getComputedStyle(host).position,
+    display: cs.display,
     background: cs.backgroundColor,
     fontSize: parseFloat(cs.fontSize),
     host: location.host,
@@ -167,18 +169,20 @@ async def settings_flow():
               body.get("overlay"))
 
         status, body = put({"enabled": True, "text": "Heute ab 16 Uhr geschlossen",
-                            "position": "top-left", "size": 3.5, "show_clock": True})
+                            "region": {"x": 0, "y": 0, "w": 6, "h": 4}, "size": 3.5, "show_clock": True})
         check("a text overlay saves", status == 200 and body["overlay"]["text"].startswith("Heute"),
               (status, body))
-        check("and keeps the corner it was given", body["overlay"]["position"] == "top-left", body)
+        check("and keeps the region it was given",
+              body["overlay"]["region"] == {"x": 0, "y": 0, "w": 6, "h": 4}, body)
 
         status, body = put({"enabled": True, "text": "x", "size": 900,
-                            "background_alpha": 12, "position": "nowhere"})
+                            "background_alpha": 12, "region": {"x": 20, "y": 20, "w": 10, "h": 10}})
         check("an impossible size is pulled into range, not rejected",
               status == 200 and body["overlay"]["size"] <= 20, body)
         check("so is an alpha out of range", body["overlay"]["background_alpha"] <= 1.0, body)
-        check("an unknown corner falls back instead of failing",
-              body["overlay"]["position"] == "bottom-right", body)
+        r = body["overlay"]["region"]
+        check("a region off the grid is pulled inside it, not rejected",
+              r["x"] + r["w"] <= 24 and r["y"] + r["h"] <= 24 and r["w"] >= 1 and r["h"] >= 1, r)
 
         print("\n[40b] the box style is structured, not free-text CSS")
         status, body = put({"enabled": True, "text": "x", "background_color": "#123456",
@@ -216,7 +220,8 @@ async def settings_flow():
         # Written the way the old version wrote it, straight into the settings row.
         legacy = json.dumps({"enabled": True, "text": "alt",
                              "background": "rgba(17,34,51,0.5)", "opacity": 0.5,
-                             "color": "#abcdef"})
+                             "color": "#abcdef",
+                             "position": "top-left", "margin": 5, "max_width": 50})
         import sqlite3
         con = sqlite3.connect(f"{SP}/t.db")
         con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('overlay_config', ?)",
@@ -233,6 +238,10 @@ async def settings_flow():
               abs(migrated["background_alpha"] - 0.25) < 0.01, migrated)
         check("the legacy fields are gone from the response",
               "background" not in migrated and "opacity" not in migrated, migrated)
+        check("the legacy corner became its preset region",
+              migrated["region"] == {"x": 0, "y": 0, "w": 6, "h": 4}, migrated)
+        check("and the corner/margin/max_width fields left the API",
+              all(k not in migrated for k in ("position", "margin", "max_width")), migrated)
 
     with Server(fresh=True):
         status, body = put({"enabled": True, "text": "  ", "show_clock": False,
@@ -271,7 +280,7 @@ async def settings_flow():
         item_id = items[-1]["id"]
         status, _ = http("PUT", f"/api/playlist/{item_id}",
                          {"overlay": {"enabled": True, "qr_text": "https://example.invalid/item",
-                                      "qr_label": "Mehr Info", "position": "top-left"}})
+                                      "qr_label": "Mehr Info", "region": {"x": 0, "y": 0, "w": 6, "h": 4}}})
         check("the item's overlay saves", status == 200, status)
         check("and comes back on the playlist",
               (http("GET", "/api/playlist")[1][-1]["overlay_config"] or {}).get("qr_label")
@@ -285,11 +294,11 @@ async def settings_flow():
         check("a dangling image on an item is refused too", status == 400, (status, body))
 
         status, _ = http("PUT", f"/api/playlist/{item_id}",
-                         {"overlay": {"enabled": True, "position": "nowhere",
+                         {"overlay": {"enabled": True, "region": None,
                                       "qr_text": "https://example.invalid/item"}})
         stored = http("GET", "/api/playlist")[1][-1]["overlay_config"] or {}
-        check("an unknown corner falls back to the global one (a shared box)",
-              status == 200 and stored.get("position") == "", stored)
+        check("no region means the global box (a shared box)",
+              status == 200 and stored.get("region") is None, stored)
 
         status, _ = http("PUT", f"/api/playlist/{item_id}", {"overlay": {"enabled": True}})
         check("an item overlay with no content is stored as none at all",
@@ -448,7 +457,7 @@ async def browser_flow():
           (cdp.page_ws(9232)[1] or {}).get("url"))
 
     status, body = put({"enabled": True, "text": "Werkstatt geschlossen",
-                        "show_clock": True, "position": "top-center"}, port=HTTP)
+                        "show_clock": True, "region": {"x": 9, "y": 0, "w": 6, "h": 4}}, port=HTTP)
     check("overlay switched on", status == 200, (status, body))
 
     ws_url, _ = cdp.page_ws(9232)
@@ -471,11 +480,11 @@ async def browser_flow():
         check("the operator's text is on the page",
               "Werkstatt geschlossen" in boxes["text"], boxes)
         check("and the clock rendered a time", any(c.isdigit() for c in boxes["text"]), boxes)
-        check("one corner in use means one box", boxes["count"] == 1, boxes)
+        check("one region in use means one box", boxes["count"] == 1, boxes)
 
         print("\n[44] the colour and alpha reach the rendered box")
         put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
-             "position": "top-center", "background_color": "#112233",
+             "region": {"x": 9, "y": 0, "w": 6, "h": 4}, "background_color": "#112233",
              "background_alpha": 0.4, "color": "#00ff00", "color_alpha": 0.6}, port=HTTP)
         painted = None
         for _ in range(40):
@@ -497,7 +506,7 @@ async def browser_flow():
               painted.get("fg") == "rgba(0, 255, 0, 0.6)", painted)
 
         put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
-             "position": "top-center", "plain": True}, port=HTTP)
+             "region": {"x": 9, "y": 0, "w": 6, "h": 4}, "plain": True}, port=HTTP)
         plain = None
         for _ in range(40):
             plain = json.loads(await page.eval(
@@ -515,37 +524,37 @@ async def browser_flow():
         check("\"no box\" drops the background and the padding with it",
               plain.get("bg") == "rgba(0, 0, 0, 0)" and plain.get("pad") == "0px", plain)
 
-        print("\n[44b] the content lines up with the corner it sits in")
-        ALIGN = """(() => {
+        print("\n[44b] the box centres inside its region")
+        # No alignment control any more: content is always centred, and the box
+        # sits in the middle of the region it names. A centre region should put
+        # the box near the middle of the viewport; a corner region should not.
+        CENTRED = """(() => {
           const h = document.querySelector('[id^="__mcc_overlay"]');
           const box = h && h.shadowRoot && h.shadowRoot.querySelector('.box');
-          const qr = h && h.shadowRoot && h.shadowRoot.querySelector('.qrwrap');
-          if (!box) return 'null';
-          return JSON.stringify({align: getComputedStyle(box).textAlign,
-                                 qr: qr ? getComputedStyle(qr).justifyContent : null});
+          if (!box) return JSON.stringify({box: false});
+          const r = box.getBoundingClientRect();
+          return JSON.stringify({box: true, align: getComputedStyle(box).textAlign,
+                                 cx: (r.left + r.right) / 2, cy: (r.top + r.bottom) / 2,
+                                 W: innerWidth, H: innerHeight});
         })()"""
 
-        for position, want, want_flex in [("bottom-center", "center", "center"),
-                                          ("bottom-right", "right", "flex-end"),
-                                          ("top-left", "left", "flex-start")]:
-            put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
-                 "qr_source": "text", "qr_text": "https://example.invalid/x",
-                 "position": position}, port=HTTP)
-            got = None
-            for _ in range(40):
-                got = json.loads(await page.eval(ALIGN))
-                # Both, not just the alignment: the previous position may already
-                # have matched, and then this would read the box from before the
-                # edit and pass without proving anything.
-                if got.get("align") == want and got.get("qr") is not None:
+        put({"enabled": True, "text": "Mitte", "show_clock": True,
+             "region": {"x": 9, "y": 10, "w": 6, "h": 4}}, port=HTTP)
+        centre = {}
+        for _ in range(40):
+            if "Mitte" in json.loads(await page.eval(BOXES))["text"]:
+                centre = json.loads(await page.eval(CENTRED))
+                if centre.get("box"):
                     break
-                await asyncio.sleep(0.5)
-            check(f"{position} aligns its text {want}", got.get("align") == want, got)
-            check(f"and its QR row follows ({want_flex})", got.get("qr") == want_flex, got)
+            await asyncio.sleep(0.5)
+        check("content is centred, not aligned to an edge", centre.get("align") == "center", centre)
+        check("a centre region puts the box near the middle of the screen",
+              abs(centre["cx"] - centre["W"] / 2) < centre["W"] * 0.15
+              and abs(centre["cy"] - centre["H"] / 2) < centre["H"] * 0.2, centre)
 
-        # Back to a box, so the checks below read what they expect.
+        # Back to a box near the top, so the checks below read what they expect.
         put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
-             "position": "top-center"}, port=HTTP)
+             "region": {"x": 9, "y": 0, "w": 6, "h": 4}}, port=HTTP)
         await asyncio.sleep(2)
 
         print("\n[45] and on a playlist item, and on an override")
@@ -569,7 +578,7 @@ async def browser_flow():
         print("\n[45b] the item's own layer is drawn on top of the global one")
         current = http("GET", "/api/control/current", port=HTTP)[1]["item_id"]
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Mehr Info", "position": ""}}, port=HTTP)
+             {"overlay": {"enabled": True, "text": "Mehr Info", "region": None}}, port=HTTP)
         shared = None
         for _ in range(40):
             shared = json.loads(await page.eval(BOXES))
@@ -578,11 +587,11 @@ async def browser_flow():
             await asyncio.sleep(0.5)
         check("the item's text appears without a navigation",
               "Mehr Info" in shared["text"], shared)
-        check("both layers are in the global overlay's box, because the item named no corner",
+        check("both layers are in the global overlay's box, because the item named no region",
               shared["count"] == 1 and "Werkstatt geschlossen" in shared["text"], shared)
 
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Mehr Info", "position": "bottom-left"}},
+             {"overlay": {"enabled": True, "text": "Mehr Info", "region": {"x": 0, "y": 20, "w": 6, "h": 4}}},
              port=HTTP)
         split = None
         for _ in range(40):
@@ -590,9 +599,9 @@ async def browser_flow():
             if split["count"] == 2:
                 break
             await asyncio.sleep(0.5)
-        check("its own corner gives it its own box", split["count"] == 2, split)
+        check("its own region gives it its own box", split["count"] == 2, split)
         check("and the two boxes sit where they were asked to",
-              sorted(split["ids"]) == ["__mcc_overlay_bottom-left", "__mcc_overlay_top-center"],
+              sorted(split["ids"]) == ["__mcc_overlay_0-20-6-4", "__mcc_overlay_9-0-6-4"],
               split)
 
         http("PUT", f"/api/playlist/{current}", {"overlay": {"enabled": False}}, port=HTTP)
@@ -631,11 +640,11 @@ async def browser_flow():
         # white clock is the thing that becomes unreadable, so the override has
         # to reach the *global* layer and not only the item's own.
         put({"enabled": True, "text": "Haus", "show_clock": True,
-             "position": "top-center", "color": "#ffffff"}, port=HTTP)
+             "region": {"x": 9, "y": 0, "w": 6, "h": 4}, "color": "#ffffff"}, port=HTTP)
         current = http("GET", "/api/control/current", port=HTTP)[1]["item_id"]
 
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Item", "position": "",
+             {"overlay": {"enabled": True, "text": "Item", "region": None,
                           "color": "#101010"}}, port=HTTP)
         shared = {}
         for _ in range(40):
@@ -650,7 +659,7 @@ async def browser_flow():
               shared)
 
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Item", "position": "bottom-left",
+             {"overlay": {"enabled": True, "text": "Item", "region": {"x": 0, "y": 20, "w": 6, "h": 4},
                           "color": "#101010"}}, port=HTTP)
         split = {}
         for _ in range(40):
@@ -659,17 +668,17 @@ async def browser_flow():
                 break
             await asyncio.sleep(0.5)
         by_id = {b["id"]: b for b in split.get("boxes", [])}
-        check("an item in its own corner recolours only its own box",
-              by_id.get("__mcc_overlay_bottom-left", {}).get("color") == "rgb(16, 16, 16)",
+        check("an item in its own region recolours only its own box",
+              by_id.get("__mcc_overlay_0-20-6-4", {}).get("color") == "rgb(16, 16, 16)",
               split)
         check("and the global box keeps the colour it was given",
-              by_id.get("__mcc_overlay_top-center", {}).get("color") == "rgb(255, 255, 255)",
+              by_id.get("__mcc_overlay_9-0-6-4", {}).get("color") == "rgb(255, 255, 255)",
               split)
 
         # A bright page often wants no badge of its own -- only a readable clock.
         http("PUT", f"/api/playlist/{current}",
              {"overlay": {"enabled": True, "text": "", "qr_text": "",
-                          "position": "bottom-left", "color": "#204060"}}, port=HTTP)
+                          "region": {"x": 0, "y": 20, "w": 6, "h": 4}, "color": "#204060"}}, port=HTTP)
         only = {}
         for _ in range(40):
             only = json.loads(await page.eval(COLOURS))
@@ -678,9 +687,9 @@ async def browser_flow():
             await asyncio.sleep(0.5)
         check("a colour with no content draws no box of its own",
               only["count"] == 1, only)
-        check("and recolours the global box, whatever corner it named",
+        check("and recolours the global box, whatever region it named",
               only["boxes"][0]["color"] == "rgb(32, 64, 96)"
-              and only["boxes"][0]["id"] == "__mcc_overlay_top-center", only)
+              and only["boxes"][0]["id"] == "__mcc_overlay_9-0-6-4", only)
         stored = [i for i in http("GET", "/api/playlist", port=HTTP)[1]
                   if i["id"] == current]
         check("a colour-only overlay is stored rather than dropped as empty",
@@ -688,7 +697,7 @@ async def browser_flow():
               stored[:1])
 
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Item", "position": "",
+             {"overlay": {"enabled": True, "text": "Item", "region": None,
                           "color": "keine farbe"}}, port=HTTP)
         bad = {}
         for _ in range(40):
@@ -700,7 +709,7 @@ async def browser_flow():
               bad["count"] == 1 and bad["boxes"][0]["color"] == "rgb(255, 255, 255)", bad)
 
         http("PUT", f"/api/playlist/{current}",
-             {"overlay": {"enabled": True, "text": "Item", "position": "",
+             {"overlay": {"enabled": True, "text": "Item", "region": None,
                           "color": ""}}, port=HTTP)
         cleared = {}
         for _ in range(40):
@@ -768,7 +777,7 @@ async def browser_flow():
         check("the strict-CSP origin is serving", wait_for(
             lambda: urllib.request.urlopen(strict_url, timeout=2).status == 200, 15) is not None)
 
-        put({"enabled": True, "text": "Streng", "position": "bottom-right",
+        put({"enabled": True, "text": "Streng", "region": {"x": 18, "y": 20, "w": 6, "h": 4},
              "size": 3.0, "background_color": "#000000", "background_alpha": 0.65},
             port=HTTP)
         http("POST", "/api/override", {"url": strict_url}, port=HTTP)
@@ -783,9 +792,12 @@ async def browser_flow():
               info.get("box") and "Streng" in (info.get("text") or ""), info)
         check("the page really is the strict-CSP origin",
               info.get("host") == f"{LAN}:3062", info)
-        # The three the dropped sheet took with it.
-        check("it is still positioned by our own rules",
-              info.get("position") == "fixed", info)
+        # The region frame is inline CSSOM on the host, so it always placed the
+        # box; the box's own look is what the dropped sheet would have taken.
+        check("the region frame still positions it",
+              info.get("hostPosition") == "fixed", info)
+        check("the box still got its flex layout from the adopted sheet",
+              info.get("display") == "flex", info)
         check("it still has its box background",
               info.get("background") not in (None, "rgba(0, 0, 0, 0)"), info)
         check("and it is still sized in vmin, not the page default 16px",
@@ -796,7 +808,7 @@ async def browser_flow():
         # The runtime's own contract first: suspend keeps the configuration, so
         # coming back needs no server round trip.
         put({"enabled": True, "text": "Werkstatt geschlossen", "show_clock": True,
-             "position": "bottom-center"}, port=HTTP)
+             "region": {"x": 9, "y": 20, "w": 6, "h": 4}}, port=HTTP)
         # Wait for *this* text, not merely for a box: the previous case left one
         # on screen, and "a box exists" would pass before the edit arrived.
         for _ in range(40):
@@ -877,7 +889,7 @@ async def browser_flow():
     print("\n[47] switching it off takes it away again")
     live_ws, _ = cdp.page_ws(9232)
     async with cdp.Session(live_ws) as live:
-        put({"enabled": True, "text": "noch da", "position": "top-left"}, port=HTTP)
+        put({"enabled": True, "text": "noch da", "region": {"x": 0, "y": 0, "w": 6, "h": 4}}, port=HTTP)
         for _ in range(40):
             if "noch da" in json.loads(await live.eval(BOXES))["text"]:
                 break
@@ -898,7 +910,7 @@ async def browser_flow():
     # the readiness wait (at least ~1 s of network idle), so a box that is up
     # within a few hundred milliseconds of the document starting can only have
     # come from the seed.
-    put({"enabled": True, "text": "nahtlos", "position": "top-left"}, port=HTTP)
+    put({"enabled": True, "text": "nahtlos", "region": {"x": 0, "y": 0, "w": 6, "h": 4}}, port=HTTP)
     for row in http("GET", "/api/playlist", port=HTTP)[1]:
         http("PUT", f"/api/playlist/{row['id']}", {"enabled": False}, port=HTTP)
     playlist = a_playlist(port=HTTP)

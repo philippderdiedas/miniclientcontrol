@@ -78,12 +78,66 @@ pub enum CastQrTarget {
     Chooser,
 }
 
+/// Where the overlay box sits: a rectangle on the same 24x24 grid the layout
+/// widgets use. The box keeps its natural size and centres inside this region;
+/// the region's width caps the content (text wraps, a QR or image scales down),
+/// which is what the old `max_width` did. It replaces the fixed corners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayRegion {
+    pub x: u8,
+    pub y: u8,
+    pub w: u8,
+    pub h: u8,
+}
+
+impl Default for OverlayRegion {
+    /// bottom-right, the corner the overlay defaulted to.
+    fn default() -> Self {
+        Self { x: 18, y: 20, w: 6, h: 4 }
+    }
+}
+
+impl OverlayRegion {
+    /// The corner-name -> region table. The corner migration below reads it, and
+    /// `web/layout-editor.js`'s `OVERLAY_PRESETS` mirrors it for its preset
+    /// buttons -- keep the two in step. (The editor adds a "Mitte" preset,
+    /// {9,10,6,4}, that no legacy corner maps to.)
+    pub const PRESETS: &'static [(&'static str, OverlayRegion)] = &[
+        ("top-left", OverlayRegion { x: 0, y: 0, w: 6, h: 4 }),
+        ("top-center", OverlayRegion { x: 9, y: 0, w: 6, h: 4 }),
+        ("top-right", OverlayRegion { x: 18, y: 0, w: 6, h: 4 }),
+        ("bottom-left", OverlayRegion { x: 0, y: 20, w: 6, h: 4 }),
+        ("bottom-center", OverlayRegion { x: 9, y: 20, w: 6, h: 4 }),
+        ("bottom-right", OverlayRegion { x: 18, y: 20, w: 6, h: 4 }),
+    ];
+
+    /// Clamp into the grid rather than reject: nonsense here is visible on a
+    /// screen nobody is standing in front of, so it is pulled into range.
+    pub fn sanitized(self) -> Self {
+        let x = self.x.min(23);
+        let y = self.y.min(23);
+        let w = self.w.clamp(1, 24 - x);
+        let h = self.h.clamp(1, 24 - y);
+        Self { x, y, w, h }
+    }
+
+    /// The region a legacy corner name maps to; an unknown one falls back to the
+    /// default, the same forgiving call an unknown corner always got.
+    fn for_corner(name: &str) -> Self {
+        Self::PRESETS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, r)| *r)
+            .unwrap_or_default()
+    }
+}
+
 /// What the overlay shows and where.
 ///
 /// Stored as one JSON blob rather than a column per field: it is a handful of
 /// presentation knobs that only ever travel together, and the display runtime is
 /// the only thing that interprets them. The server validates the ranges it can
-/// (a nonsense size or an unknown corner would be visible on the screen and
+/// (a nonsense size or a region off the grid would be visible on the screen and
 /// awkward to undo from a page nobody can read) and otherwise passes it through.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -111,12 +165,22 @@ pub struct Overlay {
     /// statement, so a presenter cannot clear the house message -- but a venue
     /// that would rather not draw on someone's slides can say so once.
     pub hide_during_cast: bool,
-    pub position: String,
+    /// Where the box sits on the 24x24 grid. Replaces the fixed corner, and
+    /// subsumes the old `margin` (a region names an absolute place) and
+    /// `max_width` (the region's width is the cap).
+    pub region: OverlayRegion,
     /// vmin, so one setting reads the same on a 1080p panel and a portrait 4K one.
     pub size: f32,
-    pub margin: f32,
-    pub max_width: f32,
     pub qr_size: f32,
+    /// Legacy corner and its spacing, folded into `region` on load and never
+    /// written again. Inputs only: an old stored config carries them, a new one
+    /// carries `region`.
+    #[serde(default, skip_serializing)]
+    pub position: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub margin: Option<f32>,
+    #[serde(default, skip_serializing)]
+    pub max_width: Option<f32>,
     /// Box background, as a colour and an alpha rather than a CSS string: the
     /// browser drops an invalid declaration without a word, so a typo in a string
     /// would mean a box with no background and no error anywhere.
@@ -155,11 +219,12 @@ impl Default for Overlay {
             qr_source: "text".to_string(),
             qr_label: String::new(),
             hide_during_cast: false,
-            position: "bottom-right".to_string(),
+            region: OverlayRegion::default(),
             size: 2.4,
-            margin: 3.0,
-            max_width: 40.0,
             qr_size: 14.0,
+            position: None,
+            margin: None,
+            max_width: None,
             background_color: "#000000".to_string(),
             background_alpha: 0.65,
             plain: false,
@@ -185,8 +250,12 @@ pub struct ItemOverlay {
     pub image_asset_id: Option<i64>,
     pub qr_text: String,
     pub qr_label: String,
-    /// Empty means "wherever the global overlay is", which puts both in one box.
-    pub position: String,
+    /// The item's own box region on the 24x24 grid. `None` means "wherever the
+    /// global overlay is", which puts both in one box.
+    pub region: Option<OverlayRegion>,
+    /// Legacy corner, folded into `region` on load and never written again.
+    #[serde(default, skip_serializing)]
+    pub position: Option<String>,
     /// Text colour for the box this item lands in, overriding the global one.
     ///
     /// Empty means "the global overlay's colour", the same way an empty
@@ -204,9 +273,14 @@ pub struct ItemOverlay {
 
 impl ItemOverlay {
     pub fn sanitized(mut self) -> Self {
-        if !self.position.is_empty() && !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
-            self.position = String::new();
+        // A legacy corner folds into `region`; an empty one meant "join the
+        // global box", which is now `None`.
+        if let Some(corner) = self.position.take() {
+            if self.region.is_none() && !corner.is_empty() {
+                self.region = Some(OverlayRegion::for_corner(&corner));
+            }
         }
+        self.region = self.region.map(OverlayRegion::sanitized);
         // Falls back to the global colour rather than being refused: the same
         // call an unknown corner gets. A stored colour that is ignored is better
         // than an error on a screen nobody is standing in front of.
@@ -334,27 +408,21 @@ fn sanitize_css_value(raw: &str) -> String {
     trimmed.to_string()
 }
 
-pub const OVERLAY_POSITIONS: &[&str] = &[
-    "top-left", "top-right", "bottom-left", "bottom-right", "top-center", "bottom-center",
-];
-
 impl Overlay {
     /// Clamp what would otherwise be visible nonsense on a screen nobody is
     /// standing in front of. Deliberately forgiving: out-of-range numbers are
     /// pulled into range rather than rejected, because an overlay that is a bit
     /// too big still beats a 400 the operator has to decode.
     pub fn sanitized(mut self) -> Self {
-        if !OVERLAY_POSITIONS.contains(&self.position.as_str()) {
-            self.position = "bottom-right".to_string();
-        }
+        // Folds a legacy corner into `region` (and the old background/opacity),
+        // so it must run before `region` is read below.
+        self.migrate_legacy_style();
+        self.region = self.region.sanitized();
         if !matches!(self.qr_source.as_str(), "text" | "cast") {
             self.qr_source = "text".to_string();
         }
         self.size = self.size.clamp(0.5, 20.0);
-        self.margin = self.margin.clamp(0.0, 40.0);
-        self.max_width = self.max_width.clamp(5.0, 100.0);
         self.qr_size = self.qr_size.clamp(4.0, 60.0);
-        self.migrate_legacy_style();
         if !is_hex_colour(&self.background_color) {
             self.background_color = "#000000".to_string();
         }
@@ -378,6 +446,19 @@ impl Overlay {
     /// Only when the new fields are untouched: an operator who has since set a
     /// colour has made the newer decision.
     fn migrate_legacy_style(&mut self) {
+        // The corner migration is independent of the background one below, whose
+        // early return must not skip it: an old config that customised its box
+        // colour still needs its corner folded into `region`.
+        if let Some(corner) = self.position.take() {
+            // Only when this config predates regions: a new one carries a real
+            // `region` (and no `position`), so there is nothing to fold in.
+            if self.region == OverlayRegion::default() && !corner.is_empty() {
+                self.region = OverlayRegion::for_corner(&corner);
+            }
+        }
+        self.margin = None;
+        self.max_width = None;
+
         let legacy = self.background.take();
         let opacity = self.opacity.take();
         let defaults = Self::default();
@@ -750,11 +831,9 @@ pub async fn overlay_payload(
     // says nothing and it recolours the global one -- the alternative is a
     // stored setting that silently does nothing.
     let recolour = item.filter(|item| item.recolours()).map(|item| {
-        let target = if item.draws() && !item.position.is_empty() {
-            item.position.clone()
-        } else {
-            overlay.position.clone()
-        };
+        // An item that draws nothing has no box of its own, so it recolours the
+        // global one -- the region it might carry says nothing then.
+        let target = if item.draws() { item.region } else { None }.unwrap_or(overlay.region);
         (target, item.color.clone())
     });
 
@@ -780,7 +859,7 @@ pub async fn overlay_payload(
             };
             object.insert("qr_modules".to_string(), json!(qr_modules(&qr_target)));
             if let Some((target, color)) = recolour.as_ref() {
-                if *target == overlay.position {
+                if *target == overlay.region {
                     object.insert("color".to_string(), json!(color));
                 }
             }
@@ -789,15 +868,11 @@ pub async fn overlay_payload(
     }
 
     if let Some(item) = item.filter(|item| item.draws()) {
-        // An item that names no corner joins the global overlay's box, which is
+        // An item that names no region joins the global overlay's box, which is
         // the arrangement that needs no thought from whoever fills in the card.
-        let position = if item.position.is_empty() {
-            overlay.position.clone()
-        } else {
-            item.position.clone()
-        };
+        let region = item.region.unwrap_or(overlay.region);
         layers.push(json!({
-            "position": position,
+            "region": region,
             "text": item.text,
             "image_data": image_data_uri(state, item.image_asset_id).await,
             "qr_modules": qr_modules(&item.qr_text),
@@ -805,8 +880,6 @@ pub async fn overlay_payload(
             // Style follows the global overlay, so a shared box is uniform and a
             // separate one still looks like it belongs to the same display.
             "size": overlay.size,
-            "margin": overlay.margin,
-            "max_width": overlay.max_width,
             "qr_size": overlay.qr_size,
             "background_color": overlay.background_color,
             "background_alpha": overlay.background_alpha,
@@ -1122,6 +1195,39 @@ pub async fn update_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_region_is_pulled_inside_the_grid() {
+        let r = OverlayRegion { x: 20, y: 20, w: 10, h: 10 }.sanitized();
+        assert!(r.x + r.w <= 24 && r.y + r.h <= 24 && r.w >= 1 && r.h >= 1);
+        let z = OverlayRegion { x: 0, y: 0, w: 0, h: 0 }.sanitized();
+        assert!(z.w >= 1 && z.h >= 1);
+    }
+
+    #[test]
+    fn a_legacy_corner_migrates_to_its_preset_region() {
+        let mut o = Overlay {
+            position: Some("top-left".to_string()),
+            margin: Some(5.0),
+            max_width: Some(50.0),
+            ..Overlay::default()
+        };
+        o.migrate_legacy_style();
+        assert_eq!(o.region, OverlayRegion { x: 0, y: 0, w: 6, h: 4 });
+        assert!(o.position.is_none() && o.margin.is_none() && o.max_width.is_none());
+        // An unknown corner lands on the default (bottom-right) region.
+        let mut u = Overlay { position: Some("nowhere".to_string()), ..Overlay::default() };
+        u.migrate_legacy_style();
+        assert_eq!(u.region, OverlayRegion { x: 18, y: 20, w: 6, h: 4 });
+    }
+
+    #[test]
+    fn an_item_corner_migrates_and_empty_stays_global() {
+        let a = ItemOverlay { position: Some("bottom-left".to_string()), ..ItemOverlay::default() }.sanitized();
+        assert_eq!(a.region, Some(OverlayRegion { x: 0, y: 20, w: 6, h: 4 }));
+        let b = ItemOverlay { position: Some(String::new()), ..ItemOverlay::default() }.sanitized();
+        assert!(b.region.is_none());
+    }
 
     #[test]
     fn guest_pages_default_off_and_the_flag_pins_it() {
