@@ -92,6 +92,7 @@
     <div id="castScreens"></div>
 
     <hr />
+    <p class="status">Übertragung &amp; Zugang</p>
     <p class="muted" id="castHardOff" hidden>
       Casting ist per <code>--disable-cast</code> abgeschaltet. Diese Einstellungen
       greifen erst nach einem Neustart ohne dieses Flag.
@@ -135,6 +136,10 @@
         Varianten führen dann auf denselben Schirm.
       </p>
     </div>
+    <div class="row">
+      <button id="castSave" class="primary">Speichern</button>
+      <span class="muted" id="castFeedback"></span>
+    </div>
   </div>
 
   <div class="card" id="audioCard" hidden>
@@ -146,7 +151,7 @@
   </div>
 
   <div class="card" id="authCard">
-    <p class="status">Zugang zur Verwaltung</p>
+    <p class="status">Verwaltungs-Zugang &amp; Konten</p>
     <p>
       Konten und Rollen (Admin, Manager, Redakteur) werden auf der Seite
       <a href="/users.html">Benutzer</a> verwaltet. Die Gästeseite bleibt offen —
@@ -158,22 +163,9 @@
     <p class="status">Single Sign-on (OpenID Connect)</p>
     <div id="ssoForm"></div>
     <div class="row">
-      <button id="ssoSave" class="primary">SSO speichern</button>
+      <button id="ssoSave" class="primary">Speichern</button>
       <span class="muted" id="ssoFeedback"></span>
     </div>
-  </div>
-  </div>
-
-  <!-- Outside the cards on purpose: this button covers the cast settings *and*
-       the operator access, so sitting inside either box would claim a scope it
-       does not have. It sits directly below both of them, with the overlay card
-       moved underneath: a card wedged in between would make the scope look like
-       it skips one. The overlay keeps its own buttons because it is edited far
-       more often, and mixing the two would make a text tweak look like it might
-       also change who can log in. -->
-  <div class="row" id="saveBar">
-    <button id="setSave" class="primary">Übertragung und Zugang speichern</button>
-    <span class="muted" id="setFeedback"></span>
   </div>
 
   <div class="card" id="localeCard">
@@ -189,6 +181,10 @@
       <span class="lock" id="lockLocale" hidden>per Kommandozeile festgelegt</span>
       <button type="button" id="useSystemLocale" hidden></button>
     </p>
+    <div class="row">
+      <button id="localeSave" class="primary">Speichern</button>
+      <span class="muted" id="localeFeedback"></span>
+    </div>
   </div>
 
   <div class="card" id="overlayCard">
@@ -271,7 +267,7 @@
         Größen in <code>vmin</code> bzw. <code>vw</code>, damit eine Einstellung auf
         jedem Panel gleich groß aussieht.
       </p>
-      <button id="ovSave">Overlay speichern</button>
+      <button id="ovSave" class="primary">Speichern</button>
       <button id="ovPreview" type="button">Vorschau hier zeigen</button>
       <span class="muted" id="ovFeedback"></span>
     </div>
@@ -635,23 +631,17 @@
 
     document.getElementById('setAuth').addEventListener('change', syncCodeRow);
 
-    function feedback(message, ok) {
-      const node = document.getElementById('setFeedback');
+    // Each card saves only its own fields; `/api/settings` merges what it is
+    // sent, so a partial PUT leaves the rest untouched. One `Speichern` per card,
+    // and the feedback lands next to the button that was clicked.
+    function say(id, message, ok) {
+      const node = document.getElementById(id);
       node.textContent = message;
       node.className = ok ? 'ok' : 'bad';
     }
 
-    document.getElementById('setSave').addEventListener('click', async () => {
-      feedback('', true);
-      const body = {
-        cast_enabled: document.getElementById('setEnabled').checked,
-        guest_pages_enabled: document.getElementById('setGuestPages').checked,
-        cast_auth: document.getElementById('setAuth').value,
-        cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
-        cast_qr_target: document.getElementById('setQrTargetChooser').checked ? 'chooser' : 'screen',
-        locale: document.getElementById('setLocale').value.trim(),
-      };
-
+    async function saveSettings(feedbackId, body, after) {
+      say(feedbackId, '', true);
       try {
         const res = await fetch('/api/settings', {
           method: 'PUT',
@@ -660,16 +650,28 @@
         });
         if (!res.ok) {
           const problem = await res.json().catch(() => ({}));
-          feedback(problem.error || 'Speichern fehlgeschlagen.', false);
+          say(feedbackId, problem.error || 'Speichern fehlgeschlagen.', false);
           return;
         }
         applySettings(await res.json());
-        feedback('Gespeichert.', true);
-        refreshCast();
+        say(feedbackId, 'Gespeichert.', true);
+        if (after) after();
       } catch (_) {
-        feedback('Controller nicht erreichbar.', false);
+        say(feedbackId, 'Controller nicht erreichbar.', false);
       }
-    });
+    }
+
+    document.getElementById('castSave').addEventListener('click', () => saveSettings('castFeedback', {
+      cast_enabled: document.getElementById('setEnabled').checked,
+      guest_pages_enabled: document.getElementById('setGuestPages').checked,
+      cast_auth: document.getElementById('setAuth').value,
+      cast_code: document.getElementById('setCode').value.trim().toUpperCase(),
+      cast_qr_target: document.getElementById('setQrTargetChooser').checked ? 'chooser' : 'screen',
+    }, refreshCast));
+
+    document.getElementById('localeSave').addEventListener('click', () => saveSettings('localeFeedback', {
+      locale: document.getElementById('setLocale').value.trim(),
+    }));
 
 
     // --- overlay ---------------------------------------------------------
