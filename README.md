@@ -265,7 +265,7 @@ declaration.
   `GET /api/displays` returns both, plus `cast_user`: the account casting there,
   or `null`
 - `GET /api/displays/{name}/screenshot` — what the screen shows, as a JPEG at
-  most 640 px wide; taken on request, cached 10 s, `X-Screenshot-Age` and (while
+  the screen's own size (a scaled capture flashes the real screen); taken on request, cached 10 s, `X-Screenshot-Age` and (while
   frozen) `X-Screen-Frozen-Since` headers, `503` before there is any picture.
   `GET /api/displays` carries `frozen_since` per screen. `--freeze-timeout`
   (default 60) sets how long a screen may paint nothing before `display.frozen`

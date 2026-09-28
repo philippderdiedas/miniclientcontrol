@@ -1,4 +1,4 @@
-//! What a screen shows, as a small JPEG: the page on screen with its overlay,
+//! What a screen shows, as a JPEG: the page on screen with its overlay,
 //! override or guest page -- which is why it is not the asset's own file.
 //! Taken on request only and cached, because on a Pi every capture costs.
 
@@ -8,34 +8,29 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
-use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, CaptureScreenshotParams, Viewport};
+use chromiumoxide::cdp::browser_protocol::page::{CaptureScreenshotFormat, CaptureScreenshotParams};
 
 use crate::models::{AppState, Display};
 
 const FRESH: Duration = Duration::from_secs(10);
 /// A capture hangs on a frozen screen (measured); the last picture is the answer then.
 const TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_WIDTH: f64 = 640.0;
 
-/// The visible part of the page. `Page.captureScreenshot` directly, not
-/// `Page::screenshot`, which activates the target first: racing the loop's own
-/// switch to another page, that would bring the old tab back to the front.
+/// The visible part of the page, at the screen's own size. `Page.captureScreenshot`
+/// directly, not `Page::screenshot`, which activates the target first: racing the
+/// loop's own switch to another page, that would bring the old tab back to the front.
+///
+/// **No `clip`, and so no `scale`.** A scaled clip -- which is how this once asked
+/// Chromium for a small picture -- flashes the real screen white for a moment on
+/// every capture, while the page sees nothing (no `resize`, same size and DPR) and
+/// the overlay stays up. Measured on kiosk2: three scaled captures, three flashes;
+/// three plain ones, none. The operator pages poll this every 10 s, so it looked
+/// like the display being reloaded over and over. Without a clip the capture is
+/// the visible viewport anyway; the picture is shrunk by whoever shows it.
 async fn take(page: &chromiumoxide::Page) -> Option<Vec<u8>> {
-    let view: Vec<f64> = page
-        .evaluate("[innerWidth, innerHeight, scrollX, scrollY]")
-        .await
-        .ok()?
-        .into_value()
-        .ok()?;
-    let (width, height, x, y) = (*view.first()?, *view.get(1)?, *view.get(2)?, *view.get(3)?);
-    if width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    let scale = (MAX_WIDTH / width).min(1.0);
     let params = CaptureScreenshotParams::builder()
         .format(CaptureScreenshotFormat::Jpeg)
-        .quality(60)
-        .clip(Viewport { x, y, width, height, scale })
+        .quality(50)
         .build();
     let shot = page.execute(params).await.ok()?;
     let data: &str = shot.result.data.as_ref();

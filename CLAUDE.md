@@ -929,6 +929,10 @@ on request, cached 10 s, with a 5 s timeout — a capture hangs on a frozen
 screen, and then the last picture is served with its age. It sends
 `Page.captureScreenshot` directly: `Page::screenshot` *activates* the target
 first, which racing the loop's own page switch would bring an old tab back.
+**No `clip`/`scale`**: a scaled capture flashes the real screen white for
+~200 ms while the page sees nothing (no `resize`, same size) — measured on
+kiosk2, three scaled captures three flashes, three plain ones none — and the
+operator pages poll it every 10 s per screen.
 
 **The routes are operator-only.** Not in `is_display_path` (which would open them
 to the whole LAN), not in `cast::is_cast_public_path` (which would open them to

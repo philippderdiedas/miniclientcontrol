@@ -184,7 +184,7 @@ fn tools() -> Value {
         {
             "name": "screenshot",
             "title": "Look at a screen",
-            "description": "What a display shows right now, as an image (at most 640 px wide, cached up to 10 s). Display names come from GET /api/displays.",
+            "description": "What a display shows right now, as an image (at the screen's own size, cached up to 10 s). Display names come from GET /api/displays.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "display": { "type": "string" } },
