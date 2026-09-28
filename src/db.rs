@@ -246,6 +246,23 @@ pub async fn run_migrations(pool: &Pool<Sqlite>) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
+    // An account's API tokens, for scripts and LLM clients (`/mcp`). Hashed like
+    // a session; the token acts with whatever role its account has *now*, and a
+    // disabled or deleted account takes its tokens with it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS api_tokens (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            token_hash   TEXT NOT NULL UNIQUE,
+            created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME,
+            expires_at   DATETIME
+        );"
+    )
+    .execute(pool)
+    .await?;
+
     // An account's identity at an OpenID Connect provider. Linked by issuer and
     // subject, never by name: a provider account called "admin" must not
     // become the local one.

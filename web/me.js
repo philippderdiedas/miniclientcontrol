@@ -56,6 +56,8 @@
           .catch(() => {});
       }
       if (atLeast('admin')) box.append(link('/users.html', 'Benutzer'));
+      // Tokens belong to an account; the command-line credential has none.
+      if (me.account) box.append(link('/tokens.html', 'API-Tokens'));
       if (me.name !== undefined) {
         const out = document.createElement('a');
         out.href = '#';

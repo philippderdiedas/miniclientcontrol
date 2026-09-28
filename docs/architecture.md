@@ -21,7 +21,8 @@ src/cast/          cast signaling relay and the per-screen session lifecycle
 src/guest_page.rs  a guest showing a web page instead of casting; URL redaction
 src/managed_cert.rs a real wildcard certificate for a private address
 src/settings.rs    runtime settings, operator credentials, overlay config, /api/settings
-src/accounts/      users, roles and sessions; the auth middleware's identity resolution
+src/accounts/      users, roles, sessions and API tokens; the auth middleware's identity resolution
+src/mcp/           the MCP endpoint (/mcp): tool calls replayed through the router as the caller
 src/oidc/          single sign-on (OpenID Connect): login and cast-only sessions
 src/proposals/     an editor's changes staged as a changeset for an admin to approve
 src/chromium.rs    finds, launches and supervises the display browser
@@ -256,7 +257,7 @@ SQLite, path from `--database-path`. Tables: `assets`, `playlists`,
 `default_playlist_id`), `schedule_windows` (dayparting: a playlist for a time
 range on a screen), `settings` (key/value, for what the operator can change
 without a restart), `webhooks` (one row per outbound target), the accounts tables
-`users`, `sessions` and `user_identities` (the last links an account to an OIDC
+`users`, `sessions`, `api_tokens` (bearer credentials, hashed) and `user_identities` (the last links an account to an OIDC
 `(issuer, subject)`), `cast_sessions` (a cast-only SSO sign-in, no account), and
 the proposal tables `changesets` and `change_requests` (an editor's staged edits
 awaiting an admin).

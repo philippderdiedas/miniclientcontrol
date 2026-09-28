@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API-Tokens</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto 4rem; padding: 0 1rem; line-height: 1.45; }
+    nav { margin: 0 0 1rem; color: #666; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #ddd; vertical-align: middle; }
+    .muted { color: #666; }
+    .feedback { font-size: .85rem; margin-left: .4rem; }
+    .err { color: #a11; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: .8rem; margin: 1rem 0; }
+    .secret { background: #eef8ee; border-color: #9c9; }
+    pre, code { font-family: ui-monospace, monospace; font-size: .85rem; }
+    pre { background: #f6f6f6; padding: .6rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+    input, select, button { font: inherit; }
+  </style>
+</head>
+<body>
+  <h1>API-Tokens</h1>
+  <nav><a href="/admin.html">Verwaltung</a> · <a href="/playlist.html">Playlist</a> · <a href="/assets.html">Assets</a> · <a href="/displays.html">Displays</a></nav>
+  <p class="muted">
+    Ein Token ist ein Zugang für Skripte und KI-Assistenten (MCP). Er handelt als
+    <b>dieses Konto</b>, mit der Rolle, die es gerade hat: Mit dem Token eines
+    Redakteurs werden Änderungen zu Vorschlägen, die ein Manager freigibt. Für einen
+    KI-Assistenten ist deshalb ein eigenes Konto mit passender Rolle meist die beste
+    Wahl. Ein Token kann weder das Passwort noch andere Tokens ändern.
+  </p>
+
+  <table>
+    <thead><tr><th>Name</th><th>Angelegt</th><th>Zuletzt benutzt</th><th>Läuft ab</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p class="muted" id="empty" hidden>Noch keine Tokens.</p>
+
+  <div class="card">
+    <b>Token anlegen</b>
+    <p>
+      <input id="newName" placeholder="Name, z. B. Claude" autocomplete="off" maxlength="100" />
+      <select id="newDays">
+        <option value="">läuft nie ab</option>
+        <option value="30">30 Tage</option>
+        <option value="90" selected>90 Tage</option>
+        <option value="365">1 Jahr</option>
+      </select>
+      <button id="add">Anlegen</button>
+      <span class="feedback" id="addFeedback"></span>
+    </p>
+  </div>
+
+  <div class="card secret" id="created" hidden>
+    <b>Neuer Token – jetzt kopieren, er wird nie wieder angezeigt:</b>
+    <pre id="secret"></pre>
+    <p>Einrichten in Claude Code:</p>
+    <pre id="claudeCode"></pre>
+    <p>Andere MCP-Clients: Streamable HTTP an <code id="endpoint"></code> mit dem Header
+      <code>Authorization: Bearer &lt;Token&gt;</code>.</p>
+  </div>
+
+  <script src="/me.js"></script>
+  <script>
+    function flash(node, message, isError) {
+      node.textContent = message;
+      node.className = isError ? 'feedback err' : 'feedback';
+    }
+
+    async function readError(res, fallback) {
+      try { return (await res.json()).error || fallback; } catch (_) { return fallback; }
+    }
+
+    const cell = (text) => {
+      const td = document.createElement('td');
+      td.textContent = text || '–';
+      return td;
+    };
+
+    function row(token) {
+      const tr = document.createElement('tr');
+      const actions = document.createElement('td');
+      const revoke = document.createElement('button');
+      revoke.textContent = 'Widerrufen';
+      const feedback = document.createElement('span');
+      feedback.className = 'feedback';
+      actions.append(revoke, feedback);
+      revoke.addEventListener('click', async () => {
+        if (!confirm(`Token „${token.name}“ widerrufen? Was ihn benutzt, verliert sofort den Zugang.`)) return;
+        const res = await fetch(`/api/me/tokens/${token.id}`, { method: 'DELETE' });
+        if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+        await load();
+      });
+      tr.append(cell(token.name), cell(token.created_at), cell(token.last_used_at),
+                cell(token.expires_at || 'nie'), actions);
+      return tr;
+    }
+
+    async function load() {
+      const rows = document.getElementById('rows');
+      const res = await fetch('/api/me/tokens');
+      rows.replaceChildren();
+      if (!res.ok) {
+        flash(document.getElementById('addFeedback'), await readError(res, 'Tokens konnten nicht gelesen werden.'), true);
+        return;
+      }
+      const list = await res.json();
+      for (const token of list) rows.append(row(token));
+      document.getElementById('empty').hidden = list.length > 0;
+    }
+
+    document.getElementById('add').addEventListener('click', async () => {
+      const feedback = document.getElementById('addFeedback');
+      const name = document.getElementById('newName').value;
+      const days = document.getElementById('newDays').value;
+      const res = await fetch('/api/me/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, days: days ? Number(days) : null }),
+      });
+      if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+      const { token } = await res.json();
+      const endpoint = `${location.origin}/mcp`;
+      document.getElementById('secret').textContent = token;
+      document.getElementById('endpoint').textContent = endpoint;
+      document.getElementById('claudeCode').textContent =
+        `claude mcp add --transport http signage ${endpoint} --header "Authorization: Bearer ${token}"`;
+      document.getElementById('created').hidden = false;
+      document.getElementById('newName').value = '';
+      flash(feedback, 'angelegt ✓');
+      await load();
+    });
+
+    Me.bar();
+    load();
+  </script>
+</body>
+</html>

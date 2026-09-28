@@ -39,6 +39,11 @@ pub fn required(method: &Method, path: &str) -> Need {
 
         (false, ["api", "logout"]) => Need::Read,
         (false, ["api", "me", "password"]) => Need::Read,
+        // One's own tokens; the handlers refuse a request made with a token.
+        (false, ["api", "me", "tokens", ..]) => Need::Read,
+        // Any account: every tool call is replayed through the router as the
+        // caller, so each one meets this table again on its own path.
+        (false, ["mcp"]) => Need::Read,
         (false, ["api", "changesets", "draft", ..]) => Need::Read,
         (false, ["api", "changesets", "mine", "seen" | "hide-decided"]) => Need::Read,
         (false, ["api", "changesets", _, "approve" | "reject"]) => Need::Manager,
@@ -77,6 +82,11 @@ mod tests {
             (Method::GET, "/api/me", Need::Read),
             (Method::POST, "/api/logout", Need::Read),
             (Method::PUT, "/api/me/password", Need::Read),
+            (Method::GET, "/api/me/tokens", Need::Read),
+            (Method::POST, "/api/me/tokens", Need::Read),
+            (Method::DELETE, "/api/me/tokens/3", Need::Read),
+            (Method::POST, "/mcp", Need::Read),
+            (Method::GET, "/tokens.html", Need::Read),
             (Method::GET, "/api/playlist", Need::Read),
             (Method::GET, "/playlist.html", Need::Read),
             (Method::PUT, "/api/settings", Need::Admin),

@@ -11,7 +11,7 @@ use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::middleware::{session_token, ViaTls, SESSION_COOKIE};
+use super::middleware::{session_token, ViaTls, ViaToken, SESSION_COOKIE};
 use super::{AccountError, Identity, Role};
 use crate::models::AppState;
 
@@ -25,6 +25,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/me/password", put(own_password))
+        .route("/api/me/tokens", get(list_tokens).post(create_token))
+        .route("/api/me/tokens/{id}", axum::routing::delete(revoke_token))
         .route("/api/users", get(list_users).post(create))
         .route("/api/users/{id}", put(update).delete(remove))
 }
@@ -101,7 +103,8 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn me(Extension(who): Extension<Identity>) -> Response {
-    Json(json!({ "name": who.name, "role": who.role, "open": who.open })).into_response()
+    Json(json!({ "name": who.name, "role": who.role, "open": who.open, "account": who.user_id.is_some() }))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -113,8 +116,12 @@ struct PasswordChange {
 async fn own_password(
     State(state): State<AppState>,
     Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
     Json(body): Json<PasswordChange>,
 ) -> Response {
+    if token.is_some() {
+        return error(StatusCode::FORBIDDEN, TOKEN_REFUSED);
+    }
     let Some(id) = who.user_id else {
         return error(StatusCode::BAD_REQUEST, "Dieser Zugang hat kein eigenes Passwort.");
     };
@@ -127,6 +134,92 @@ async fn own_password(
             Json(json!({ "ok": true })).into_response()
         }
         Err(e) => account_error(e),
+    }
+}
+
+/// A token manages nothing about its own account's credentials -- neither the
+/// password nor other tokens. An LLM holding one could otherwise mint itself a
+/// credential its owner never sees, or lock that owner out.
+const TOKEN_REFUSED: &str = "Mit einem API-Token lassen sich die Zugangsdaten des Kontos nicht ändern.";
+
+/// The account a token belongs to: only a real one, signed in some other way.
+fn token_owner(who: &Identity, token: &Option<Extension<ViaToken>>) -> Result<i64, Response> {
+    if token.is_some() {
+        return Err(error(StatusCode::FORBIDDEN, TOKEN_REFUSED));
+    }
+    who.user_id.ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "API-Tokens gehören zu einem Konto – dieser Zugang hat keins.",
+        )
+    })
+}
+
+async fn list_tokens(
+    State(state): State<AppState>,
+    Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
+) -> Response {
+    let user_id = match token_owner(&who, &token) {
+        Ok(id) => id,
+        Err(refused) => return refused,
+    };
+    match super::tokens::list(&state.pool, user_id).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list API tokens: {}", e);
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Tokens konnten nicht gelesen werden.")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewToken {
+    name: String,
+    /// Days until it expires; absent or `null` for never.
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+async fn create_token(
+    State(state): State<AppState>,
+    Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
+    Json(body): Json<NewToken>,
+) -> Response {
+    let user_id = match token_owner(&who, &token) {
+        Ok(id) => id,
+        Err(refused) => return refused,
+    };
+    match super::tokens::create(&state.pool, user_id, &body.name, body.days).await {
+        // The secret is in this answer and nowhere else, ever.
+        Ok((id, secret)) => (StatusCode::CREATED, Json(json!({ "id": id, "token": secret }))).into_response(),
+        Err(super::tokens::TokenError::Db(e)) => {
+            tracing::error!("Failed to store an API token: {}", e);
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Token konnte nicht gespeichert werden.")
+        }
+        Err(e) => error(StatusCode::BAD_REQUEST, e.message()),
+    }
+}
+
+async fn revoke_token(
+    State(state): State<AppState>,
+    Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let user_id = match token_owner(&who, &token) {
+        Ok(id) => id,
+        Err(refused) => return refused,
+    };
+    match super::tokens::revoke(&state.pool, user_id, id).await {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, "Diesen Token gibt es nicht."),
+        Err(e) => {
+            tracing::error!("Failed to revoke an API token: {}", e);
+            error(StatusCode::INTERNAL_SERVER_ERROR, "Token konnte nicht widerrufen werden.")
+        }
     }
 }
 

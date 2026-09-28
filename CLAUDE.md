@@ -52,7 +52,7 @@ deliveries into receivers that are counting.
 
 `tests/cast/` is stdlib-only Python, wired into no CI. Run it by hand after
 touching `cast/`, `tls.rs`, `settings.rs`, `audio.rs`, `webhook/`,
-`display.rs`, `playlists.rs` or the route table.
+`display.rs`, `playlists.rs`, `accounts/`, `mcp/` or the route table.
 
 **A test about a specific screen must name a non-primary one.** `primary()` is
 `displays[0]`, so a case that exercises the first declared screen passes
@@ -132,6 +132,35 @@ send one. Never turn it into a header.
 
 **Loopback is not a way around auth**: the exemption covers `is_display_path`
 only, so the admin page asks for credentials even on the device itself.
+
+## MCP and API tokens (`src/mcp/`, `src/accounts/tokens.rs`)
+
+What it is: [docs/features.md](docs/features.md#llm-assistants-mcp). The rules:
+
+- **`/mcp` is not a second API.** `api_request` replays through
+  `AppState::router` as the caller, the way an approved proposal is applied, so
+  roles, proposals, validation, webhooks and signals are those of a direct
+  request. A typed tool per endpoint would be a copy of the route table that
+  drifts; the model reads the README's API section instead (`api_reference`,
+  `include_str!`, held in place by a test). **Keep that README section the
+  truth** — it is now read by a model, not only by people.
+- **The replay carries the real peer, not loopback.** `proposals::internal`
+  uses `127.0.0.1` because it runs as nobody in particular; a remote caller's
+  replay from loopback would pass the `is_display_path` exemption.
+- **`ViaToken` travels onto the replay.** A token must not reach its own
+  account's credentials (`/api/me/password`, `/api/me/tokens`) — directly or by
+  going round through a tool call. The handlers check the extension; case
+  `[197]` of `tests/cast/test_mcp.py` covers the detour.
+- **A `Bearer` that does not resolve is a `401`, never retried** as Basic or
+  open mode: a revoked token on a device whose accounts were all removed must
+  not come back as full access.
+- **Tokens are not cached**, unlike Basic (`basic_cache` exists because PBKDF2
+  is slow; a token is one SHA-256), so a revocation lands on the next request.
+  `last_used_at` is written at most once a minute — the database is on an SD card.
+- The guest cast routes and `/api/login`/`logout` are refused by `check_path`:
+  the cast routes skip authentication, so through a tool they would run as nobody.
+- `/mcp` is merged after the CORS layer, like the webhooks, and checks `Origin`
+  (the transport requires it, against DNS rebinding).
 
 ## Displays (`src/display.rs`)
 

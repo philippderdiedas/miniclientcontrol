@@ -6,6 +6,7 @@
 pub mod api;
 pub mod middleware;
 pub mod roles;
+pub mod tokens;
 
 use rand::RngCore;
 use serde::Serialize;

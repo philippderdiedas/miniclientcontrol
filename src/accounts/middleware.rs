@@ -25,6 +25,13 @@ pub const SESSION_COOKIE: &str = "mcc_session";
 #[derive(Clone)]
 pub struct ReplayIdentity(pub Identity);
 
+/// Set on a request authenticated by an API token -- and on a request the MCP
+/// endpoint replays for one. A token must not manage the credentials of its own
+/// account: an LLM that could mint tokens or change the password could lock the
+/// person out who gave it access.
+#[derive(Clone)]
+pub struct ViaToken;
+
 /// Set on requests that arrived over the TLS listener, so the session cookie
 /// can be marked `Secure` there.
 #[derive(Clone)]
@@ -56,24 +63,42 @@ fn decode_basic(value: &str) -> Option<(String, String)> {
     Some((user.to_string(), password.to_string()))
 }
 
-/// The identity behind a request, and whether it came from the cookie (which
-/// is what the `Origin` check is for).
-async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, bool)> {
+/// Which credential a request presented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// A session cookie -- what the `Origin` check is for.
+    Cookie,
+    /// An API token (`Authorization: Bearer`).
+    Token,
+    /// HTTP Basic, the command-line credential, or open mode.
+    Other,
+}
+
+/// The identity behind a request, and which credential it came from.
+async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, Via)> {
     if let Some(token) = session_token(headers) {
         if let Some(who) = super::session_identity(&state.pool, &token).await {
-            return Some((who, true));
+            return Some((who, Via::Cookie));
         }
     }
     if let Some(value) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        // A bearer that does not resolve is not retried as anything else: it
+        // was meant as a token, and falling through to open mode would answer
+        // a revoked token with full access on a device with no accounts left.
+        if let Some(secret) = value.strip_prefix("Bearer ") {
+            return super::tokens::identity(&state.pool, secret.trim())
+                .await
+                .map(|who| (who, Via::Token));
+        }
         if let Some(who) = state.basic_cache.lock().await.get(value).cloned() {
-            return Some((who, false));
+            return Some((who, Via::Other));
         }
         if let Some((user, password)) = decode_basic(value) {
             if let Some((rescue_user, rescue_password)) = &state.rescue {
                 if crate::settings::constant_time_eq(user.as_bytes(), rescue_user.as_bytes())
                     && crate::settings::constant_time_eq(password.as_bytes(), rescue_password.as_bytes())
                 {
-                    return Some((Identity::rescue(rescue_user), false));
+                    return Some((Identity::rescue(rescue_user), Via::Other));
                 }
             }
             // With local passwords off only the command-line credential above
@@ -81,7 +106,7 @@ async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, boo
             if state.oidc.read().await.local_passwords {
                 if let Some(who) = super::verify_password(&state.pool, &user, &password).await {
                     state.basic_cache.lock().await.insert(value.to_string(), who.clone());
-                    return Some((who, false));
+                    return Some((who, Via::Other));
                 }
             }
         }
@@ -90,7 +115,7 @@ async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, boo
     // command-line credential. A venue that runs with only the flags today had
     // a protected admin, and an upgrade must not open it to the LAN.
     if state.rescue.is_none() && !super::any_user(&state.pool).await {
-        return Some((Identity::open_mode(), false));
+        return Some((Identity::open_mode(), Via::Other));
     }
     None
 }
@@ -102,7 +127,7 @@ async fn resolve(state: &AppState, headers: &HeaderMap) -> Option<(Identity, boo
 /// The host comes from the `Host` header or, over HTTP/2 -- which has none --
 /// from the URI's authority, where hyper puts `:authority`. Reading only `Host`
 /// refused every cookie write a browser made over HTTPS.
-fn same_origin(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+pub(crate) fn same_origin(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -174,11 +199,11 @@ pub async fn auth_middleware(
 
     let need = required(&method, &path);
     let resolved = match request.extensions().get::<ReplayIdentity>() {
-        Some(ReplayIdentity(who)) => Some((who.clone(), false)),
+        Some(ReplayIdentity(who)) => Some((who.clone(), Via::Other)),
         None => resolve(&state, request.headers()).await,
     };
 
-    let Some((identity, via_cookie)) = resolved else {
+    let Some((identity, via)) = resolved else {
         if need == Need::Open {
             return next.run(request).await;
         }
@@ -191,7 +216,7 @@ pub async fn auth_middleware(
     };
 
     let writing = method != Method::GET && method != Method::HEAD;
-    if via_cookie && writing && !same_origin(request.headers(), request.uri()) {
+    if via == Via::Cookie && writing && !same_origin(request.headers(), request.uri()) {
         return refuse(StatusCode::FORBIDDEN, "Anfrage von einer fremden Seite abgelehnt.");
     }
 
@@ -215,6 +240,9 @@ pub async fn auth_middleware(
         return refuse(StatusCode::FORBIDDEN, "Dafür reicht die Rolle dieses Kontos nicht.");
     }
 
+    if via == Via::Token {
+        request.extensions_mut().insert(ViaToken);
+    }
     request.extensions_mut().insert(identity);
     next.run(request).await
 }

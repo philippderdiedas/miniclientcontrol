@@ -394,6 +394,24 @@ The device must reach the provider over HTTPS when someone signs in. Offline,
 single sign-on does not work — which is why local passwords stay on by default
 and the command-line credential always works.
 
+## Connecting an LLM client over MCP
+
+Give the assistant its own account, with the role it should have — **editor**
+if a person should approve what it does, **manager** if it may change content
+directly. Sign in as that account, open `/tokens.html`, mint a token and copy
+the command shown there:
+
+```bash
+claude mcp add --transport http signage https://<device>/mcp \
+  --header "Authorization: Bearer mcc_…"
+```
+
+Use the HTTPS address guests are given: with the managed certificate it is
+trusted by every client, and the plain-HTTP listener is loopback-only anyway.
+Other clients take the same two things — the Streamable HTTP endpoint and the
+header. A device with no accounts at all is open, `/mcp` included, exactly as
+the rest of its operator API is.
+
 ## A webhook target may hold somebody else's secret
 
 A webhook target's `headers` are where an API token goes — a Discord webhook

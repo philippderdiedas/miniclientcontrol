@@ -24,6 +24,7 @@ mod playlists;
 mod schedule;
 mod accounts;
 mod proposals;
+mod mcp;
 
 use anyhow::Result;
 use axum::{
@@ -321,6 +322,10 @@ async fn main() -> Result<()> {
         .merge(accounts::api::routes())
         .merge(oidc::api::routes())
         .merge(proposals::api::routes())
+        // After the CORS layer too: no page on another site has any business
+        // with it, and a browser's preflight for its JSON then fails. Its own
+        // body limit, sized for an upload carried as base64.
+        .merge(mcp::routes())
         .with_state(state.clone());
 
     let app = app.layer(middleware::from_fn_with_state(

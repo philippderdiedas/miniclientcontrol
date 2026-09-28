@@ -286,8 +286,19 @@ declaration.
 - `GET`/`POST /api/users`, `PUT`/`DELETE /api/users/{id}` — admin only; roles
   `admin`, `manager`, `editor`; the first account must be an admin and the last
   enabled admin cannot be removed, disabled or demoted
-- Scripts use HTTP Basic against the same accounts. With no account and no
-  `--basic-auth-*` flags the operator API is open, as before.
+- Scripts use HTTP Basic against the same accounts, or an **API token**:
+  `Authorization: Bearer mcc_…`. A token acts as its account with the role that
+  account has at the time of each request; disabling or deleting the account ends
+  it. `GET`/`POST /api/me/tokens` `{ name, days? }` (the answer carries the
+  secret, once) and `DELETE /api/me/tokens/{id}` manage one's own — only when
+  signed in some other way: a token can neither mint tokens nor change the
+  password (`403`). With no account and no `--basic-auth-*` flags the operator
+  API is open, as before.
+- `POST /mcp` — a Model Context Protocol server (Streamable HTTP, JSON answers)
+  for LLM clients, with four tools: `api_reference` (this section),
+  `api_request` (any `/api/…` call, replayed as the caller — an editor's writes
+  become proposals), `screenshot` and `upload_asset`. The guest cast routes and
+  sign-in are not reachable through it.
 - Single sign-on: `GET /api/oidc/info` (open) → `{ configured, label,
   local_passwords }`; `GET`/`PUT /api/oidc/config` (admin) — `{ issuer,
   client_id, client_secret?, groups_claim, label, mapping: [{ group, target:

@@ -369,6 +369,24 @@ Managers keep the full history. Scripts
 sign in with HTTP Basic against the same accounts; the command-line credential is
 always the way back in.
 
+## LLM assistants (MCP)
+
+`/mcp` lets an LLM client — Claude Code, Claude Desktop, anything that speaks the
+Model Context Protocol — work the device the way a person at the operator pages
+would: read what is on the screens, look at them, rearrange playlists, set up a
+timetable, upload a picture. It is not a second API. The model reads the API
+section of the README and makes ordinary API calls, each replayed through the
+same router as the account behind it, so what it may do is exactly what that
+account may do. An assistant given an **editor** account proposes, and a manager
+approves on `/approvals.html` as for any editor.
+
+It signs in with an **API token**, minted on `/tokens.html` (linked as
+*API-Tokens* in the bar at the top of every operator page). The page shows the
+token once, with the command that adds it to Claude Code. A token can be given a
+lifetime, is revoked there at once, and dies with its account. It cannot mint
+further tokens or change its account's password — handing an assistant access
+must not let it lock out the person who did.
+
 ## Single sign-on
 
 With a provider configured on the admin page (any OpenID Connect provider:
