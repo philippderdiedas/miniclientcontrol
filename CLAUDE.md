@@ -154,6 +154,11 @@ What it is: [docs/features.md](docs/features.md#llm-assistants-mcp). The rules:
 - **A `Bearer` that does not resolve is a `401`, never retried** as Basic or
   open mode: a revoked token on a device whose accounts were all removed must
   not come back as full access.
+- **Every token route refuses a token, the admin's `/api/tokens` included.**
+  Managing credentials takes a real sign-in; an admin token that could revoke
+  or re-time other tokens is the same lock-out, one step removed. Own and
+  admin routes share their handlers through `tokens::Scope` (`Own(id)` /
+  `All`), so the two cannot drift apart.
 - **Tokens are not cached**, unlike Basic (`basic_cache` exists because PBKDF2
   is slow; a token is one SHA-256), so a revocation lands on the next request.
   `last_used_at` is written at most once a minute — the database is on an SD card.

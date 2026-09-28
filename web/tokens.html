@@ -17,6 +17,9 @@
     pre, code { font-family: ui-monospace, monospace; font-size: .85rem; }
     pre { background: #f6f6f6; padding: .6rem; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
     input, select, button { font: inherit; }
+    h2 { font-size: 1.1rem; margin: 1.4rem 0 .4rem; }
+    td input { width: 100%; min-width: 8rem; }
+    .expiry { display: flex; flex-direction: column; gap: .2rem; font-size: .9rem; }
   </style>
 </head>
 <body>
@@ -30,6 +33,7 @@
     Wahl. Ein Token kann weder das Passwort noch andere Tokens ändern.
   </p>
 
+  <h2>Meine Tokens</h2>
   <table>
     <thead><tr><th>Name</th><th>Angelegt</th><th>Zuletzt benutzt</th><th>Läuft ab</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
@@ -60,6 +64,18 @@
       <code>Authorization: Bearer &lt;Token&gt;</code>.</p>
   </div>
 
+  <section id="allSection" hidden>
+    <h2>Alle Tokens</h2>
+    <p class="muted">Als Admin siehst du die Tokens aller Konten und kannst sie umbenennen,
+      ihre Laufzeit ändern oder widerrufen. Den Token selbst sieht niemand mehr.</p>
+    <table>
+      <thead><tr><th>Konto</th><th>Name</th><th>Angelegt</th><th>Zuletzt benutzt</th><th>Läuft ab</th><th></th></tr></thead>
+      <tbody id="allRows"></tbody>
+    </table>
+    <p class="muted" id="allEmpty" hidden>Keine Tokens.</p>
+  </section>
+
+
   <script src="/me.js"></script>
   <script>
     function flash(node, message, isError) {
@@ -77,36 +93,89 @@
       return td;
     };
 
-    function row(token) {
+    // SQLite's datetime('now') is UTC without a zone; shown in local time.
+    const when = (utc) => (utc ? new Date(`${utc.replace(' ', 'T')}Z`).toLocaleString('de-DE') : '');
+
+    // The choices for a new lifetime, counted from now. "keep" leaves it alone,
+    // which is what an edit that only renames wants.
+    const LIFETIMES = [['keep', 'unverändert'], ['', 'läuft nie ab'], ['30', '30 Tage ab jetzt'],
+                       ['90', '90 Tage ab jetzt'], ['365', '1 Jahr ab jetzt']];
+
+    // One editable row. `base` is `/api/me/tokens` for one's own, `/api/tokens`
+    // for an admin's view of everybody's; `owner` adds the account column.
+    function row(token, base, withOwner) {
       const tr = document.createElement('tr');
+      const nameCell = document.createElement('td');
+      const name = document.createElement('input');
+      name.value = token.name;
+      name.maxLength = 100;
+      nameCell.append(name);
+
+      const expiryCell = document.createElement('td');
+      const expiry = document.createElement('div');
+      expiry.className = 'expiry';
+      const current = document.createElement('span');
+      current.textContent = when(token.expires_at) || 'nie';
+      const lifetime = document.createElement('select');
+      for (const [value, text] of LIFETIMES) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = text;
+        lifetime.append(option);
+      }
+      expiry.append(current, lifetime);
+      expiryCell.append(expiry);
+
       const actions = document.createElement('td');
+      const save = document.createElement('button');
+      save.textContent = 'Speichern';
       const revoke = document.createElement('button');
       revoke.textContent = 'Widerrufen';
       const feedback = document.createElement('span');
       feedback.className = 'feedback';
-      actions.append(revoke, feedback);
-      revoke.addEventListener('click', async () => {
-        if (!confirm(`Token „${token.name}“ widerrufen? Was ihn benutzt, verliert sofort den Zugang.`)) return;
-        const res = await fetch(`/api/me/tokens/${token.id}`, { method: 'DELETE' });
+      actions.append(save, ' ', revoke, feedback);
+
+      save.addEventListener('click', async () => {
+        const body = { name: name.value };
+        if (lifetime.value !== 'keep') body.days = lifetime.value ? Number(lifetime.value) : null;
+        const res = await fetch(`${base}/${token.id}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
         if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
         await load();
       });
-      tr.append(cell(token.name), cell(token.created_at), cell(token.last_used_at),
-                cell(token.expires_at || 'nie'), actions);
+      revoke.addEventListener('click', async () => {
+        const whose = withOwner ? ` von ${token.owner}` : '';
+        if (!confirm(`Token „${token.name}“${whose} widerrufen? Was ihn benutzt, verliert sofort den Zugang.`)) return;
+        const res = await fetch(`${base}/${token.id}`, { method: 'DELETE' });
+        if (!res.ok) { flash(feedback, await readError(res, 'Fehler'), true); return; }
+        await load();
+      });
+
+      if (withOwner) tr.append(cell(token.owner));
+      tr.append(nameCell, cell(when(token.created_at)), cell(when(token.last_used_at)), expiryCell, actions);
       return tr;
     }
 
-    async function load() {
-      const rows = document.getElementById('rows');
-      const res = await fetch('/api/me/tokens');
+    async function fill(url, rowsId, emptyId, base, withOwner) {
+      const rows = document.getElementById(rowsId);
+      const res = await fetch(url);
       rows.replaceChildren();
       if (!res.ok) {
         flash(document.getElementById('addFeedback'), await readError(res, 'Tokens konnten nicht gelesen werden.'), true);
         return;
       }
       const list = await res.json();
-      for (const token of list) rows.append(row(token));
-      document.getElementById('empty').hidden = list.length > 0;
+      for (const token of list) rows.append(row(token, base, withOwner));
+      document.getElementById(emptyId).hidden = list.length > 0;
+    }
+
+    async function load() {
+      await fill('/api/me/tokens', 'rows', 'empty', '/api/me/tokens', false);
+      await Me.load();
+      const admin = Me.atLeast('admin');
+      document.getElementById('allSection').hidden = !admin;
+      if (admin) await fill('/api/tokens', 'allRows', 'allEmpty', '/api/tokens', true);
     }
 
     document.getElementById('add').addEventListener('click', async () => {

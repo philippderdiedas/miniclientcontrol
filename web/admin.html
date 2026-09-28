@@ -53,6 +53,26 @@
        paragraphs with a blank line between each. */
     #status p { margin: .25rem 0; }
     #status .screen { color: #0b6b3a; }
+    /* A row per screen: the text takes what is left, the picture sits right. */
+    #status .statusrow { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .8rem; margin: .25rem 0; }
+    #status .statusrow + .statusrow { border-top: 1px solid #eee; padding-top: .4rem; }
+    /* Below its basis the picture wraps under the text rather than squeezing it. */
+    #status .statustext { flex: 1 1 22rem; min-width: 0; }
+    /* One line that never wraps: the fixed parts keep their width, only the
+       URL gives way and ends in an ellipsis. */
+    #status .line { display: flex; align-items: baseline; gap: .3rem; white-space: nowrap; font-weight: 600; }
+    #status .line > * { flex: none; }
+    #status .line .url {
+      flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+      cursor: copy; font-weight: 400; font-family: ui-monospace, monospace; font-size: .9em;
+    }
+    #status .line .url:hover { text-decoration: underline dotted; }
+    #status .line .copied { color: #0b6b3a; font-weight: 400; font-size: .85em; }
+    /* A phone has no room for all of it on one line: the URL gets its own. */
+    @media (max-width: 560px) {
+      #status .line { flex-wrap: wrap; }
+      #status .line .url { flex-basis: 100%; }
+    }
     /* One block per screen inside the cast card, same reasoning: a border
        between them once there is more than one to tell apart. */
     .castscreen { margin-bottom: .8rem; }
@@ -336,26 +356,88 @@
         fetch(scoped('control/current')),
         fetch(scoped('override')),
       ]);
-      if (!curRes.ok || !ovRes.ok) return 'Status unbekannt';
+      if (!curRes.ok || !ovRes.ok) return { text: 'Status unbekannt' };
 
       const override = await ovRes.json();
       if (override.active) {
-        const what = override.url || (override.asset_id ? `Asset #${override.asset_id}` : '?');
-        return `Override aktiv: ${what} – Playlist pausiert`;
+        if (override.url) return { text: 'Override aktiv:', url: override.url, after: '– Playlist pausiert' };
+        const what = override.asset_id ? `Asset #${override.asset_id}` : '?';
+        return { text: `Override aktiv: ${what} – Playlist pausiert` };
       }
       const current = (await curRes.json()).item_id;
       if (livePlaylist(display) === null) {
-        return 'keine Playlist aktiv';
+        return { text: 'keine Playlist aktiv' };
       }
       // The screen's own playlist, never the unscoped list: counting every item
       // on the device is what let an empty screen report that something was
       // about to start.
       const items = await itemsOf(livePlaylist(display), current ?? null);
-      if (!items) return current ? `▶ läuft: #${current} – …` : 'Status unbekannt';
-      if (!current) return items.length ? 'Playlist läuft an…' : 'Playlist ist leer';
+      if (!items) return { text: current ? `▶ läuft: #${current} – …` : 'Status unbekannt' };
+      if (!current) return { text: items.length ? 'Playlist läuft an…' : 'Playlist ist leer' };
       const item = items.find((x) => x.id === current);
-      const source = item ? (item.url || `Asset #${item.asset_id}`) : '…';
-      return `▶ läuft: #${current} – ${source}`;
+      if (item && item.url) return { text: `▶ läuft: #${current} –`, url: item.url };
+      // Not every item has a URL or an asset: a layout or a built-in would
+      // otherwise read as "Asset #null".
+      const source = !item ? '…'
+        : item.asset_id ? `Asset #${item.asset_id}`
+        : item.layout ? 'Layout'
+        : item.builtin ? `Built-in: ${item.builtin.kind}`
+        : '…';
+      return { text: `▶ läuft: #${current} – ${source}` };
+    }
+
+    // Copy a text to the clipboard. The async API needs a secure context, which
+    // the admin page over HTTPS is; the textarea route is for plain HTTP.
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        const area = el('textarea', { value: text });
+        area.style.cssText = 'position:fixed; opacity:0;';
+        document.body.append(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        return ok;
+      }
+    }
+
+    // One row per screen, built once and then only updated: the poll comes
+    // every three seconds, and a rebuilt row would close the URL's tooltip and
+    // wipe "kopiert" the moment it appeared. Map<name, {row, screen, text,
+    // url, after, playlist, copied}>.
+    const statusRows = new Map();
+
+    function setText(node, text) {
+      if (node.textContent !== text) node.textContent = text;
+      node.hidden = !text;
+    }
+
+    function statusRow(name) {
+      let r = statusRows.get(name);
+      if (r) return r;
+      r = {
+        screen: el('span', { class: 'screen' }),
+        text: el('span'),
+        url: el('span', { class: 'url' }),
+        copied: el('span', { class: 'copied', text: 'kopiert ✓' }),
+        after: el('span'),
+        playlist: el('span', { class: 'muted' }),
+      };
+      r.copied.hidden = true;
+      r.url.addEventListener('click', async () => {
+        const full = r.url.dataset.full || '';
+        if (!full || !(await copyText(full))) return;
+        r.copied.hidden = false;
+        clearTimeout(r.copiedTimer);
+        r.copiedTimer = setTimeout(() => { r.copied.hidden = true; }, 1500);
+      });
+      const line = el('div', { class: 'line' }, r.screen, r.text, r.url, r.copied, r.after, r.playlist);
+      // The same screenshot node every poll, so rebuilding does not reload it.
+      r.row = el('div', { class: 'statusrow' }, el('div', { class: 'statustext' }, line), Screenshot.node(name));
+      statusRows.set(name, r);
+      return r;
     }
 
     // Same polling contract as the playlist page: report what is on the screens
@@ -399,25 +481,26 @@
           ? 'Steuerung für das Display an diesem Gerät.'
           : 'Steuerung für die Displays an diesem Gerät.';
 
-        host.replaceChildren();
-        for (const line of lines) {
-          const row = el('p', { class: 'status' });
-          if (!single) {
-            row.append(el('span', {
-              class: 'screen',
-              text: `${line.display.label || line.display.name}: `,
-            }));
-          }
-          row.append(document.createTextNode(line.text));
-          if (!single && line.playlist) {
-            row.append(el('span', { class: 'muted', text: ` — Playlist: ${line.playlist}` }));
-          }
-          // The same node every poll, so rebuilding this line does not reload it.
-          row.append(Screenshot.node(line.display.name));
-          host.append(row);
-        }
+        const rows = lines.map((line) => {
+          const r = statusRow(line.display.name);
+          setText(r.screen, single ? '' : `${line.display.label || line.display.name}:`);
+          setText(r.text, line.text.text);
+          const url = line.text.url || '';
+          setText(r.url, url);
+          r.url.dataset.full = url;
+          if (r.url.title !== url) r.url.title = url ? `${url}\n(Klick kopiert die Adresse)` : '';
+          if (!url) r.copied.hidden = true;
+          setText(r.after, line.text.after || '');
+          setText(r.playlist, !single && line.playlist ? `— Playlist: ${line.playlist}` : '');
+          return r.row;
+        });
+        // Moved only when the set of screens changed: moving a row closes a
+        // tooltip that is open on it.
+        const same = rows.length === host.children.length
+          && rows.every((row, i) => host.children[i] === row);
+        if (!same) host.replaceChildren(...rows);
         if (!lines.length) {
-          host.append(el('p', { class: 'status', text: 'Kein Display deklariert.' }));
+          host.replaceChildren(el('p', { class: 'status', text: 'Kein Display deklariert.' }));
         }
       } catch (_) {
         // Nothing answered: the fetch itself was rejected, here or inside

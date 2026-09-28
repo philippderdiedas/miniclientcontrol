@@ -176,6 +176,40 @@ def main():
         admin.call("PUT", f"/api/users/{boss_id}", {"disabled": False})
         check("and works again when it is enabled", raw("GET", "/api/me", token=boss_token)[0] == 200)
 
+        print("\n[200] an admin sees every account's tokens and may edit or revoke them")
+        _, created, _ = ed.call("POST", "/api/me/tokens", {"name": "second"})
+        ed_token = created["token"]
+        ed_id = created["id"]
+        status, _, _ = ed.call("PUT", f"/api/me/tokens/{ed_id}", {"name": "umbenannt", "days": 7})
+        check("the owner renames and re-times their own", status == 200, status)
+        status, own, _ = ed.call("GET", "/api/me/tokens")
+        check("... and the change is there",
+              own[0]["name"] == "umbenannt" and own[0]["expires_at"] and "owner" not in own[0], own)
+        status, _, _ = ed.call("GET", "/api/tokens")
+        check("an editor cannot list everybody's", status == 403, status)
+        status, _, _ = ed.call("DELETE", f"/api/tokens/{ed_id}")
+        check("nor revoke through the admin route", status == 403, status)
+        status, everything, _ = admin.call("GET", "/api/tokens")
+        mine = [t for t in everything if t["id"] == ed_id]
+        check("the admin lists it, naming the owner", status == 200 and mine and mine[0]["owner"] == "ed", everything)
+        check("the list never carries a secret", "mcc_" not in json.dumps(everything), everything)
+        status, _, _ = admin.call("PUT", f"/api/tokens/{ed_id}", {"name": "vom Admin", "days": None})
+        check("the admin edits it", status == 200, status)
+        _, own, _ = ed.call("GET", "/api/me/tokens")
+        check("... name changed, lifetime cleared", own[0]["name"] == "vom Admin" and own[0]["expires_at"] is None, own)
+        status, _, _ = admin.call("PUT", f"/api/tokens/{ed_id}", {"name": "  "})
+        check("an empty name is refused", status == 400, status)
+        status, _ = raw("GET", "/api/tokens", token=boss_token)
+        check("a manager's token is refused the admin route", status == 403, status)
+        _, created, _ = admin.call("POST", "/api/me/tokens", {"name": "root-token"})
+        status, _ = raw("GET", "/api/tokens", token=created["token"])
+        check("even an admin's token cannot manage tokens", status == 403, status)
+        status, _, _ = admin.call("DELETE", f"/api/tokens/{ed_id}")
+        check("the admin revokes it", status == 200, status)
+        check("... and it stops working at once", raw("GET", "/api/me", token=ed_token)[0] == 401)
+        status, _, _ = admin.call("DELETE", f"/api/tokens/{ed_id}")
+        check("a second revoke is 404", status == 404, status)
+
 
 main()
 print("\n" + ("ALL PASSED" if not failures else f"{len(failures)} FAILED: {failures}"))

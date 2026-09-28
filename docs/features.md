@@ -383,7 +383,10 @@ approves on `/approvals.html` as for any editor.
 It signs in with an **API token**, minted on `/tokens.html` (linked as
 *API-Tokens* in the bar at the top of every operator page). The page shows the
 token once, with the command that adds it to Claude Code. A token can be given a
-lifetime, is revoked there at once, and dies with its account. It cannot mint
+lifetime, renamed or re-timed later, is revoked there at once, and dies with its
+account. An admin sees every account's tokens on the same page, with their owner,
+and can edit or revoke any of them — the token itself is shown to nobody after it
+was created. It cannot mint
 further tokens or change its account's password — handing an assistant access
 must not let it lock out the person who did.
 

@@ -26,7 +26,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/me", get(me))
         .route("/api/me/password", put(own_password))
         .route("/api/me/tokens", get(list_tokens).post(create_token))
-        .route("/api/me/tokens/{id}", axum::routing::delete(revoke_token))
+        .route("/api/me/tokens/{id}", put(update_own_token).delete(revoke_own_token))
+        // Every account's tokens, for an admin (`roles.rs`).
+        .route("/api/tokens", get(list_all_tokens))
+        .route("/api/tokens/{id}", put(update_any_token).delete(revoke_any_token))
         .route("/api/users", get(list_users).post(create))
         .route("/api/users/{id}", put(update).delete(remove))
 }
@@ -142,11 +145,20 @@ async fn own_password(
 /// credential its owner never sees, or lock that owner out.
 const TOKEN_REFUSED: &str = "Mit einem API-Token lassen sich die Zugangsdaten des Kontos nicht ändern.";
 
-/// The account a token belongs to: only a real one, signed in some other way.
-fn token_owner(who: &Identity, token: &Option<Extension<ViaToken>>) -> Result<i64, Response> {
-    if token.is_some() {
-        return Err(error(StatusCode::FORBIDDEN, TOKEN_REFUSED));
+use super::tokens::{Scope, TokenError};
+
+/// Refused for a request made with a token: managing tokens takes a real
+/// sign-in, for one's own as for everybody's.
+fn not_by_token(token: &Option<Extension<ViaToken>>) -> Result<(), Response> {
+    match token {
+        Some(_) => Err(error(StatusCode::FORBIDDEN, TOKEN_REFUSED)),
+        None => Ok(()),
     }
+}
+
+/// The account whose tokens these are: only a real one has any.
+fn own_account(who: &Identity, token: &Option<Extension<ViaToken>>) -> Result<i64, Response> {
+    not_by_token(token)?;
     who.user_id.ok_or_else(|| {
         error(
             StatusCode::BAD_REQUEST,
@@ -155,21 +167,45 @@ fn token_owner(who: &Identity, token: &Option<Extension<ViaToken>>) -> Result<i6
     })
 }
 
-async fn list_tokens(
-    State(state): State<AppState>,
-    Extension(who): Extension<Identity>,
-    token: Option<Extension<ViaToken>>,
-) -> Response {
-    let user_id = match token_owner(&who, &token) {
-        Ok(id) => id,
-        Err(refused) => return refused,
-    };
-    match super::tokens::list(&state.pool, user_id).await {
+fn own_scope(who: &Identity, token: &Option<Extension<ViaToken>>) -> Result<Scope, Response> {
+    own_account(who, token).map(Scope::Own)
+}
+
+fn token_error(e: TokenError) -> Response {
+    match e {
+        TokenError::Db(ref inner) => {
+            tracing::error!("API token write failed: {}", inner);
+            error(StatusCode::INTERNAL_SERVER_ERROR, e.message())
+        }
+        _ => error(StatusCode::BAD_REQUEST, e.message()),
+    }
+}
+
+async fn list_tokens_in(state: &AppState, scope: Scope) -> Response {
+    match super::tokens::list(&state.pool, scope).await {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => {
             tracing::error!("Failed to list API tokens: {}", e);
             error(StatusCode::INTERNAL_SERVER_ERROR, "Tokens konnten nicht gelesen werden.")
         }
+    }
+}
+
+async fn list_tokens(
+    State(state): State<AppState>,
+    Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
+) -> Response {
+    match own_scope(&who, &token) {
+        Ok(scope) => list_tokens_in(&state, scope).await,
+        Err(refused) => refused,
+    }
+}
+
+async fn list_all_tokens(State(state): State<AppState>, token: Option<Extension<ViaToken>>) -> Response {
+    match not_by_token(&token) {
+        Ok(()) => list_tokens_in(&state, Scope::All).await,
+        Err(refused) => refused,
     }
 }
 
@@ -188,38 +224,90 @@ async fn create_token(
     token: Option<Extension<ViaToken>>,
     Json(body): Json<NewToken>,
 ) -> Response {
-    let user_id = match token_owner(&who, &token) {
+    let user_id = match own_account(&who, &token) {
         Ok(id) => id,
         Err(refused) => return refused,
     };
     match super::tokens::create(&state.pool, user_id, &body.name, body.days).await {
         // The secret is in this answer and nowhere else, ever.
         Ok((id, secret)) => (StatusCode::CREATED, Json(json!({ "id": id, "token": secret }))).into_response(),
-        Err(super::tokens::TokenError::Db(e)) => {
-            tracing::error!("Failed to store an API token: {}", e);
-            error(StatusCode::INTERNAL_SERVER_ERROR, "Token konnte nicht gespeichert werden.")
-        }
-        Err(e) => error(StatusCode::BAD_REQUEST, e.message()),
+        Err(e) => token_error(e),
     }
 }
 
-async fn revoke_token(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenChange {
+    name: Option<String>,
+    /// A new lifetime from now; `null` for never, absent to keep it.
+    #[serde(default, deserialize_with = "crate::handlers::double_option")]
+    days: Option<Option<u32>>,
+}
+
+async fn update_token_in(state: &AppState, scope: Scope, id: i64, body: TokenChange) -> Response {
+    match super::tokens::update(&state.pool, scope, id, body.name.as_deref(), body.days).await {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, "Diesen Token gibt es nicht."),
+        Err(e) => token_error(e),
+    }
+}
+
+async fn update_own_token(
     State(state): State<AppState>,
     Extension(who): Extension<Identity>,
     token: Option<Extension<ViaToken>>,
     Path(id): Path<i64>,
+    Json(body): Json<TokenChange>,
 ) -> Response {
-    let user_id = match token_owner(&who, &token) {
-        Ok(id) => id,
-        Err(refused) => return refused,
-    };
-    match super::tokens::revoke(&state.pool, user_id, id).await {
+    match own_scope(&who, &token) {
+        Ok(scope) => update_token_in(&state, scope, id, body).await,
+        Err(refused) => refused,
+    }
+}
+
+async fn update_any_token(
+    State(state): State<AppState>,
+    token: Option<Extension<ViaToken>>,
+    Path(id): Path<i64>,
+    Json(body): Json<TokenChange>,
+) -> Response {
+    match not_by_token(&token) {
+        Ok(()) => update_token_in(&state, Scope::All, id, body).await,
+        Err(refused) => refused,
+    }
+}
+
+async fn revoke_token_in(state: &AppState, scope: Scope, id: i64) -> Response {
+    match super::tokens::revoke(&state.pool, scope, id).await {
         Ok(true) => Json(json!({ "ok": true })).into_response(),
         Ok(false) => error(StatusCode::NOT_FOUND, "Diesen Token gibt es nicht."),
         Err(e) => {
             tracing::error!("Failed to revoke an API token: {}", e);
             error(StatusCode::INTERNAL_SERVER_ERROR, "Token konnte nicht widerrufen werden.")
         }
+    }
+}
+
+async fn revoke_own_token(
+    State(state): State<AppState>,
+    Extension(who): Extension<Identity>,
+    token: Option<Extension<ViaToken>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match own_scope(&who, &token) {
+        Ok(scope) => revoke_token_in(&state, scope, id).await,
+        Err(refused) => refused,
+    }
+}
+
+async fn revoke_any_token(
+    State(state): State<AppState>,
+    token: Option<Extension<ViaToken>>,
+    Path(id): Path<i64>,
+) -> Response {
+    match not_by_token(&token) {
+        Ok(()) => revoke_token_in(&state, Scope::All, id).await,
+        Err(refused) => refused,
     }
 }
 
