@@ -70,6 +70,21 @@
         box.append(out);
       }
     }
+    // Which build answers: the controller's commit and, where the deployment
+    // names one (the kiosk image's release tag), the system around it. Pushed
+    // to the right and silent on failure -- it is a hint, not a control.
+    const build = document.createElement('span');
+    build.style.cssText = 'margin-left: auto; opacity: .6;';
+    box.append(build);
+    fetch('/api/version')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((v) => {
+        if (!v) return;
+        build.textContent = v.system ? `${v.system} · ${v.commit}` : v.commit;
+        build.title = `miniclientcontrol ${v.version}, Commit ${v.commit}`
+          + (v.system ? `, System ${v.system}` : '');
+      })
+      .catch(() => {});
     document.body.prepend(box);
   }
 

@@ -1770,3 +1770,14 @@ mod tests {
         assert!(request.edits_besides_the_playlist());
     }
 }
+
+/// What the operator pages print beside the account: the commit this binary was
+/// built from (`build.rs`) and, when the deployment names one, the version of
+/// the system around it (`--system-version`).
+pub async fn version(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": env!("MCC_COMMIT"),
+        "system": state.args.system_version,
+    }))
+}

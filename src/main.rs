@@ -289,6 +289,7 @@ async fn main() -> Result<()> {
         .route("/api/playlist/{id}/move", axum::routing::post(move_playlist_item))
         .route("/api/playlist/{id}/duplicate", axum::routing::post(handlers::duplicate_playlist_item))
         .route("/api/layout/{id}", get(layout::widgets_for_display))
+        .route("/api/version", get(handlers::version))
         .route("/api/control/current", get(get_current).post(set_current))
         .route(
             "/api/override",

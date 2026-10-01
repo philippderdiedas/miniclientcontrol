@@ -137,6 +137,7 @@ Control who may cast in the admin UI, or remove the feature entirely with
 --chromium-arg <flag>        (extra browser flags, repeatable)
 --browser-language <list>    (default: de,de-DE,en-US,en)
 --locale <tag>               (dates and times; default: from LC_ALL/LC_TIME/LANG)
+--system-version <text>      (shown beside the commit on the operator pages, e.g. the kiosk image tag)
 --advance-stall-timeout <s>  (a page counting passes that makes no progress moves on; default: 120)
 --freeze-timeout <s>         (a screen that stops painting is reported frozen; default: 60)
 --managed-cert <auto|off>    (real cert for a <lan-ip>.clientctrl.cc name; default: auto)
@@ -283,6 +284,9 @@ declaration.
 - `POST /api/login` `{ name, password }` — sets the session cookie; `POST
   /api/logout`; `GET /api/me` → `{ name, role, open }`; `PUT /api/me/password`
   `{ current, new }`
+- `GET /api/version` → `{ version, commit, system }` — the commit the binary was
+  built from (embedded by `build.rs`, `MCC_COMMIT` overrides it) and
+  `--system-version`, or `null`; any signed-in role, shown in the account bar
 - `GET`/`POST /api/users`, `PUT`/`DELETE /api/users/{id}` — admin only; roles
   `admin`, `manager`, `editor`; the first account must be an admin and the last
   enabled admin cannot be removed, disabled or demoted

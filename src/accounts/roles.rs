@@ -82,6 +82,7 @@ mod tests {
             (Method::GET, "/login.html", Need::Open),
             (Method::POST, "/api/login", Need::Open),
             (Method::GET, "/api/me", Need::Read),
+            (Method::GET, "/api/version", Need::Read),
             (Method::POST, "/api/logout", Need::Read),
             (Method::PUT, "/api/me/password", Need::Read),
             (Method::GET, "/api/me/tokens", Need::Read),

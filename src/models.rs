@@ -9,7 +9,7 @@ use std::path::PathBuf;
 // --- Config ---
 
 #[derive(Parser, Clone, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MCC_COMMIT"), ")"), about, long_about = None)]
 pub struct Args {
     /// Port for the plain-HTTP server
     #[arg(long, env, default_value_t = 3000)]
@@ -146,6 +146,15 @@ pub struct Args {
     /// the list match what the signage actually shows.
     #[arg(long, env, default_value = "de,de-DE,en-US,en")]
     pub browser_language: String,
+
+    /// The version of the system this controller ships in, shown beside its
+    /// own commit on the operator pages and in `/api/version`.
+    ///
+    /// Free text, display only -- the netboot kiosk image passes its release
+    /// tag here, so a screen says which image it booted and not just which
+    /// controller it runs. Unset, only the commit is shown.
+    #[arg(long, env)]
+    pub system_version: Option<String>,
 
     /// How guests reach this device, when it is not simply its LAN address.
     ///
