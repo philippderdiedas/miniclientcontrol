@@ -4,7 +4,7 @@
 
 **Goal:** Turn `casttarget` from a binary into a library crate (`casttarget` lib) plus a thin binary, with a `start(ReceiverConfig, access, events)` entry point, so `miniclientcontrol` can depend on it in SP2 — without regressing the standalone binary.
 
-**Architecture:** The protocol stack (`cast/`, `certstore`) and the state types (`AppState`/`SessionInfo`/`StreamStats`) move into `src/lib.rs`. A new `start()` wraps today's `main()` body (db resolution, identity load, state build, refetch thread, `Service::start`) and takes an injected `device_id` and `app_id`, an `AccessHook`, and a `CastEvent` sender. The binary (`src/main.rs`) becomes: parse args → build `ReceiverConfig` → `start()` with an allow-all hook and a logging event sink → run the UI. The `winit`/`softbuffer`/`fontdue`/`ureq` UI deps move behind a default-on `ui` feature so the library builds without them.
+**Architecture:** The protocol stack (`cast/`, `certstore`) and the state types (`AppState`/`SessionInfo`/`StreamStats`) move into `src/lib.rs`. A new `start()` wraps today's `main()` body (db resolution, identity load, state build, refetch thread, `Service::start`) and takes an injected `device_id` and `app_id`, an `AccessHook`, and a `CastEvent` sender. The binary (`src/main.rs`) becomes: parse args → build `ReceiverConfig` → `start()` with an allow-all hook and a logging event sink → run the UI. The `winit`/`softbuffer`/`fontdue` UI deps move behind a default-on `ui` feature so the library builds without them. (`ureq` stays non-optional — it is library code, used by `certstore::fetch_db`.)
 
 **Tech Stack:** Rust 2021, `rusqlite` (bundled), `rustls` (ring), no tokio (sync/threads), `winit`/`softbuffer`/`fontdue` (UI, feature-gated).
 
@@ -42,11 +42,16 @@ path = "src/lib.rs"
 [[bin]]
 name = "casttarget"
 path = "src/main.rs"
+required-features = ["ui"]   # so the bin is skipped under --no-default-features
 
 [features]
 default = ["ui"]
 ui = ["dep:winit", "dep:softbuffer", "dep:fontdue"]
 ```
+
+`required-features = ["ui"]` is load-bearing (review fix D): without it,
+`cargo build --no-default-features` still tries to build the bin, whose `mod ui;`
+pulls `winit` and fails. With it, `--no-default-features` builds the lib only.
 
 In `[dependencies]`, mark the UI crates optional (leave every other dependency untouched — `rusqlite`, `rustls`, etc. stay exactly as they are):
 
@@ -200,7 +205,7 @@ git commit -m "casttarget: move AppState/SessionInfo/StreamStats + helpers into 
 
 - [ ] **Step 1: Add `device_id` as a parameter**
 
-In `src/cast/mod.rs`, change `Service::start`'s signature to take `device_id: String` (before `state`) and delete the internal `let device_id = stable_device_id(&identity.device_cert_der);` at `:37` — use the parameter instead. Keep `stable_device_id` as a `pub fn` (the binary calls it to produce the default).
+In `src/cast/mod.rs`, change `Service::start`'s signature to take `device_id: String` (before `state`) and delete the internal `let device_id = stable_device_id(&identity.device_cert_der);` at `:37` — use the parameter instead. **Make `stable_device_id` public** (review fix A): it is `fn stable_device_id` at `:146` today, change to `pub fn stable_device_id` — Task 7's binary calls `cast::stable_device_id(...)` across the crate boundary and will not compile otherwise.
 
 - [ ] **Step 2: Compiles**
 
@@ -266,7 +271,11 @@ pub struct SenderInfo {
 }
 
 /// Keeps the receiver alive; dropping it stops the service.
+/// `state` is exposed because the standalone binary's UI reads the live
+/// `Arc<Mutex<AppState>>` (review: `ui::run` at `src/ui.rs:33` takes and stores
+/// it, reads it under lock every 500ms). Not optional.
 pub struct ReceiverHandle {
+    pub state: Arc<Mutex<AppState>>,
     _service: cast::Service,
 }
 
@@ -322,7 +331,7 @@ pub fn start(
     // they are carried on AppState (added there) so the session/webrtc code can reach them.
     let _ = (&access, &events, &cfg.app_id);
 
-    Ok(ReceiverHandle { _service: service })
+    Ok(ReceiverHandle { state: Arc::clone(&state), _service: service })
 }
 ```
 
@@ -361,21 +370,80 @@ In `src/lib.rs`, add to `AppState`:
 
 and set them in `start()`'s `AppState { … }` from `access.clone()`, `events.clone()`, `cfg.app_id.clone()`; remove the `let _ = (&access, &events, &cfg.app_id);` line. `Service::start` already receives the `Arc<Mutex<AppState>>`, so `cast/` can reach them.
 
-- [ ] **Step 2: Call the hook where a LAUNCH is accepted**
+- [ ] **Step 2: Thread the peer address, then refuse at LAUNCH via a pure helper**
 
-In `src/cast/session.rs`, in `handle_receiver_ns` (the handler that today creates the `AppSession` on LAUNCH), before creating the session: read `state.lock()`'s `access`, build a `SenderInfo { sender_id, addr }` from the connection, and if `access.may_cast(&info)` is `false`, **do not create the session** and reply with an idle/error `RECEIVER_STATUS` (the same status shape sent when no app is running). Add the sender id/peer address to the call site if not already in scope.
+The peer IP is **not in scope** in `handle_receiver_ns` (review fix B): the peer
+`SocketAddr` is captured at `src/cast/session.rs:70` but not passed on. Thread it
+through:
+- `handle_connection` (`session.rs:105`) takes `peer: SocketAddr` as a parameter;
+  its caller at `:70` passes the captured peer.
+- `handle_receiver_ns` (`session.rs:287`) takes `peer: SocketAddr`; its caller in
+  `handle_connection` passes it through.
+
+Then, in `handle_receiver_ns`, on the `Some("LAUNCH")` branch (`:329`), **before**
+building the `AppSession` and setting `*app.lock() = Some(..)` (`:344`), call a
+**pure helper** (review fix C — a helper so it is unit-testable without a live TLS
+stream):
+
+```rust
+// in src/cast/mod.rs or session.rs, next to the state types:
+pub fn may_launch(state: &std::sync::Mutex<crate::AppState>, info: &crate::SenderInfo) -> bool {
+    state.lock().map(|s| s.access.may_cast(info)).unwrap_or(false)
+}
+```
+
+and if it returns `false`, **do not** build the session — reply
+`receiver_status(app, request_id)` (`:366`, the idle status already sent when no
+app is running) and return. Build `info` as
+`SenderInfo { sender_id: msg.source_id.clone(), addr: peer.ip() }`.
 
 - [ ] **Step 3: Library compiles**
 
 Run: `cargo build --lib --no-default-features`
 Expected: compiles.
 
-- [ ] **Step 4: A refusing hook blocks a session (unit test)**
+- [ ] **Step 4: Unit-test the pure helper (not `handle_receiver_ns`)**
 
-Add a test in `src/cast/session.rs` (or a `tests/` file) that builds an `AppState` with an allow-all vs deny-all `AccessHook`, drives `handle_receiver_ns` with a synthetic LAUNCH, and asserts a session is created in the first case and not the second. Use a tiny in-test `struct AllowAll; struct DenyAll;` implementing `AccessHook`.
+`handle_receiver_ns` takes `&mut rustls::StreamOwned<ServerConnection, TcpStream>`
+and cannot be constructed without a real TLS peer, so test `may_launch` instead
+(review fix C). Add a test that builds an `AppState` with a deny-all vs allow-all
+`AccessHook` and asserts `may_launch` returns the matching bool:
+
+```rust
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+    struct Allow; struct Deny;
+    impl crate::AccessHook for Allow { fn may_cast(&self, _: &crate::SenderInfo) -> bool { true } }
+    impl crate::AccessHook for Deny  { fn may_cast(&self, _: &crate::SenderInfo) -> bool { false } }
+
+    fn state_with(hook: std::sync::Arc<dyn crate::AccessHook>) -> std::sync::Mutex<crate::AppState> {
+        // build a minimal AppState; fill the non-cast fields with empties.
+        std::sync::Mutex::new(crate::AppState {
+            name: String::new(), hostname: String::new(), addresses: vec![], port: 0,
+            db_generated: None, cert_valid_until: None, fetch_enabled: false,
+            egress_allowed: false, sessions: vec![], stream: None,
+            access: hook, events: std::sync::mpsc::sync_channel(1).0, app_id: String::new(),
+        })
+    }
+
+    #[test]
+    fn allow_hook_permits_launch() {
+        let info = crate::SenderInfo { sender_id: "s".into(), addr: "127.0.0.1".parse().unwrap() };
+        assert!(crate::cast::may_launch(&state_with(std::sync::Arc::new(Allow)), &info));
+    }
+    #[test]
+    fn deny_hook_refuses_launch() {
+        let info = crate::SenderInfo { sender_id: "s".into(), addr: "127.0.0.1".parse().unwrap() };
+        assert!(!crate::cast::may_launch(&state_with(std::sync::Arc::new(Deny)), &info));
+    }
+}
+```
+
+(Adjust the `may_launch` path to wherever Step 2 placed it.)
 
 Run: `cargo test --lib`
-Expected: the new test passes.
+Expected: both new tests pass.
 
 - [ ] **Step 5: Commit**
 
@@ -395,13 +463,26 @@ git commit -m "casttarget: AccessHook consulted at LAUNCH, carried on AppState"
 - Consumes: `AppState.events`, `AppState.app_id` (Task 5); the stream-start site in `src/cast/webrtc.rs` (where `state.stream` is set) and the stop site (where it is cleared).
 - Produces: one `Started { app_id }` per cast begin, one `Ended` per cast end, on the channel.
 
-- [ ] **Step 1: Send `Started` where the stream begins**
+Review resolved the sites exactly (conditional 2): **one** begin — `webrtc.rs:363`
+(`s.stream = Some(StreamStats{..})`, inside a scoped `state.lock()` that releases
+at `:371`); **two** clear sites — `webrtc.rs:897` (the single RTP-thread exit all
+`break`s funnel to) and `session.rs:352` (the `STOP` handler). Emit `Started` at
+`:363` and `Ended` **only** at `:897`; leave `session.rs:352` alone — `STOP` does
+not stop the RTP thread, so emitting there too would risk a second `Ended`. Both
+sites hold only a short scoped lock and `try_send` never blocks, so there is no
+deadlock.
 
-In `src/cast/webrtc.rs`, where `state.stream` is set to `Some(StreamStats{..})` (cast begins), also send on `state.events`: `let _ = state.events.try_send(CastEvent::Started { app_id: state.app_id.clone() });` (`try_send` so a full channel never blocks the receiver thread — drop-to-log).
+- [ ] **Step 1: Send `Started` where the stream begins (`webrtc.rs:363`)**
 
-- [ ] **Step 2: Send `Ended` where the stream clears**
+Inside the same scoped `state.lock()` block that sets `s.stream = Some(..)` (so
+`s` is the locked guard), add:
+`let _ = s.events.try_send(CastEvent::Started { app_id: s.app_id.clone() });`
 
-Where `state.stream` is set back to `None` (cast ends), send `CastEvent::Ended` the same way. If teardown has more than one path, pick the single place that always runs (the session drop or the stop handler) to avoid double `Ended`.
+- [ ] **Step 2: Send `Ended` at the single RTP-thread exit (`webrtc.rs:897`)**
+
+Where the RTP thread clears `s.stream = None` on exit, add in the same locked
+block: `let _ = s.events.try_send(CastEvent::Ended);`. **Do not** touch
+`session.rs:352`.
 
 - [ ] **Step 3: Library compiles**
 
@@ -470,7 +551,14 @@ let handle = casttarget::start(
 )?;
 let _handle = handle; // keep alive
 ```
-then the existing `--no-ui` loop and `ui::run(...)` tail (UI still gated by the `ui` feature at the crate level; `ui.rs`/`fakesender.rs` are binary modules and may use `casttarget::AppState` — but `ui::run` needs the `Arc<Mutex<AppState>>`; expose it from `start()` by returning it on the handle if the UI needs live state, or keep the UI reading a handle-provided `Arc`). **If the UI needs the live `Arc<Mutex<AppState>>`,** add `pub state: std::sync::Arc<std::sync::Mutex<AppState>>` to `ReceiverHandle` and hand `ui::run(handle.state.clone())`.
+then the existing `--no-ui` loop and the `ui::run(...)` tail. `ui::run` takes the
+live `Arc<Mutex<AppState>>` (resolved, not conditional — `src/ui.rs:33`), so call
+`ui::run(_handle.state.clone())` using the `state` field Task 4 put on
+`ReceiverHandle`. Keep `mod fakesender;`. Gate `mod ui;` and the `ui::run` tail
+behind `#[cfg(feature = "ui")]` with the headless `--no-ui` loop as the fallback
+when the feature is off (so the bin — built only with `required-features=["ui"]` —
+is consistent, and a future `--no-default-features` bin build would degrade to
+headless rather than fail).
 
 - [ ] **Step 2: Binary builds and the standalone shape works**
 
@@ -478,7 +566,8 @@ Run: `cargo build`
 Expected: compiles with UI.
 
 Run: `cargo build --no-default-features`
-Expected: the **library** still builds with no UI; the binary needs the `ui` feature, so `--no-default-features` builds the lib target only (the bin is skipped or, if it fails for lack of UI, gate `mod ui;`/`ui::run` behind `#[cfg(feature = "ui")]` and give a headless fallback — the existing `--no-ui` loop).
+Expected: builds the **library only**; the bin is **skipped** because Task 1 gave
+it `required-features = ["ui"]` (review fix D). No UI-dep error.
 
 - [ ] **Step 3: UI smoke test still green**
 
