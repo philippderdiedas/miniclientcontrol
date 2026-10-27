@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
 use chromiumoxide::cdp::browser_protocol::browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams};
-use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier};
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier, SetWebLifecycleStateParams, SetWebLifecycleStateState};
 use chromiumoxide::cdp::browser_protocol::target::{EventAttachedToTarget, SetAutoAttachParams, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::EnableParams as RuntimeEnableParams;
 use chromiumoxide::error::CdpError;
@@ -2006,4 +2006,19 @@ mod tests {
                                    FitMode::Width, "#000000");
         assert!(!is_internal_pdf_viewer_url(&url), "{url}");
     }
+}
+
+
+/// Freeze or thaw a page via the lifecycle API (Chrome's background-tab freeze):
+/// frozen stops rAF/timers/rendering and frees CPU/GPU; active restores it with
+/// the page state intact. Used for a native cast, where the player window is in
+/// front and the browser need not paint.
+async fn set_lifecycle(page: &Page, frozen: bool) -> Result<(), CdpError> {
+    let state = if frozen {
+        SetWebLifecycleStateState::Frozen
+    } else {
+        SetWebLifecycleStateState::Active
+    };
+    page.execute(SetWebLifecycleStateParams { state }).await?;
+    Ok(())
 }
