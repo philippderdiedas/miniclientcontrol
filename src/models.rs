@@ -491,6 +491,9 @@ pub struct Display {
     pub browser_restart: Arc<Notify>,
     /// The last screenshot and when it was taken.
     pub screenshot: Mutex<Option<(std::time::Instant, Vec<u8>)>>,
+    /// Set while a native-cast override deliberately froze this screen's page, so
+    /// the freeze watcher treats "not painting" as no evidence, never a fault.
+    pub freeze_suspended: std::sync::atomic::AtomicBool,
 }
 
 impl Display {
@@ -511,6 +514,7 @@ impl Display {
             frozen_since: Mutex::new(None),
             browser_restart: Arc::new(Notify::new()),
             screenshot: Mutex::new(None),
+            freeze_suspended: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

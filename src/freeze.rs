@@ -114,6 +114,7 @@ pub async fn watch(state: AppState, display: Arc<Display>) {
     let timeout = Duration::from_secs(state.args.freeze_timeout.max(10));
     let mut watch = Watch::default();
     let mut target: Option<String> = None;
+    let mut was_suspended = false;
     loop {
         tokio::time::sleep(SAMPLE).await;
         let page = display.screen_page.lock().await.clone();
@@ -126,9 +127,20 @@ pub async fn watch(state: AppState, display: Arc<Display>) {
             watch.new_page();
             target = id;
         }
-        let reading = match &page {
-            Some(page) => read_frames(page).await,
-            None => Reading::Nothing,
+        let suspended = display.freeze_suspended.load(std::sync::atomic::Ordering::Relaxed);
+        // Suspend -> resume edge: fresh baseline, so the just-thawed page (still
+        // reporting the pre-freeze count until it repaints) is not read as a freeze.
+        if was_suspended && !suspended {
+            watch.new_page();
+        }
+        was_suspended = suspended;
+        let reading = if suspended {
+            Reading::Nothing
+        } else {
+            match &page {
+                Some(page) => read_frames(page).await,
+                None => Reading::Nothing,
+            }
         };
         let can_restart = display.browser_pid.lock().await.is_some();
         let name = display.name.clone();
