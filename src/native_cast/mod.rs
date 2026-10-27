@@ -61,6 +61,15 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
         let port = BASE_CAST_PORT + (index as u16) * 2;
         let app_id = format!("casttarget-{}", cfg.name);
         let device_id = format!("{base}-{index}");
+        // The name Android shows for this receiver: the machine's hostname, so a
+        // venue with several kiosks is distinguishable. The implicit single
+        // display is named "default" and would just repeat the hostname; a
+        // declared screen appends its connector so the screens are told apart.
+        let cast_name = if cfg.name == "default" {
+            casttarget::hostname()
+        } else {
+            format!("{} ({})", casttarget::hostname(), cfg.name)
+        };
 
         let hook = Arc::new(NativeCastHook {
             handle: tokio::runtime::Handle::current(),
@@ -95,7 +104,7 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
         let fetch = index == 0; // only one receiver refetches the shared cast.db
         match casttarget::start(
             casttarget::ReceiverConfig {
-                name: cfg.name.clone(),
+                name: cast_name,
                 port,
                 device_id,
                 app_id,
