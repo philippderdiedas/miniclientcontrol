@@ -1,4 +1,6 @@
 mod frames;
+#[cfg(feature = "native-cast")]
+mod native_cast;
 mod builtin;
 mod layout;
 mod screenshot;
