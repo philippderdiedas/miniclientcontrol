@@ -454,6 +454,7 @@ async fn activate_display(
             scroll_config: scroll,
             fit_mode: crate::models::FitMode::default(),
             fit_background: crate::models::DEFAULT_FIT_BACKGROUND.to_string(),
+            external_window: false,
         });
     }
     session.showing = showing.clone();

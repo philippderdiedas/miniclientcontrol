@@ -1440,6 +1440,7 @@ async fn set_override_of(
         scroll_config: payload.scroll_config.unwrap_or(ScrollMode::None),
         fit_mode,
         fit_background,
+        external_window: false,
     };
 
     {

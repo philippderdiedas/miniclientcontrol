@@ -325,7 +325,7 @@ fn default_fit_background() -> String {
     DEFAULT_FIT_BACKGROUND.to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct OverrideItem {
     pub asset_id: Option<i64>,
     pub url: Option<String>,
@@ -340,6 +340,10 @@ pub struct OverrideItem {
     pub fit_mode: FitMode,
     #[serde(default = "default_fit_background")]
     pub fit_background: String,
+    /// A native cast (Chromecast/AirPlay): no URL to navigate; the controller
+    /// freezes this display's Chromium and the player window is placed in front.
+    #[serde(default)]
+    pub external_window: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
