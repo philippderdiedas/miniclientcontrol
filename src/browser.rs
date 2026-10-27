@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use chromiumoxide::{Browser, Page};
 use chromiumoxide::cdp::browser_protocol::browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams};
-use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier, SetWebLifecycleStateParams, SetWebLifecycleStateState};
+use chromiumoxide::cdp::browser_protocol::page::{AddScriptToEvaluateOnNewDocumentParams, EnableParams as PageEnableParams, NavigateParams, ReloadParams, RemoveScriptToEvaluateOnNewDocumentParams, ScriptIdentifier};
+use chromiumoxide::cdp::browser_protocol::emulation::SetCpuThrottlingRateParams;
 use chromiumoxide::cdp::browser_protocol::target::{EventAttachedToTarget, SetAutoAttachParams, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::EnableParams as RuntimeEnableParams;
 use chromiumoxide::error::CdpError;
@@ -854,6 +855,11 @@ async fn ensure_single_control_page(browser: &mut Browser) -> Result<Page, chrom
     Ok(control_page)
 }
 
+/// How hard to throttle the control page's renderer while a native cast stands in
+/// front of it. 100x slows rAF/timers to roughly idle; the page is occluded, so
+/// the slowdown never shows. Restored to 1.0 when the cast ends.
+const CAST_THROTTLE_RATE: f64 = 100.0;
+
 async fn run_override_loop(
     state: &AppState,
     // The display `browser_loop` is driving, passed in rather than resolved a
@@ -869,14 +875,15 @@ async fn run_override_loop(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
         if override_item.external_window {
-            // Native cast: freeze this page, let the player window stand in front.
+            // Native cast: throttle this page to near-idle, let the player window
+            // stand in front. (Throttle, not freeze -- see set_cpu_throttle.)
             let dname = display.name.clone();
             *display.screen_page.lock().await = Some(page.clone());
             display
                 .freeze_suspended
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Err(e) = set_lifecycle(page, true).await {
-                warn!("native-cast: freeze failed on {}: {}", dname, e);
+            if let Err(e) = set_cpu_throttle(page, CAST_THROTTLE_RATE).await {
+                warn!("native-cast: throttle failed on {}: {}", dname, e);
             }
 
             // Park until the override changes or clears. This is a FOURTH loop
@@ -889,7 +896,7 @@ async fn run_override_loop(
                 tokio::select! {
                     _ = lost.notified() => {
                         display.freeze_suspended.store(false, std::sync::atomic::Ordering::Relaxed);
-                        let _ = set_lifecycle(page, false).await; // best effort before reconnect
+                        let _ = set_cpu_throttle(page, 1.0).await; // best effort before reconnect
                         return Err("the CDP connection closed".into());
                     }
                     _ = display.override_signal.notified() => {}
@@ -901,12 +908,12 @@ async fn run_override_loop(
                 }
             };
 
-            // Leaving the freeze: thaw and lift the detection suspension.
+            // Leaving the cast: un-throttle and lift the detection suspension.
             display
                 .freeze_suspended
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            if let Err(e) = set_lifecycle(page, false).await {
-                warn!("native-cast: thaw failed on {}: {}", dname, e);
+            if let Err(e) = set_cpu_throttle(page, 1.0).await {
+                warn!("native-cast: un-throttle failed on {}: {}", dname, e);
             }
             match next {
                 Some(n) => {
@@ -2062,12 +2069,16 @@ mod tests {
 /// frozen stops rAF/timers/rendering and frees CPU/GPU; active restores it with
 /// the page state intact. Used for a native cast, where the player window is in
 /// front and the browser need not paint.
-async fn set_lifecycle(page: &Page, frozen: bool) -> Result<(), CdpError> {
-    let state = if frozen {
-        SetWebLifecycleStateState::Frozen
-    } else {
-        SetWebLifecycleStateState::Active
-    };
-    page.execute(SetWebLifecycleStateParams { state }).await?;
+///
+/// We throttle the renderer instead of `Page.setWebLifecycleState("frozen")`:
+/// on this kiosk's Chromium (Ozone-Wayland) freezing a *visible* page sets
+/// `document.visibilityState=hidden`, the on-screen surface goes white, and
+/// nothing (`active`, navigate, reload, compositor pokes) brings it back short of
+/// a browser restart -- `Emulation.setVisibilityState` is absent from the build.
+/// `setCpuThrottlingRate` slows rAF/timers to near zero (the CPU win) without
+/// touching visibility, so it reverses cleanly. The page is occluded by the
+/// player window during a cast, so the slowdown is invisible.
+async fn set_cpu_throttle(page: &Page, rate: f64) -> Result<(), CdpError> {
+    page.execute(SetCpuThrottlingRateParams { rate }).await?;
     Ok(())
 }
