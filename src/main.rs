@@ -279,6 +279,10 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { frames::run(frames_state, frames_cdp).await });
     }
 
+    // Native-Cast-Receiver je Display (optional). SP3 verdrahtet die Events zum Override.
+    #[cfg(feature = "native-cast")]
+    native_cast::supervise(state.clone(), configured.clone());
+
     // 5. Start Web Server
     let uploaded_assets_dir = args.assets_dir.clone();
     let serve_dir = ServeDir::new(&uploaded_assets_dir);
