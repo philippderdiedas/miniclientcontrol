@@ -44,7 +44,10 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
 
     // One shared identity -> a base device id; each display gets a unique suffix,
     // so the mDNS device ids differ while the cast identity is shared.
-    let base = match casttarget::certstore::load_identity(&db_str) {
+    // ensure_identity bootstraps an empty cast.db from the fetch endpoint when
+    // egress is allowed, so a fresh kiosk provisions itself instead of silently
+    // starting no receiver.
+    let base = match casttarget::certstore::ensure_identity(&db_str) {
         Ok(id) => casttarget::cast::stable_device_id(&id.device_cert_der),
         Err(e) => {
             tracing::error!("native-cast: cast.db ({}) nicht ladbar: {:#} -- Receiver aus", db_str, e);
