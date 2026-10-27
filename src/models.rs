@@ -44,6 +44,11 @@ pub struct Args {
     #[arg(long, env, default_value = "miniclient.db")]
     pub database_path: String,
 
+    /// Path to the Chromecast certificate DB (cast.db). Defaults to cast.db
+    /// beside the database (the USB data partition). Only used with native-cast.
+    #[arg(long, env)]
+    pub cast_db: Option<PathBuf>,
+
     /// Chrome DevTools Protocol URL
     #[arg(long, env, default_value = "http://127.0.0.1:9222")]
     pub cdp_url: String,
@@ -662,5 +667,19 @@ mod tests {
         assert_eq!(FitMode::default_for(Some("image/png")), FitMode::Contain);
         assert_eq!(FitMode::default_for(Some("video/mp4")), FitMode::Contain);
         assert_eq!(FitMode::default_for(None), FitMode::Contain);
+    }
+}
+
+
+#[cfg(feature = "native-cast")]
+impl Args {
+    /// cast.db location: the flag, else cast.db in the directory of database_path.
+    pub fn cast_db_path(&self) -> PathBuf {
+        self.cast_db.clone().unwrap_or_else(|| {
+            std::path::Path::new(&self.database_path)
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("cast.db")
+        })
     }
 }
