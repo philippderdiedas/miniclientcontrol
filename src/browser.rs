@@ -868,6 +868,55 @@ async fn run_override_loop(
     lost: &tokio::sync::Notify,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     loop {
+        if override_item.external_window {
+            // Native cast: freeze this page, let the player window stand in front.
+            let dname = display.name.clone();
+            *display.screen_page.lock().await = Some(page.clone());
+            display
+                .freeze_suspended
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = set_lifecycle(page, true).await {
+                warn!("native-cast: freeze failed on {}: {}", dname, e);
+            }
+
+            // Park until the override changes or clears. This is a FOURTH loop
+            // park-point; the three navigate park-points handle overlay_signal,
+            // this one deliberately does NOT (acknowledged deviation): the frozen
+            // page is hidden behind the player window, overlay state is re-read
+            // fresh when the navigate path resumes, and a leftover notify_one
+            // permit causes at most one harmless redundant wake later.
+            let next = loop {
+                tokio::select! {
+                    _ = lost.notified() => {
+                        display.freeze_suspended.store(false, std::sync::atomic::Ordering::Relaxed);
+                        let _ = set_lifecycle(page, false).await; // best effort before reconnect
+                        return Err("the CDP connection closed".into());
+                    }
+                    _ = display.override_signal.notified() => {}
+                }
+                let current = { display.override_item.lock().await.clone() };
+                match current {
+                    Some(n) if n == override_item => continue, // unchanged: notify_one permit
+                    other => break other,
+                }
+            };
+
+            // Leaving the freeze: thaw and lift the detection suspension.
+            display
+                .freeze_suspended
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            if let Err(e) = set_lifecycle(page, false).await {
+                warn!("native-cast: thaw failed on {}: {}", dname, e);
+            }
+            match next {
+                Some(n) => {
+                    override_item = n;
+                    continue;
+                }
+                None => return Ok(()),
+            }
+        }
+
         let target_url = override_target_url(state, &override_item);
         info!("Override active. Navigating to: {}", redact_str(&target_url));
 
