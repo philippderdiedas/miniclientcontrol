@@ -30,6 +30,80 @@ impl casttarget::AccessHook for NativeCastHook {
     }
 }
 
+use crate::models::AppState;
+
+const BASE_CAST_PORT: u16 = 8009;
+
+/// Start one native-cast receiver per declared display. Receivers live until the
+/// process ends (like the browser the controller does not kill), so their handles
+/// are deliberately leaked with `std::mem::forget` -- SP3+ may hold them in state
+/// for teardown.
+pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>) {
+    let cast_db = state.args.cast_db_path();
+    let db_str = cast_db.to_string_lossy().to_string();
+
+    // One shared identity -> a base device id; each display gets a unique suffix,
+    // so the mDNS device ids differ while the cast identity is shared.
+    let base = match casttarget::certstore::load_identity(&db_str) {
+        Ok(id) => casttarget::cast::stable_device_id(&id.device_cert_der),
+        Err(e) => {
+            tracing::error!("native-cast: cast.db ({}) nicht ladbar: {:#} -- Receiver aus", db_str, e);
+            return;
+        }
+    };
+
+    for (index, cfg) in configured.into_iter().enumerate() {
+        let screen = cfg.name.clone();
+        let port = BASE_CAST_PORT + index as u16;
+        let app_id = format!("casttarget-{}", cfg.name);
+        let device_id = format!("{base}-{index}");
+
+        let hook = Arc::new(NativeCastHook {
+            handle: tokio::runtime::Handle::current(),
+            pool: state.pool.clone(),
+            screen: screen.clone(),
+            settings: state.settings.clone(),
+        });
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<casttarget::CastEvent>(32);
+
+        // Drain the channel off the runtime; SP3 turns these into overrides.
+        let drain_screen = screen.clone();
+        tokio::task::spawn_blocking(move || {
+            while let Ok(ev) = rx.recv() {
+                match ev {
+                    casttarget::CastEvent::Started { app_id } => {
+                        tracing::info!("native-cast: start auf {} (app_id={})", drain_screen, app_id)
+                    }
+                    casttarget::CastEvent::Ended => {
+                        tracing::info!("native-cast: ende auf {}", drain_screen)
+                    }
+                }
+            }
+        });
+
+        let fetch = index == 0; // only one receiver refetches the shared cast.db
+        match casttarget::start(
+            casttarget::ReceiverConfig {
+                name: cfg.name.clone(),
+                port,
+                device_id,
+                app_id,
+                cast_db: cast_db.clone(),
+                fetch,
+            },
+            hook,
+            tx,
+        ) {
+            Ok(handle) => {
+                tracing::info!("native-cast: '{}' auf Port {} announced", screen, port);
+                std::mem::forget(handle); // lives until process exit
+            }
+            Err(e) => tracing::error!("native-cast: Receiver '{}' nicht gestartet: {:#}", screen, e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::cast::access::{decide, Access, Refusal};
