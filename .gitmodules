@@ -1,0 +1,3 @@
+[submodule "casttarget"]
+	path = casttarget
+	url = git@git.fablab-luebeck.de:it/casttarget.git

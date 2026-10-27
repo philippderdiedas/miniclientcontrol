@@ -61,3 +61,10 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde", "json", "fuel"] }
 # already in the tree via rustls/rcgen; used directly for PBKDF2 password hashing
 ring = "0.17"
+
+# Native-Cast-Receiver (Chromecast/AirPlay) als optionale Lib. default-features
+# aus: die winit/softbuffer/fontdue-UI-Deps des casttarget-Bins bleiben draussen.
+casttarget = { path = "casttarget", optional = true, default-features = false }
+
+[features]
+native-cast = ["dep:casttarget"]
