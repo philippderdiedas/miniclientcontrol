@@ -54,7 +54,11 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
 
     for (index, cfg) in configured.into_iter().enumerate() {
         let screen = cfg.name.clone();
-        let port = BASE_CAST_PORT + index as u16;
+        // Each receiver gets a TLS port and derives its eureka port as port-1
+        // (Chromecast convention). Stride by 2 so display N's eureka port
+        // (its TLS-1) never collides with display N-1's TLS port: display 0 is
+        // TLS 8009 / eureka 8008, display 1 is TLS 8011 / eureka 8010, ...
+        let port = BASE_CAST_PORT + (index as u16) * 2;
         let app_id = format!("casttarget-{}", cfg.name);
         let device_id = format!("{base}-{index}");
 
