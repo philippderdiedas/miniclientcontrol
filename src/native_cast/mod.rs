@@ -67,16 +67,22 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<casttarget::CastEvent>(32);
 
-        // Drain the channel off the runtime; SP3 turns these into overrides.
+        // Drain the channel on its own thread (so block_on is not on a runtime
+        // worker) and turn events into the external-window override.
+        let display = state.displays.iter().find(|d| d.name == screen).cloned();
+        let handle = tokio::runtime::Handle::current();
         let drain_screen = screen.clone();
-        tokio::task::spawn_blocking(move || {
+        std::thread::spawn(move || {
             while let Ok(ev) = rx.recv() {
+                let Some(display) = display.as_ref() else { continue };
                 match ev {
                     casttarget::CastEvent::Started { app_id } => {
-                        tracing::info!("native-cast: start auf {} (app_id={})", drain_screen, app_id)
+                        tracing::info!("native-cast: start auf {} (app_id={})", drain_screen, app_id);
+                        handle.block_on(activate(display));
                     }
                     casttarget::CastEvent::Ended => {
-                        tracing::info!("native-cast: ende auf {}", drain_screen)
+                        tracing::info!("native-cast: ende auf {}", drain_screen);
+                        handle.block_on(deactivate(display));
                     }
                 }
             }
