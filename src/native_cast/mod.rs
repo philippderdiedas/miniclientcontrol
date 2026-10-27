@@ -30,7 +30,7 @@ impl casttarget::AccessHook for NativeCastHook {
     }
 }
 
-use crate::models::AppState;
+use crate::models::{AppState, Display, OverrideItem};
 
 const BASE_CAST_PORT: u16 = 8009;
 
@@ -102,6 +102,39 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
             Err(e) => tracing::error!("native-cast: Receiver '{}' nicht gestartet: {:#}", screen, e),
         }
     }
+}
+
+/// Pin the display to the external-window override (native cast started).
+pub async fn activate(display: &Display) {
+    let item = OverrideItem {
+        external_window: true,
+        // the rest is irrelevant for an external window (never drawn).
+        ..Default::default()
+    };
+    {
+        let mut lock = display.override_item.lock().await;
+        if lock.as_ref().map(|o| o.external_window) == Some(true) {
+            return; // already ours
+        }
+        *lock = Some(item);
+    }
+    display.override_signal.notify_one();
+}
+
+/// Clear the override on cast end, but only if what is on screen is still our
+/// external-window override -- an operator who set a different override during
+/// the cast made a newer decision.
+pub async fn deactivate(display: &Display) {
+    {
+        let mut lock = display.override_item.lock().await;
+        match lock.as_ref() {
+            Some(o) if o.external_window => {
+                *lock = None;
+            }
+            _ => return, // not ours (or already gone)
+        }
+    }
+    display.override_signal.notify_one();
 }
 
 #[cfg(test)]
