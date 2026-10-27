@@ -38,12 +38,24 @@ In `src/models.rs`, in `OverrideItem` (after the last field), add:
     pub external_window: bool,
 ```
 
-- [ ] **Step 2: Default it in every existing constructor**
+- [ ] **Step 1b: Derive `Default` on `OverrideItem`** (review: all fields allow it)
 
-Build and let the compiler list every `OverrideItem { … }` literal missing the field; add `external_window: false` to each (the WebRTC-cast override in `src/cast/mod.rs`, any test builders). Do **not** use `..Default::default()` unless `OverrideItem` already derives `Default`.
+Add `Default` to `OverrideItem`'s derive list. The review confirmed every field
+defaults cleanly: `Option` fields → `None`, `scroll_config: ScrollMode` has an
+`impl Default`, `fit_mode: FitMode` derives `Default` (`#[default]` variant),
+`fit_background: String` → `""`, `external_window: bool` → `false`. This lets
+Task 5 build the external-window item as `OverrideItem { external_window: true,
+..Default::default() }`.
+
+- [ ] **Step 2: Add `external_window: false` to the two existing literals**
+
+There are exactly **two** `OverrideItem { … }` literals (review): `src/cast/mod.rs:449`
+(the WebRTC-cast override) and `src/handlers.rs:1435` (the API override builder).
+Add `external_window: false` to both. (Letting the compiler find them also works,
+but know it is these two — the commit must stage both.)
 
 Run: `cargo build`
-Expected: compiles once every constructor sets the field.
+Expected: compiles once both literals set the field.
 
 - [ ] **Step 3: Tests still pass**
 
@@ -53,9 +65,10 @@ Expected: green — `OverrideItem`'s `PartialEq` now includes the field; a URL o
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/models.rs src/cast/mod.rs
+git add src/models.rs src/cast/mod.rs src/handlers.rs
 git commit -m "mc: OverrideItem.external_window - native cast override kind"
 ```
+(Review N1: `src/handlers.rs` holds the second literal — staging it too keeps the committed snapshot compiling.)
 
 ---
 
@@ -77,20 +90,47 @@ In `src/models.rs`, in `Display`, add:
 ```
 and in `Display`'s constructor, initialise `freeze_suspended: std::sync::atomic::AtomicBool::new(false)`.
 
-- [ ] **Step 2: Honour it in the watcher**
+- [ ] **Step 2: Honour it in the watcher — AND reset the baseline on resume (review B1)**
 
-In `src/freeze.rs::watch`, where it reads frames (~line 128-131: `match … { Some(page) => read_frames(page).await, None => Reading::Nothing }`), guard it:
+`freeze::watch` (`freeze.rs:113-160`) only resets its baseline (`watch.new_page()`)
+when the page's `target_id` **changes** (`:124-128`). A native cast freezes the
+**same** page — no target change — so without an explicit reset the baseline stays
+at the pre-cast `(t_pre, N_pre)`. While frozen, CDP `evaluate` still answers and
+returns the stale frame count, and in the gap between un-suspend and the page
+repainting (`set_lifecycle(active)` → `browser_loop` re-navigates, hundreds of ms
+to seconds) a sample reads `N_pre` against the stale baseline → for a cast longer
+than `freeze_timeout` (120 s) it fires `Event::Frozen { restart }` and **restarts
+the browser at cast end**. Two changes close this:
+
+Add a `was_suspended` tracker before the loop:
 ```rust
-let reading = if display.freeze_suspended.load(std::sync::atomic::Ordering::Relaxed) {
-    Reading::Nothing
-} else {
-    match display.screen_page.lock().await.as_ref() {
-        Some(page) => read_frames(page).await,
-        None => Reading::Nothing,
-    }
-};
+    let mut was_suspended = false;
 ```
-(keep the existing variable name the surrounding code uses). `Reading::Nothing` is already "no information, never a freeze" (`freeze.rs:54-58`), so a suspended screen is never restarted and, on resume, the first real sample starts its clock fresh.
+Inside the loop, after the existing `if id != target { watch.new_page(); target = id; }`
+block, add the resume-edge reset and mask the reading while suspended:
+```rust
+    let suspended = display.freeze_suspended.load(std::sync::atomic::Ordering::Relaxed);
+    // Suspend -> resume edge: start the clock fresh, so the just-thawed page
+    // (still reporting the pre-freeze count until it repaints) is not read as a
+    // freeze.
+    if was_suspended && !suspended {
+        watch.new_page();
+    }
+    was_suspended = suspended;
+
+    let reading = if suspended {
+        Reading::Nothing
+    } else {
+        match &page {
+            Some(page) => read_frames(page).await,
+            None => Reading::Nothing,
+        }
+    };
+```
+and delete the original `let reading = match &page { … };` line it replaces.
+`Reading::Nothing` is already "no information, never a freeze" (`freeze.rs:54-58`),
+so the suspended screen is never restarted, and the edge-reset gives the promised
+fresh clock on resume.
 
 - [ ] **Step 3: Build**
 
@@ -169,8 +209,12 @@ loop {
             warn!("native-cast: freeze failed on {}: {}", display.name, e);
         }
 
-        // Park until the override changes or clears. Overlay edits are ignored
-        // here: the frozen page is hidden behind the player window.
+        // Park until the override changes or clears. This is a FOURTH loop
+        // park-point; CLAUDE.md says the three navigate park-points must handle
+        // overlay_signal, and this one deliberately does NOT (acknowledged
+        // deviation): the frozen page is hidden behind the player window, overlay
+        // state is re-read fresh when the navigate path resumes, and a leftover
+        // notify_one permit causes at most one harmless redundant wake later.
         let next = loop {
             tokio::select! {
                 _ = lost.notified() => {
@@ -246,8 +290,8 @@ use crate::models::{Display, OverrideItem};
 pub async fn activate(display: &Display) {
     let item = OverrideItem {
         external_window: true,
-        // the rest is irrelevant for an external window; build the "empty" item.
-        ..OverrideItem::empty()
+        // the rest is irrelevant for an external window (never drawn).
+        ..Default::default()
     };
     {
         let mut lock = display.override_item.lock().await;
@@ -274,9 +318,10 @@ pub async fn deactivate(display: &Display) {
 }
 ```
 
-- [ ] **Step 2: `OverrideItem::empty()`**
-
-If no all-default constructor exists, add one in `src/models.rs` (next to `OverrideItem`): a `pub fn empty() -> Self` with every field at its zero/None/default and `external_window: false` (the caller sets it true). If `OverrideItem` can `#[derive(Default)]`, derive it and use `OverrideItem { external_window: true, ..Default::default() }` instead — check its field types allow `Default`.
+(No `empty()` helper needed — Task 1 derived `Default` on `OverrideItem`, so
+`..Default::default()` builds the item. `Default` gives `fit_background: ""`
+rather than `cast/mod.rs`'s `"#000000"`, which is irrelevant for an external-window
+item that is never drawn.)
 
 - [ ] **Step 3: Build with the feature**
 
@@ -286,9 +331,10 @@ Expected: compiles.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/native_cast/mod.rs src/models.rs
+git add src/native_cast/mod.rs
 git commit -m "mc: native_cast activate/deactivate - set/clear external-window override (still-ours)"
 ```
+(`OverrideItem`'s `Default` derive already landed in Task 1, so no `models.rs` change here.)
 
 ---
 
@@ -370,7 +416,7 @@ On the target kiosk hardware, measure CPU/GPU of the display's Chromium before a
 top -b -n1 | grep chromium
 # during cast (page frozen): measure again
 ```
-Expected: the frozen Chromium's CPU drops materially (and ideally GPU). **If it does not** (Wayland may give no occlusion signal, so only timers stop): record it, and fall back — in Task 4's freeze path, keep the override + `freeze_suspended` (so detection still yields) but skip the `set_lifecycle(page, true/false)` calls ("verdecken only"). No structural change; the player window still stands in front.
+Expected: the frozen Chromium's CPU drops materially (and ideally GPU). **If it does not** (Wayland may give no occlusion signal, so only timers stop): record it, and fall back — in Task 4's freeze path, keep the override + `freeze_suspended` (so detection still yields, and the B1 resume-reset still matters under Wayland occlusion throttling) but skip the **three** `set_lifecycle` call sites (the freeze, the lost-path thaw, the exit thaw) — "verdecken only". No structural change; the player window still stands in front.
 
 - [ ] **Step 6: Cross-compile under the feature**
 
