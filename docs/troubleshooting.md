@@ -124,6 +124,30 @@ address that is casting. The operator's copy on the admin page needs no cast. If
 neither shows up, the device has no `pactl` or no sound server, the backend
 reports itself unavailable, and the panel stays hidden on purpose.
 
+**Guests get a certificate warning, or the screens show a bare address instead
+of the `.clientctrl.cc` name.**
+The device is on the self-signed certificate. Look for these lines:
+
+```
+No private IPv4 and no usable IPv6 address yet; starting on the self-signed certificate ...
+Switched to the managed certificate for 10-78-11-58.clientctrl.cc. Guests: https://...
+```
+
+The first is normal right after a boot — the controller usually starts before
+DHCP has handed out an address. The second should follow within seconds of the
+lease. If it never comes, the device has no private address at all, or
+`api.clientcontrol.cc` cannot be reached and nothing usable is cached (a `No
+managed certificate for …` warning says so, every five minutes).
+
+**A Chromecast receiver does not show up in the cast menu.**
+The receiver announces itself over mDNS only once the device has an IPv4
+address; before that it logs `noch keine IPv4-Adresse -- warte, bis das Netz da
+ist` and waits. It follows the address from then on, so a DHCP move re-announces
+it under the new one. A receiver that is missing although the address is there
+is a different problem: look for `native-cast: … nicht gestartet` or a cast.db
+that cannot be loaded (`native-cast: cast.db … nicht ladbar`), both of which are
+retried every thirty seconds.
+
 **Guests get "server not found" for a `.clientctrl.cc` name.**
 That name is public DNS pointing at a private address, which is exactly the
 pattern DNS-rebinding protection blocks — dnsmasq's `stop-dns-rebind`, Pi-hole,

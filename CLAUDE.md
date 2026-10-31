@@ -656,6 +656,18 @@ The rules:
   one — `dashed_label` refuses an IPv4-mapped IPv6, which would render with dots.
 - **Never fail hard.** No address, no network, a bad response: fall back to
   self-signed. Casting must not keep the signage from booting.
+- **…and never fall back for good.** A kiosk boots before DHCP hands out an
+  address, so the startup decision is usually "no address". `main` therefore
+  hands a device that wanted a managed certificate and did not get one to
+  `managed_cert::spawn_upgrade`, which waits for an address, swaps the
+  certificate in with `reload_from_pem` and only *then* sets
+  `AppState::managed_cert` — an `AtomicBool`, false → true only — so the name
+  guests are told never runs ahead of the certificate covering it. It pokes
+  every screen afterwards, or the QR and the printed address stay on the bare
+  IP. Native cast follows the same rule: `native_cast::supervise` retries on its
+  own thread, and casttarget's mDNS responder is led by a watcher that waits
+  for an IPv4 address and re-announces when it changes, instead of failing the
+  whole receiver with `keine IPv4-Adresse fuer mDNS`.
 - Renewal uses `RustlsConfig::reload_from_pem`, not a restart — a restart
   navigates the display browser, and a failed swap must leave the old
   certificate serving.

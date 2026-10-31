@@ -305,11 +305,16 @@ Three properties worth knowing:
   resolver answers with the address it should. That catches the common shape of
   the rebinding problem below — device and guest behind the same router — but it
   measures *this* machine's resolver, not the guest's, so it only ever warns.
-- **It can fail, and failure is quiet.** No network, no private address, or an
-  API that will not answer, and the device falls back to the self-signed
-  certificate and the bare address. `--managed-cert off` makes that the
-  permanent choice, which is the setting for a device that must not talk to
-  anything outside the LAN.
+- **It can fail, and failure is quiet — but not final.** No network, no private
+  address, or an API that will not answer, and the device starts on the
+  self-signed certificate and the bare address. It keeps trying, though: every
+  ten seconds while it has no address, every five minutes while the API will not
+  answer, and once it has the certificate it swaps it in under the running
+  listener and starts telling guests the name. This matters because a kiosk
+  usually boots before DHCP has given it an address, and that boot used to keep
+  the self-signed certificate until the next restart. `--managed-cert off` makes
+  the self-signed path the permanent choice, which is the setting for a device
+  that must not talk to anything outside the LAN.
 
 When the cache has expired and the API cannot be reached, the **expired**
 certificate is served rather than falling back. Falling back would change the
