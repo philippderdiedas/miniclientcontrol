@@ -533,7 +533,12 @@ pub struct AppState {
     /// Whether a managed certificate is in use, which decides what name guests
     /// are given. The name itself is *not* cached: it follows the machine's
     /// current address, and the wildcard covers whatever that turns into.
-    pub managed_cert: bool,
+    ///
+    /// Not fixed at startup: a device that booted before it had an address
+    /// starts on the self-signed certificate, and `managed_cert::spawn_upgrade`
+    /// flips this once the address and the certificate are there. Only ever
+    /// goes from false to true.
+    pub managed_cert: Arc<std::sync::atomic::AtomicBool>,
     /// Operator-editable configuration. Read on nearly every request, so it sits
     /// behind its own `RwLock` rather than inside the cast session's mutex,
     /// which is held across signaling work.

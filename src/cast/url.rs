@@ -28,7 +28,7 @@ use crate::models::{AppState, Display};
 /// already goes through, is what keeps an existing one-screen venue's address
 /// unchanged across an upgrade to this feature.
 pub fn sender_url(state: &AppState, display: Option<&Display>) -> String {
-    let base = if state.managed_cert {
+    let base = if state.managed_cert.load(std::sync::atomic::Ordering::Relaxed) {
         crate::tls::managed_base_url(state.cast_tls_port)
     } else {
         None

@@ -149,10 +149,10 @@ async fn main() -> Result<()> {
     // built from that answer.
     //
     // Only for `--public-url none`: anything else is a name the operator chose.
-    let managed = if cast_listener.is_some()
+    let wants_managed = cast_listener.is_some()
         && args.managed_cert == "auto"
-        && matches!(tls::public_url(&args.public_url), tls::PublicUrl::LanAddress)
-    {
+        && matches!(tls::public_url(&args.public_url), tls::PublicUrl::LanAddress);
+    let managed = if wants_managed {
         match tls::managed_name() {
             Some(name) => {
                 // Log the mapping, not just the name: when a guest's resolver refuses
@@ -164,10 +164,13 @@ async fn main() -> Result<()> {
                     .await
                     .map(|bundle| (name, bundle))
             }
+            // Not final: a kiosk often boots before DHCP has given it an
+            // address. `managed_cert::spawn_upgrade` switches over once there
+            // is one, so this start does not decide the rest of the day.
             None => {
                 tracing::info!(
-                    "No private IPv4 and no usable IPv6 address; keeping the \
-                     self-signed certificate and the bare LAN address"
+                    "No private IPv4 and no usable IPv6 address yet; starting on the \
+                     self-signed certificate and switching once there is one"
                 );
                 None
             }
@@ -216,7 +219,7 @@ async fn main() -> Result<()> {
         displays: Arc::new(displays),
         cast_attempts: Arc::new(Mutex::new(Default::default())),
         cast_tls_port,
-        managed_cert: managed_cert_active,
+        managed_cert: Arc::new(std::sync::atomic::AtomicBool::new(managed_cert_active)),
         settings: Arc::new(tokio::sync::RwLock::new(app_settings)),
         locks,
         login_attempts: Arc::new(Mutex::new(Default::default())),
@@ -377,6 +380,11 @@ async fn main() -> Result<()> {
                         name.host,
                         bundle,
                     );
+                } else if wants_managed {
+                    // No address at boot, or no certificate to be had yet:
+                    // keep trying, rather than leave guests on the self-signed
+                    // certificate and the bare address until the next restart.
+                    managed_cert::spawn_upgrade(config.clone(), state.clone());
                 }
                 // Marked, so a session cookie set over TLS is `Secure`.
                 let tls_app = app.clone().layer(axum::Extension(accounts::middleware::ViaTls));

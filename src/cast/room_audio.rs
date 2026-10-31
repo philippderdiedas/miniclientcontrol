@@ -285,7 +285,7 @@ mod tests {
             args: Arc::new(args),
             displays: Arc::new(displays),
             cast_tls_port: 0,
-            managed_cert: false,
+            managed_cert: Default::default(),
             settings: Arc::new(tokio::sync::RwLock::new(settings)),
             locks: Default::default(),
             login_attempts: Default::default(),

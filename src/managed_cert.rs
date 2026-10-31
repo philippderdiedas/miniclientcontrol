@@ -41,6 +41,10 @@ const CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
 /// Retry delay after a failed fetch. Short enough that a device which booted
 /// before the network was up recovers on its own.
 const RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How often `spawn_upgrade` looks for an address while there is none. Short,
+/// because it is the time from the DHCP lease to guests getting the real name,
+/// and asking the kernel for the local address costs nothing.
+const ADDRESS_POLL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct Bundle {
@@ -329,6 +333,55 @@ pub fn spawn_renewal(
                     }
                 }
                 Err(e) => warn!("Renewing the managed certificate failed: {:#}", e),
+            }
+        }
+    });
+}
+
+/// Switch a device that started on the self-signed certificate over to the
+/// managed one, as soon as that is possible.
+///
+/// `main` decides once, at boot, and a kiosk regularly boots before DHCP has
+/// given it an address: that start used to keep the self-signed certificate
+/// and the bare address for the whole day -- a warning page for every guest,
+/// and a QR code naming the address rather than the name. This waits for a
+/// private address, takes the certificate the way `main` would have (cache
+/// first, then a fetch), swaps it in under the running listener with
+/// `reload_from_pem` -- no restart, so the display browser is not navigated --
+/// and only then flips `AppState::managed_cert`, so the name guests are told
+/// never runs ahead of the certificate that has to cover it. The screens are
+/// poked so the address and QR code they show follow. From there on it is
+/// `spawn_renewal`'s job.
+pub fn spawn_upgrade(config: axum_server::tls_rustls::RustlsConfig, state: crate::models::AppState) {
+    tokio::spawn(async move {
+        let cert_path = state.args.cast_cert_path.clone();
+        loop {
+            let Some(name) = crate::tls::managed_name() else {
+                tokio::time::sleep(ADDRESS_POLL).await;
+                continue;
+            };
+            info!("Advertising this device as {} -> {}", name.host, name.addr);
+            crate::tls::check_managed_name(&name).await;
+            let Some(bundle) = obtain(&cert_path, &name.host).await else {
+                tokio::time::sleep(RETRY_AFTER).await;
+                continue;
+            };
+            match config
+                .reload_from_pem(bundle.fullchain.clone().into_bytes(), bundle.key.clone().into_bytes())
+                .await
+            {
+                Ok(()) => {
+                    state.managed_cert.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let base = crate::cast::sender_url(&state, None);
+                    info!("Switched to the managed certificate for {}. Guests: {base}", name.host);
+                    state.notify_overlay_changed();
+                    spawn_renewal(config, cert_path, name.host, bundle);
+                    return;
+                }
+                Err(e) => {
+                    warn!("The managed certificate could not be loaded: {:#}", e);
+                    tokio::time::sleep(RETRY_AFTER).await;
+                }
             }
         }
     });

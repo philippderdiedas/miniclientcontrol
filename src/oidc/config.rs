@@ -82,7 +82,7 @@ pub fn redirect_uri(state: &AppState) -> String {
 /// former is the same *name*; `--public-url` pins one. A provider refuses a
 /// redirect URI that changed, so the admin card warns when this is false.
 pub fn redirect_stable(state: &AppState) -> bool {
-    state.managed_cert
+    state.managed_cert.load(std::sync::atomic::Ordering::Relaxed)
         || !matches!(crate::tls::public_url(&state.args.public_url), crate::tls::PublicUrl::LanAddress)
 }
 
