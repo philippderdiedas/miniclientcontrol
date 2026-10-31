@@ -33,12 +33,27 @@ impl casttarget::AccessHook for NativeCastHook {
 use crate::models::{AppState, Display, OverrideItem};
 
 const BASE_CAST_PORT: u16 = 8009;
+/// How long to wait before trying again when the cast.db cannot be loaded or a
+/// receiver does not start. A kiosk often boots before DHCP has given it an
+/// address, and the cast.db of a fresh one comes over the network.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Start one native-cast receiver per declared display. Receivers live until the
 /// process ends (like the browser the controller does not kill), so their handles
 /// are deliberately leaked with `std::mem::forget` -- SP3+ may hold them in state
 /// for teardown.
+///
+/// Runs on its own thread and retries rather than giving up: loading the
+/// cast.db may need the network (a fresh kiosk provisions it by fetch), and a
+/// first attempt during boot used to leave casting off until the next restart.
+/// Not on the async runtime, because everything casttarget does is blocking;
+/// the runtime's handle is taken here, where there is a current one.
 pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>) {
+    let handle = tokio::runtime::Handle::current();
+    std::thread::spawn(move || run(state, configured, handle));
+}
+
+fn run(state: AppState, configured: Vec<crate::display::DisplayConfig>, handle: tokio::runtime::Handle) {
     let cast_db = state.args.cast_db_path();
     let db_str = cast_db.to_string_lossy().to_string();
 
@@ -47,11 +62,31 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
     // ensure_identity bootstraps an empty cast.db from the fetch endpoint when
     // egress is allowed, so a fresh kiosk provisions itself instead of silently
     // starting no receiver.
-    let base = match casttarget::certstore::ensure_identity(&db_str) {
-        Ok(id) => casttarget::cast::stable_device_id(&id.device_cert_der),
-        Err(e) => {
-            tracing::error!("native-cast: cast.db ({}) nicht ladbar: {:#} -- Receiver aus", db_str, e);
-            return;
+    let mut failed_before = false;
+    let base = loop {
+        match casttarget::certstore::ensure_identity(&db_str) {
+            Ok(id) => {
+                if failed_before {
+                    tracing::info!("native-cast: cast.db ({}) jetzt geladen", db_str);
+                }
+                break casttarget::cast::stable_device_id(&id.device_cert_der);
+            }
+            Err(e) => {
+                // Said once at error level; the retries would otherwise fill
+                // the journal every thirty seconds for as long as it lasts.
+                if failed_before {
+                    tracing::debug!("native-cast: cast.db noch nicht ladbar: {:#}", e);
+                } else {
+                    tracing::error!(
+                        "native-cast: cast.db ({}) nicht ladbar: {:#} -- neuer Versuch alle {} s",
+                        db_str,
+                        e,
+                        RETRY.as_secs()
+                    );
+                    failed_before = true;
+                }
+                std::thread::sleep(RETRY);
+            }
         }
     };
 
@@ -75,7 +110,7 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
         };
 
         let hook = Arc::new(NativeCastHook {
-            handle: tokio::runtime::Handle::current(),
+            handle: handle.clone(),
             pool: state.pool.clone(),
             screen: screen.clone(),
             settings: state.settings.clone(),
@@ -86,7 +121,7 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
         // Drain the channel on its own thread (so block_on is not on a runtime
         // worker) and turn events into the external-window override.
         let display = state.displays.iter().find(|d| d.name == screen).cloned();
-        let handle = tokio::runtime::Handle::current();
+        let drain_handle = handle.clone();
         let drain_screen = screen.clone();
         std::thread::spawn(move || {
             while let Ok(ev) = rx.recv() {
@@ -94,35 +129,59 @@ pub fn supervise(state: AppState, configured: Vec<crate::display::DisplayConfig>
                 match ev {
                     casttarget::CastEvent::Started { app_id } => {
                         tracing::info!("native-cast: start auf {} (app_id={})", drain_screen, app_id);
-                        handle.block_on(activate(display));
+                        drain_handle.block_on(activate(display));
                     }
                     casttarget::CastEvent::Ended => {
                         tracing::info!("native-cast: ende auf {}", drain_screen);
-                        handle.block_on(deactivate(display));
+                        drain_handle.block_on(deactivate(display));
                     }
                 }
             }
         });
 
         let fetch = index == 0; // only one receiver refetches the shared cast.db
-        match casttarget::start(
-            casttarget::ReceiverConfig {
-                name: cast_name,
-                port,
-                device_id,
-                app_id,
-                cast_db: cast_db.clone(),
-                fetch,
-            },
-            hook,
-            tx,
-        ) {
-            Ok(handle) => {
-                tracing::info!("native-cast: '{}' auf Port {} announced", screen, port);
-                std::mem::forget(handle); // lives until process exit
+        let cast_db = cast_db.clone();
+        // Each screen retries on its own thread, so one that cannot start does
+        // not hold back the next. A missing address no longer fails a start --
+        // casttarget waits for one before announcing -- so what is left to
+        // retry is a port someone else holds, or a cast.db that broke since.
+        std::thread::spawn(move || {
+            let mut failed_before = false;
+            loop {
+                let started = casttarget::start(
+                    casttarget::ReceiverConfig {
+                        name: cast_name.clone(),
+                        port,
+                        device_id: device_id.clone(),
+                        app_id: app_id.clone(),
+                        cast_db: cast_db.clone(),
+                        fetch,
+                    },
+                    hook.clone(),
+                    tx.clone(),
+                );
+                match started {
+                    Ok(receiver) => {
+                        tracing::info!("native-cast: '{}' auf Port {} gestartet", screen, port);
+                        std::mem::forget(receiver); // lives until process exit
+                        return;
+                    }
+                    Err(e) if failed_before => {
+                        tracing::debug!("native-cast: Receiver '{}' noch nicht gestartet: {:#}", screen, e)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "native-cast: Receiver '{}' nicht gestartet: {:#} -- neuer Versuch alle {} s",
+                            screen,
+                            e,
+                            RETRY.as_secs()
+                        );
+                        failed_before = true;
+                    }
+                }
+                std::thread::sleep(RETRY);
             }
-            Err(e) => tracing::error!("native-cast: Receiver '{}' nicht gestartet: {:#}", screen, e),
-        }
+        });
     }
 }
 
